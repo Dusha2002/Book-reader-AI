@@ -1,0 +1,78 @@
+name: translate-devices-and-desires
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/translate-devices.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Book Reader AI
+        run: pip install -e .
+
+      - name: Translate full book with OpenRouter
+        shell: bash
+        env:
+          BOOKAI_CONCURRENCY: '2'
+          BOOKAI_BATCH_CHARS: '50000'
+          BOOKAI_ANALYSIS_CHARS: '1500000'
+        run: |
+          set -euo pipefail
+          set -a
+          source .env
+          set +a
+          test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
+          bookai translate Devices_and_Desires.fb2 \
+            --output Devices_and_Desires_RU.fb2 \
+            --mode optimal 2>&1 | tee translation.log
+
+      - name: Validate translated FB2
+        if: success()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from lxml import etree
+          p = Path('Devices_and_Desires_RU.fb2')
+          assert p.exists() and p.stat().st_size > 100000
+          etree.parse(str(p))
+          text = p.read_text('utf-8', errors='ignore')
+          cyr = sum(ch.isalpha() and ('А' <= ch <= 'я' or ch in 'Ёё') for ch in text)
+          lat = sum(ch.isalpha() and ('A' <= ch <= 'Z' or 'a' <= ch <= 'z') for ch in text)
+          print(f'output_bytes={p.stat().st_size}')
+          print(f'cyrillic_letters={cyr}')
+          print(f'latin_letters={lat}')
+          print(f'cyrillic_share={cyr/max(cyr+lat,1):.4f}')
+          PY
+
+      - name: Upload translated book
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Devices_and_Desires_RU
+          path: Devices_and_Desires_RU.fb2
+          retention-days: 3
+
+      - name: Upload diagnostic state on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: translation-diagnostics
+          path: |
+            translation.log
+            .bookai-cache/**
+          if-no-files-found: ignore
+          retention-days: 1
