@@ -1,7 +1,7 @@
 name: translate-book
 on:
   push:
-    branches: [translation-recovery-v2]
+    branches: [translation-recovery-v3]
 
 permissions:
   contents: read
