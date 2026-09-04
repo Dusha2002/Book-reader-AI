@@ -22,9 +22,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .bookai-cache
-          key: bookai-devices-recovery-${{ github.run_id }}
+          key: bookai-devices-recovery-v3-${{ github.run_id }}
           restore-keys: |
-            bookai-devices-recovery-
+            bookai-devices-recovery-v3-
 
       - name: Install project
         run: pip install -e .
@@ -34,9 +34,10 @@ jobs:
         env:
           BOOKAI_CONCURRENCY: '3'
           BOOKAI_BATCH_CHARS: '40000'
-          BOOKAI_ANALYSIS_CHARS: '1500000'
+          BOOKAI_ANALYSIS_CHARS: '104000'
           BOOKAI_RETRY_ATTEMPTS: '3'
           BOOKAI_REQUEST_TIMEOUT: '300'
+          BOOKAI_ANALYZER_MODEL: 'deepseek/deepseek-v4-flash-0731'
           BOOKAI_EDITOR_MODEL: 'deepseek/deepseek-v4-flash-0731'
         run: |
           set -euo pipefail
@@ -45,7 +46,7 @@ jobs:
           set +a
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          echo "Starting hardened resumable Optimal translation"
+          echo "Starting compact-analysis resumable Optimal translation"
           bookai Devices_and_Desires.fb2 \
             --output Devices_and_Desires_RU.fb2 \
             --mode optimal 2>&1 | tee translation.log
@@ -88,7 +89,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .bookai-cache
-          key: bookai-devices-recovery-${{ github.run_id }}
+          key: bookai-devices-recovery-v3-${{ github.run_id }}
 
       - name: Upload diagnostics
         if: failure() || cancelled()
