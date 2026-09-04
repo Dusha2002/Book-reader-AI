@@ -18,9 +18,10 @@ def resilient_segment_map(
     """Recover strict id→text calls by retrying, then recursively splitting.
 
     Cheap models are much more likely to violate JSON/id contracts on larger
-    batches than on one or two targets. We never guess missing ids. A failed
-    multi-target call is divided in half until each sub-batch is either accepted
-    by its normal strict validator or fails explicitly.
+    batches than on one or two targets. We never guess missing ids. Only
+    structured-output/validation failures (ValueError, including JSON decode
+    errors) trigger splitting; network/rate-limit failures propagate normally so
+    a provider outage cannot explode into dozens of requests.
     """
     if not segments:
         return {}
@@ -36,6 +37,9 @@ def resilient_segment_map(
                 f"attempt={attempt + 1}/{max(1, attempts)} error={type(exc).__name__}",
                 flush=True,
             )
+
+    if not isinstance(last_error, ValueError):
+        raise RuntimeError(f"{label} failed due to provider/transport error") from last_error
 
     if len(segments) == 1:
         raise RuntimeError(f"{label} failed strict structured output for {segments[0].id}") from last_error
