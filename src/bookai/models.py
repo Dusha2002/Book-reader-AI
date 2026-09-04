@@ -45,5 +45,28 @@ class BookDocument:
     payload: object
 
 
+@dataclass(slots=True)
+class GateFinding:
+    id: str
+    severity: str = "medium"  # medium | hard
+    reason: str = ""
+
+
 class LLMProvider(Protocol):
+    model: str
+    usage: dict
+
     def complete(self, system: str, user: str, *, temperature: float = 0.2) -> str: ...
+
+
+class SegmentTranslator(Protocol):
+    name: str
+
+    def translate(
+        self,
+        segments: list[Segment],
+        memory: BookMemory,
+        *,
+        context_before: list[Segment] | None = None,
+        context_after: list[Segment] | None = None,
+    ) -> dict[str, str]: ...
