@@ -2,7 +2,7 @@ name: literary-benchmark
 
 on:
   push:
-    branches: [literary-harness-v5]
+    branches: [literary-harness-v6]
     paths:
       - '.github/workflows/literary-benchmark.yml'
       - 'scripts/literary_benchmark.py'
@@ -33,8 +33,6 @@ jobs:
           source .env
           set +a
 
-          # Explicit runtime settings are applied AFTER .env. The Python harness
-          # also enforces DeepSeek V4 Flash as a hard ceiling.
           export BOOKAI_TRANSLATOR_BACKEND='api'
           export BOOKAI_MAX_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
@@ -45,8 +43,6 @@ jobs:
           export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_REASONING='none'
 
-          # Full translation/polish may use normal retries. Compact control-plane
-          # roles are bounded separately so nested retries cannot stall a scene.
           export BOOKAI_RETRY_ATTEMPTS='3'
           export BOOKAI_REQUEST_TIMEOUT='180'
           export BOOKAI_ANALYZER_RETRY_ATTEMPTS='1'
@@ -55,6 +51,7 @@ jobs:
           export BOOKAI_GATE_REQUEST_TIMEOUT='90'
           export BOOKAI_MEMORY_RETRY_ATTEMPTS='2'
           export BOOKAI_MEMORY_REQUEST_TIMEOUT='75'
+          export BOOKAI_BENCHMARK_CONCURRENCY='2'
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
 
           python scripts/literary_benchmark.py 2>&1 | tee literary-benchmark.log
@@ -63,7 +60,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: literary-benchmark-flash-v5
+          name: literary-benchmark-flash-v6
           path: |
             literary_benchmark_output.json
             literary-benchmark.log
