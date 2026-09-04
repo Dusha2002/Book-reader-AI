@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "book-reader-ai"
-version = "0.2.0"
-description = "Context-aware literary book translation pipeline for FB2, EPUB, DOCX and TXT"
+version = "0.3.0"
+description = "Selective multi-model literary translation harness for FB2, EPUB, DOCX and TXT"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -20,7 +20,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3,<9", "pytest-asyncio>=0.24,<1"]
+dev = ["pytest>=8.3,<10", "pytest-asyncio>=0.24,<2"]
+local = ["transformers>=4.50,<6", "torch>=2.5,<3", "sentencepiece>=0.2,<1", "accelerate>=1,<2"]
 
 [project.scripts]
 bookai = "bookai.cli:app"
