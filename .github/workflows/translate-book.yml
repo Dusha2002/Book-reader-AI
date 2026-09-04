@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   translate:
@@ -17,15 +18,48 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore resumable translation cache
+      - name: Restore same-branch v5 cache when available
         id: restore-bookai-cache
         uses: actions/cache/restore@v4
         with:
           path: .bookai-cache
-          key: bookai-devices-recovery-v4-${{ github.run_id }}
+          key: bookai-devices-recovery-v5-${{ github.run_id }}
           restore-keys: |
-            bookai-devices-recovery-v4-
-            bookai-devices-recovery-v3-
+            bookai-devices-recovery-v5-
+
+      - name: Download exact v3 recovery artifact when cache is absent
+        if: ${{ hashFiles('.bookai-cache/*.optimal.json') == '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: translation-diagnostics
+          path: .v3-recovery
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 33865525702
+
+      - name: Import exact v3 saved state
+        if: ${{ hashFiles('.bookai-cache/*.optimal.json') == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d .v3-recovery/.bookai-cache
+          mkdir -p .bookai-cache
+          cp -a .v3-recovery/.bookai-cache/. .bookai-cache/
+
+      - name: Verify recovery state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob, json
+          paths = glob.glob('.bookai-cache/*.optimal.json')
+          assert paths, 'No recovery state found'
+          state = json.load(open(paths[0], encoding='utf-8'))
+          n = len(state.get('translations') or {})
+          chapters = len(state.get('completed_chapters') or [])
+          print(f'[bookai-recovery] restored_translations={n} completed_chapters={chapters}')
+          assert n >= 3294, f'Expected at least 3294 saved translations, got {n}'
+          PY
 
       - name: Install project
         run: pip install -e .
@@ -57,7 +91,7 @@ jobs:
 
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          echo "Starting v4 resumable Optimal translation"
+          echo "Starting v5 exact-state resumable Optimal translation"
           echo "Runtime: concurrency=$BOOKAI_CONCURRENCY translate_batch=$BOOKAI_BATCH_CHARS gate_batch=$BOOKAI_GATE_BATCH_CHARS edit_batch=$BOOKAI_EDIT_BATCH_CHARS analyzer=$BOOKAI_ANALYZER_MODEL editor=$BOOKAI_EDITOR_MODEL"
           bookai Devices_and_Desires.fb2 \
             --output Devices_and_Desires_RU.fb2 \
@@ -96,12 +130,12 @@ jobs:
           path: Devices_and_Desires_RU.fb2
           retention-days: 3
 
-      - name: Save translation cache even after failure
+      - name: Save v5 translation cache even after failure
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .bookai-cache
-          key: bookai-devices-recovery-v4-${{ github.run_id }}
+          key: bookai-devices-recovery-v5-${{ github.run_id }}
 
       - name: Upload diagnostics
         if: failure() || cancelled()
