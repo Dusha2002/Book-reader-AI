@@ -93,7 +93,7 @@ def _context_for(segments: list[Segment], batch: list[Segment], radius: int = 2)
 
 
 def _analysis_sample(chapters: list[tuple[str, list[Segment]]], char_limit: int) -> str:
-    """Prefer whole-book analysis; for very large books, sample evenly across chapters."""
+    """Sample evenly across chapters so analysis stays compact for long books."""
     full = "\n\n".join(s.text for _, chapter in chapters for s in chapter)
     if len(full) <= char_limit:
         return full
@@ -144,7 +144,7 @@ def translate_book(
         memory = _memory_from_dict(memory_data)
     else:
         _notify(progress, phase="analyzing_book", progress=3, chapters=len(chapters))
-        analysis_chars = max(50000, int(os.getenv("BOOKAI_ANALYSIS_CHARS") or "1500000"))
+        analysis_chars = max(50000, int(os.getenv("BOOKAI_ANALYSIS_CHARS") or "104000"))
         memory = harness.analyze(_analysis_sample(chapters, analysis_chars))
         state["memory"] = asdict(memory)
         state.setdefault("translations", {})
@@ -153,16 +153,26 @@ def translate_book(
     translated: dict[str, str] = dict(state.get("translations") or {})
     total = len(source_segments)
     completed = sum(s.id in translated for s in source_segments)
-    batch_chars = max(4000, int(os.getenv("BOOKAI_BATCH_CHARS") or "100000"))
-    concurrency = max(1, min(16, int(os.getenv("BOOKAI_CONCURRENCY") or "4")))
-    _notify(progress, phase="translating", progress=max(5, int(completed / total * 90)), completed=completed, total=total, concurrency=concurrency)
+    batch_chars = max(4000, int(os.getenv("BOOKAI_BATCH_CHARS") or "40000"))
+    gate_batch_chars = max(4000, int(os.getenv("BOOKAI_GATE_BATCH_CHARS") or "18000"))
+    edit_batch_chars = max(4000, int(os.getenv("BOOKAI_EDIT_BATCH_CHARS") or "12000"))
+    concurrency = max(1, min(16, int(os.getenv("BOOKAI_CONCURRENCY") or "3")))
+    _notify(
+        progress,
+        phase="translating",
+        progress=max(5, int(completed / total * 90)),
+        completed=completed,
+        total=total,
+        concurrency=concurrency,
+        restored=bool(completed),
+    )
 
-    # The global book bible makes chapters independent enough to translate concurrently.
-    # A chapter remains intact whenever it fits the model context.
     def process_chapter(name: str, chapter: list[Segment]):
         existing = {s.id: translated[s.id] for s in chapter if s.id in translated}
         new: dict[str, str] = {}
         target_for_gate: list[Segment] = []
+        translated_in_chapter = len(existing)
+
         for batch in _batches(chapter, batch_chars):
             pending = [s for s in batch if s.id not in existing]
             if not pending:
@@ -171,19 +181,63 @@ def translate_book(
             draft = harness.translate(pending, memory, context_before=before, context_after=after)
             new.update(draft)
             target_for_gate.extend(pending)
+            translated_in_chapter += len(pending)
+            _notify(
+                progress,
+                phase="chapter_translate",
+                chapter=name,
+                translated=translated_in_chapter,
+                total=len(chapter),
+            )
 
         findings = []
         if mode in {"optimal", "literary"} and target_for_gate:
             chapter_draft = {**existing, **new}
-            findings = harness.gate_findings(target_for_gate, chapter_draft, memory)
+            findings_by_id = {}
+            checked = 0
+            for gate_chunk in _batches(target_for_gate, gate_batch_chars):
+                for finding in harness.gate_findings(gate_chunk, chapter_draft, memory):
+                    findings_by_id[finding.id] = finding
+                checked += len(gate_chunk)
+                _notify(
+                    progress,
+                    phase="chapter_gate",
+                    chapter=name,
+                    checked=checked,
+                    total=len(target_for_gate),
+                    flagged=len(findings_by_id),
+                )
+
+            findings = list(findings_by_id.values())
             finding_by_id = {f.id: f for f in findings}
             medium = [s for s in target_for_gate if s.id in finding_by_id and finding_by_id[s.id].severity == "medium"]
             hard = [s for s in target_for_gate if s.id in finding_by_id and finding_by_id[s.id].severity == "hard"]
             to_edit = medium + hard
-            if to_edit:
-                new.update(harness.edit(to_edit, {**existing, **new}, memory))
+
+            edited = 0
+            for edit_chunk in _batches(to_edit, edit_batch_chars):
+                new.update(harness.edit(edit_chunk, {**existing, **new}, memory))
+                edited += len(edit_chunk)
+                _notify(
+                    progress,
+                    phase="chapter_edit",
+                    chapter=name,
+                    edited=edited,
+                    total=len(to_edit),
+                )
+
             if mode == "literary" and hard:
-                new.update(harness.hard_edit(hard, {**existing, **new}, memory))
+                hard_done = 0
+                for hard_chunk in _batches(hard, edit_batch_chars):
+                    new.update(harness.hard_edit(hard_chunk, {**existing, **new}, memory))
+                    hard_done += len(hard_chunk)
+                    _notify(
+                        progress,
+                        phase="chapter_hard_edit",
+                        chapter=name,
+                        edited=hard_done,
+                        total=len(hard),
+                    )
         return name, new, findings
 
     completed_chapters = set(state.get("completed_chapters") or [])
@@ -231,7 +285,6 @@ def translate_book(
         failed_names = ", ".join(name for name, _ in errors)
         raise RuntimeError(f"Chapter translation failed after retries: {failed_names}") from errors[0][1]
 
-    # One final continuity update keeps useful cache metadata without serializing every chapter.
     if memory_updates and mode != "fast" and chapters:
         _, last_chapter_segments = chapters[-1]
         last_translations = {s.id: translated[s.id] for s in last_chapter_segments if s.id in translated}
