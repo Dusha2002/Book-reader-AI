@@ -1,0 +1,141 @@
+name: full-literary-translation
+
+on:
+  push:
+    branches: [translation-literary-v1]
+
+permissions:
+  contents: read
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install project
+        run: pip install -e .
+
+      - name: Start from a clean literary cache
+        shell: bash
+        run: rm -rf .bookai-cache && mkdir -p .bookai-cache
+
+      - name: Translate complete book with literary QA
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          source .env
+          set +a
+
+          export BOOKAI_TRANSLATOR_BACKEND='api'
+          export BOOKAI_MAX_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_HARD_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_LLM_GATE='true'
+          export BOOKAI_REASONING='none'
+
+          # Quality-first settings. Speed tuning comes only after this baseline.
+          export BOOKAI_BATCH_CHARS='10000'
+          export BOOKAI_POLISH_BATCH_CHARS='7000'
+          export BOOKAI_GATE_BATCH_CHARS='8000'
+          export BOOKAI_EDIT_BATCH_CHARS='6000'
+          export BOOKAI_ANALYSIS_CHARS='90000'
+          export BOOKAI_QUALITY_REPAIR_ROUNDS='2'
+          export BOOKAI_RETRY_ATTEMPTS='3'
+          export BOOKAI_REQUEST_TIMEOUT='180'
+          export BOOKAI_ANALYZER_MAX_TOKENS='4096'
+          export BOOKAI_GATE_MAX_TOKENS='8192'
+          export BOOKAI_MEMORY_MAX_TOKENS='4096'
+
+          test -f Devices_and_Desires.fb2
+          test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
+          echo '[full-literary] fresh-cache=true model-ceiling=deepseek/deepseek-v4-flash-0731'
+          bookai Devices_and_Desires.fb2 \
+            --output Devices_and_Desires_RU_LITERARY.fb2 \
+            --mode optimal 2>&1 | tee translation.log
+
+      - name: Validate complete FB2
+        if: success()
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from lxml import etree
+          from bookai.parsers.base import load_book
+          from bookai.pipeline import _should_translate
+          import re
+
+          src = Path('Devices_and_Desires.fb2')
+          out = Path('Devices_and_Desires_RU_LITERARY.fb2')
+          assert out.exists() and out.stat().st_size > 100000
+          etree.parse(str(out))
+
+          source_doc = load_book(src)
+          output_doc = load_book(out)
+          source_targets = [s for s in source_doc.segments if _should_translate(s.text)]
+          output_by_id = {s.id: s.text for s in output_doc.segments}
+          assert len(output_doc.segments) == len(source_doc.segments), (
+              len(source_doc.segments), len(output_doc.segments)
+          )
+          assert all(s.id in output_by_id for s in source_targets)
+
+          translated = [output_by_id[s.id] for s in source_targets]
+          cyr = sum(len(re.findall(r'[А-Яа-яЁё]', t)) for t in translated)
+          lat = sum(len(re.findall(r'[A-Za-z]', t)) for t in translated)
+          share = cyr / max(cyr + lat, 1)
+
+          suspicious = []
+          unchanged = []
+          for s in source_targets:
+              text = output_by_id[s.id]
+              l = len(re.findall(r'[A-Za-z]', text))
+              c = len(re.findall(r'[А-Яа-яЁё]', text))
+              if l >= 20 and c < max(4, l // 4):
+                  suspicious.append((s.id, text[:180]))
+              if text.strip() == s.text.strip():
+                  unchanged.append((s.id, text[:180]))
+
+          print(f'[full-literary] source_targets={len(source_targets)}')
+          print(f'[full-literary] output_bytes={out.stat().st_size}')
+          print(f'[full-literary] cyrillic_share={share:.5f}')
+          print(f'[full-literary] suspicious_english={len(suspicious)}')
+          print(f'[full-literary] unchanged_targets={len(unchanged)}')
+          for item in suspicious[:10]:
+              print('SUSPECT', item)
+          for item in unchanged[:10]:
+              print('UNCHANGED', item)
+
+          assert share > 0.95, f'Unexpectedly low Cyrillic share: {share:.4f}'
+          assert len(suspicious) <= 3, f'Substantial English remains: {len(suspicious)}'
+          assert not unchanged, f'Unchanged source targets remain: {len(unchanged)}'
+          PY
+
+      - name: Upload translated book
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Devices_and_Desires_RU_LITERARY
+          path: Devices_and_Desires_RU_LITERARY.fb2
+          retention-days: 3
+
+      - name: Upload resumable state and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-literary-state
+          path: |
+            translation.log
+            .bookai-cache/**
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 2
