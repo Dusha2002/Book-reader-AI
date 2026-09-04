@@ -27,6 +27,14 @@ class RoleProvider:
             mapping = {"s000000": "Первый.", "s000001": "ПЛОХО", "s000002": "Третий."}
             return json.dumps({sid: mapping.get(sid, "Перевод.") for sid in ids})
         if self.role == "gate":
+            if "SEMANTIC COVERAGE auditor" in system:
+                return json.dumps({"issues": []})
+            if "Choose the better of two Russian translations" in system:
+                ids = []
+                for token in user.split('"'):
+                    if token.startswith('s') and len(token) == 7 and token[1:].isdigit() and token not in ids:
+                        ids.append(token)
+                return json.dumps({sid: "B" for sid in ids})
             return json.dumps({"issues": [{"id": "s000001", "severity": "medium", "reason": "awkward"}]})
         if self.role == "editor":
             if "LITERARY POLISH PASS" in system:
@@ -69,8 +77,8 @@ def test_optimal_polishes_all_then_only_repairs_flagged_segments(tmp_path: Path)
     polish_targets = json.loads(polish_calls[0][1].split("TARGETS:", 1)[1].split("\nSilently", 1)[0])
     assert set(polish_targets) == {"s000000", "s000001", "s000002"}
 
-    # The mock gate keeps flagging the same segment, so two bounded repairs are
-    # allowed. Neighbours remain read-only context and never become edit targets.
+    # The literary mock keeps flagging the same segment, so two bounded repairs
+    # are allowed. The independent semantic auditor reports no semantic defect.
     assert len(repair_calls) == 2
     for _system, user in repair_calls:
         pairs = json.loads(user.split("PAIRS:", 1)[1])
