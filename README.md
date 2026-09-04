@@ -25,7 +25,7 @@ Set these environment variables:
 ```bash
 export BOOKAI_API_KEY='...'
 export BOOKAI_BASE_URL='https://api.deepseek.com'
-export BOOKAI_MODEL='deepseek-chat'
+export BOOKAI_MODEL='deepseek-v4-pro'
 ```
 
 ## CLI
