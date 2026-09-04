@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -108,21 +110,35 @@ def main() -> None:
         "model_ceiling": "deepseek/deepseek-v4-flash-0731",
         "reference_used_in_generation": False,
         "scenes": {},
+        "failures": {},
     }
     _persist_result(result, harness)
 
-    for name, ids in BENCHMARK.items():
-        print(f"[benchmark] starting {name}", flush=True)
-        try:
-            result["scenes"][name] = run_group(harness, source_segments, by_id, memory, name, ids)
-        except BaseException as exc:
-            result["failed_scene"] = {"name": name, "error": type(exc).__name__, "message": str(exc)}
+    workers = max(1, min(2, int(os.getenv("BOOKAI_BENCHMARK_CONCURRENCY") or "2")))
+    print(f"[benchmark] scene_workers={workers}", flush=True)
+    futures = {}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for name, ids in BENCHMARK.items():
+            print(f"[benchmark] starting {name}", flush=True)
+            futures[pool.submit(run_group, harness, source_segments, by_id, memory, name, ids)] = name
+
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                result["scenes"][name] = future.result()
+            except BaseException as exc:
+                result["failures"][name] = {
+                    "error": type(exc).__name__,
+                    "message": str(exc),
+                }
+                print(f"[benchmark] failed {name}: {type(exc).__name__}: {exc}", flush=True)
+            else:
+                print(f"[benchmark] finished {name}", flush=True)
             _persist_result(result, harness)
-            raise
-        else:
-            result.pop("failed_scene", None)
-            _persist_result(result, harness)
-            print(f"[benchmark] finished {name}", flush=True)
+
+    if result["failures"]:
+        names = ", ".join(sorted(result["failures"]))
+        raise RuntimeError(f"Benchmark scenes failed strict QA: {names}")
 
     print("[benchmark] usage=" + json.dumps(harness.usage, ensure_ascii=False), flush=True)
     print(f"[benchmark] output={OUTPUT}", flush=True)
