@@ -16,7 +16,7 @@ from .quality import batch_issues, candidate_issues, hard_ids
 ProgressCallback = Callable[[dict], None]
 MODE_ALIASES = {"standard": "optimal", "high": "literary"}
 VALID_MODES = {"fast", "optimal", "literary", *MODE_ALIASES}
-PIPELINE_VERSION = "literary-harness-v2"
+PIPELINE_VERSION = "literary-harness-v2.1"
 
 
 def _batches(segments: list[Segment], char_limit: int = 12000):
@@ -199,18 +199,21 @@ def translate_book(
             "translations": {},
             "completed_chapters": [],
             "chapter_briefs": {},
+            "polished_chapters": [],
             "qa_passed_chapters": [],
         }
         _persist(state_path, state, {}, memory)
 
     translated: dict[str, str] = dict(state.get("translations") or {})
     completed_chapters = set(state.get("completed_chapters") or [])
+    polished_chapters = set(state.get("polished_chapters") or [])
     qa_passed_chapters = set(state.get("qa_passed_chapters") or [])
     chapter_briefs: dict[str, str] = dict(state.get("chapter_briefs") or {})
 
     total = len(source_segments)
     completed = sum(s.id in translated for s in source_segments)
     batch_chars = max(3000, int(os.getenv("BOOKAI_BATCH_CHARS") or "12000"))
+    polish_chars = max(2500, int(os.getenv("BOOKAI_POLISH_BATCH_CHARS") or "8000"))
     gate_chars = max(3000, int(os.getenv("BOOKAI_GATE_BATCH_CHARS") or "10000"))
     edit_chars = max(2000, int(os.getenv("BOOKAI_EDIT_BATCH_CHARS") or "7000"))
     max_repair_rounds = max(1, min(4, int(os.getenv("BOOKAI_QUALITY_REPAIR_ROUNDS") or "2")))
@@ -218,18 +221,17 @@ def translate_book(
     _notify(
         progress,
         phase="translating",
-        progress=max(4, int(completed / total * 90)),
+        progress=max(4, int(completed / total * 88)),
         completed=completed,
         total=total,
         restored=bool(completed),
-        strategy="sequential-chapters-validator-first",
+        strategy="faithful-draft→literary-polish→bilingual-QA→targeted-repair",
     )
 
-    # Quality modes deliberately process chapters in book order. This lets the
-    # glossary/character memory learn from chapter N before chapter N+1.
+    # Quality modes process chapters in book order so chapter N updates the
+    # terminology/voice memory before chapter N+1.
     for chapter_index, (name, chapter) in enumerate(chapters, 1):
         chapter_existing = {s.id: translated[s.id] for s in chapter if s.id in translated}
-
         if name in qa_passed_chapters and len(chapter_existing) == len(chapter):
             continue
 
@@ -248,8 +250,8 @@ def translate_book(
         else:
             local_memory = memory
 
-        # Pass 1: translate contiguous windows. Strict ID contract + deterministic
-        # hard checks mean malformed output is never cached.
+        # Pass 1 — faithful draft. No model response can enter cache unless every
+        # requested id is present and deterministic hard invariants pass.
         for batch in _batches(chapter, batch_chars):
             pending = [s for s in batch if s.id not in translated]
             if not pending:
@@ -293,15 +295,57 @@ def translate_book(
                 chapters=len(chapters),
                 completed=completed,
                 total=total,
-                progress=min(91, 4 + int(completed / total * 87)),
+                progress=min(89, 4 + int(completed / total * 85)),
             )
 
         if any(s.id not in translated for s in chapter):
-            raise RuntimeError(f"Chapter {name} has missing translated ids before QA")
+            raise RuntimeError(f"Chapter {name} has missing translated ids before polish")
+
+        if mode != "fast" and name not in polished_chapters:
+            # Pass 2 — mandatory literary polish over EVERY paragraph. This is the
+            # key small-model decomposition: fidelity is solved first; Russian prose
+            # quality is solved separately while the source remains visible.
+            polished_count = 0
+            for target_batch in _batches(chapter, polish_chars):
+                context = _translated_context(source_segments, target_batch, translated)
+                last_error: BaseException | None = None
+                accepted: dict[str, str] | None = None
+                for attempt in range(2):
+                    try:
+                        polished = harness.polish(target_batch, translated, local_memory, context=context)
+                        hard = hard_ids(batch_issues(target_batch, polished, local_memory))
+                        if hard:
+                            raise ValueError("polish hard QA failed for: " + ", ".join(sorted(hard)))
+                        accepted = polished
+                        break
+                    except BaseException as exc:
+                        last_error = exc
+                        _notify(
+                            progress,
+                            phase="polish_retry",
+                            chapter=name,
+                            attempt=attempt + 1,
+                            ids=[s.id for s in target_batch],
+                            error=type(exc).__name__,
+                        )
+                if accepted is None:
+                    raise RuntimeError(f"Literary polish failed strict acceptance in chapter {name}") from last_error
+                translated.update(accepted)
+                polished_count += len(target_batch)
+                _persist(state_path, state, translated, memory)
+                _notify(
+                    progress,
+                    phase="chapter_polish",
+                    chapter=name,
+                    polished=polished_count,
+                    total=len(chapter),
+                )
+            polished_chapters.add(name)
+            state["polished_chapters"] = sorted(polished_chapters)
+            _persist(state_path, state, translated, memory)
 
         if mode != "fast":
-            # Pass 2: bilingual QA over every segment. Deterministic checks are
-            # merged with a Flash semantic/literary audit.
+            # Pass 3 — independent bilingual Flash audit over every segment.
             findings: list[GateFinding] = []
             checked = 0
             for gate_batch in _batches(chapter, gate_chars):
@@ -316,8 +360,8 @@ def translate_book(
                     flagged=len({f.id for f in findings}),
                 )
 
-            # Pass 3: targeted repair. Hard cases first get an independent second
-            # Flash translation and blind Flash A/B choice. No expensive model.
+            # Pass 4 — targeted repair. Hard cases get an independently sampled
+            # Flash translation plus blind A/B choice; no stronger model is used.
             for repair_round in range(max_repair_rounds):
                 if not findings:
                     break
@@ -343,7 +387,6 @@ def translate_book(
                         reasons=reasons,
                         context=context,
                     )
-                    # Bad editor output is rejected; the known-good previous candidate remains.
                     if not hard_ids(batch_issues(target_batch, edited, local_memory)):
                         translated.update(edited)
                     else:
@@ -355,7 +398,6 @@ def translate_book(
                         )
 
                 _persist(state_path, state, translated, memory)
-
                 findings = []
                 for gate_batch in _batches(targets, gate_chars):
                     findings.extend(harness.gate_findings(gate_batch, translated, local_memory))
@@ -381,7 +423,7 @@ def translate_book(
         state["completed_chapters"] = sorted(completed_chapters)
         state["qa_passed_chapters"] = sorted(qa_passed_chapters)
 
-        # Pass 4: continuity memory updates after every completed chapter.
+        # Pass 5 — update continuity after every fully checked chapter.
         if memory_updates and mode != "fast":
             chapter_translations = {s.id: translated[s.id] for s in chapter}
             _notify(progress, phase="updating_memory", chapter=name, chapter_index=chapter_index)
@@ -414,6 +456,8 @@ def translate_book(
         "hard_issues": 0,
         "medium_deterministic_issues": len([i for i in final_issues if i.severity == "medium"]),
         "segments": total,
+        "model_ceiling": "deepseek/deepseek-v4-flash-0731",
+        "pipeline_version": PIPELINE_VERSION,
     }
     _persist(state_path, state, translated, memory)
     _notify(progress, phase="done", progress=100, completed=total, total=total, usage=harness.usage)
