@@ -58,11 +58,14 @@ def test_optimal_only_edits_flagged_segments(tmp_path: Path):
     assert "Первый." in text
     assert "Хороший литературный перевод." in text
     assert "Третий." in text
-    # The v2 harness permits two bounded repair passes if the QA model keeps
-    # flagging the same segment. Unflagged segments must never reach the editor.
+    # Two bounded repair passes are allowed if the mock gate keeps flagging the
+    # same segment. Neighbours may be visible as context, but only the flagged
+    # segment may appear in the editable PAIRS payload.
     assert len(editor.calls) == 2
     for _system, user in editor.calls:
-        assert '"s000001"' in user
-        assert '"s000000"' not in user
-        assert '"s000002"' not in user
+        pairs_text = user.split("PAIRS:", 1)[1]
+        pairs = json.loads(pairs_text)
+        assert set(pairs) == {"s000001"}
+        assert '"s000000"' in user.split("PAIRS:", 1)[0]
+        assert '"s000002"' in user.split("PAIRS:", 1)[0]
     assert not hard.calls
