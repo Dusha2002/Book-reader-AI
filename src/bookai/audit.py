@@ -126,24 +126,42 @@ def brief_is_corrupt(text: str) -> bool:
     return any(marker in low for marker in garbage_markers)
 
 
+def _fallback_chapter_brief() -> str:
+    """Neutral fail-safe: never inject guessed plot facts when the briefer fails."""
+    return (
+        "Надёжный локальный бриф не получен. Опирайся только на исходный текст, соседний контекст "
+        "и translation bible; сохраняй точный смысл, голос и иронию и не добавляй фактов или мотивов, "
+        "которых нет в оригинале."
+    )
+
+
 def safe_chapter_brief(
     provider: LLMProvider,
     segments: list[Segment],
     memory: BookMemory,
     *,
-    attempts: int = 3,
+    attempts: int = 2,
 ) -> str:
-    """Build a chapter brief but never accept obvious model corruption."""
-    last: str = ""
+    """Build a chapter brief without allowing a control-plane call to block the book.
+
+    A chapter brief is a quality aid, not a source of truth. Corrupt, timed-out or
+    malformed responses are retried briefly; after that we use a neutral
+    deterministic instruction so translation can proceed from source + context.
+    """
     for attempt in range(max(1, attempts)):
-        last = _raw_chapter_brief(provider, segments, memory)
-        if not brief_is_corrupt(last):
-            return last
+        try:
+            candidate = _raw_chapter_brief(provider, segments, memory)
+            if not brief_is_corrupt(candidate):
+                return candidate
+            reason = "corrupt_output"
+        except BaseException as exc:
+            reason = type(exc).__name__
         print(
-            f"[bookai-brief-retry] attempt={attempt + 1}/{max(1, attempts)} reason=corrupt_output",
+            f"[bookai-brief-retry] attempt={attempt + 1}/{max(1, attempts)} reason={reason}",
             flush=True,
         )
-    raise ValueError("Chapter brief repeatedly contained mixed-script/corrupted output")
+    print("[bookai-brief-fallback] using deterministic source-only guidance", flush=True)
+    return _fallback_chapter_brief()
 
 
 def semantic_gate_batch(
