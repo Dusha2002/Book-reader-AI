@@ -16,7 +16,7 @@ class OpenAICompatibleProvider:
     def __init__(self, api_key: str | None = None, base_url: str | None = None, model: str | None = None):
         self.api_key = api_key or os.getenv("BOOKAI_API_KEY")
         self.base_url = (base_url or os.getenv("BOOKAI_BASE_URL") or "https://api.deepseek.com").rstrip("/")
-        self.model = model or os.getenv("BOOKAI_MODEL") or "deepseek-chat"
+        self.model = model or os.getenv("BOOKAI_MODEL") or "deepseek-v4-pro"
         if not self.api_key:
             raise ValueError("BOOKAI_API_KEY is required")
 
