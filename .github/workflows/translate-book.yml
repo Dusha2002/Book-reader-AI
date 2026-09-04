@@ -34,7 +34,7 @@ jobs:
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
           echo "Starting full Optimal translation"
-          bookai translate Devices_and_Desires.fb2 \
+          bookai Devices_and_Desires.fb2 \
             --output Devices_and_Desires_RU.fb2 \
             --mode optimal 2>&1 | tee translation.log
 
