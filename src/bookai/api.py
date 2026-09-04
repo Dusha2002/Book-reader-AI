@@ -5,6 +5,7 @@ import threading
 import uuid
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 
@@ -12,6 +13,8 @@ from .harness import TranslationHarness
 from .parsers.base import SUPPORTED_SUFFIXES
 from .pipeline import MODE_ALIASES, translate_book
 from .web import PAGE
+
+load_dotenv()
 
 app = FastAPI(title="Book Reader AI", version="0.3.0")
 WORK = Path(".bookai-work")
