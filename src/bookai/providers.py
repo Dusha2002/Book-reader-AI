@@ -19,6 +19,9 @@ class CappedOpenAICompatibleProvider(OpenAICompatibleProvider):
     affected by these compact-role limits.
     """
 
+    _DEFAULT_ATTEMPTS = {"analyzer": 1, "gate": 2, "memory": 2}
+    _DEFAULT_TIMEOUTS = {"analyzer": 75.0, "gate": 90.0, "memory": 75.0}
+
     def __init__(
         self,
         *args,
@@ -29,13 +32,26 @@ class CappedOpenAICompatibleProvider(OpenAICompatibleProvider):
     ):
         super().__init__(*args, **kwargs)
         self.max_tokens = max(256, int(max_tokens))
+        role_key = str(getattr(self, "role", "llm")).upper()
+        role_attempts = os.getenv(f"BOOKAI_{role_key}_RETRY_ATTEMPTS")
+        role_timeout = os.getenv(f"BOOKAI_{role_key}_REQUEST_TIMEOUT")
+        default_attempts = self._DEFAULT_ATTEMPTS.get(self.role, 2)
+        default_timeout = self._DEFAULT_TIMEOUTS.get(self.role, 90.0)
         self.max_attempts = max(
             1,
-            int(max_attempts if max_attempts is not None else (os.getenv("BOOKAI_RETRY_ATTEMPTS") or "3")),
+            int(
+                max_attempts
+                if max_attempts is not None
+                else (role_attempts or default_attempts)
+            ),
         )
         self.request_timeout = max(
             15.0,
-            float(request_timeout if request_timeout is not None else (os.getenv("BOOKAI_REQUEST_TIMEOUT") or "180")),
+            float(
+                request_timeout
+                if request_timeout is not None
+                else (role_timeout or default_timeout)
+            ),
         )
 
     def complete(self, system: str, user: str, *, temperature: float = 0.2) -> str:
