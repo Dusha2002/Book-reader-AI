@@ -3,9 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import typer
+from dotenv import load_dotenv
 
 from .harness import TranslationHarness
 from .pipeline import MODE_ALIASES, translate_book
+
+load_dotenv()
 
 app = typer.Typer(no_args_is_help=True, help="Translate FB2/EPUB/DOCX/TXT with a selective multi-model literary harness.")
 
