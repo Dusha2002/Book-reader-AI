@@ -122,6 +122,26 @@ def batch_issues(segments: list[Segment], translations: dict[str, str], memory: 
     return issues
 
 
+def _single_segment_wrapper(obj: dict, sid: str) -> str | None:
+    """Recover only unambiguous one-segment wrappers emitted by small models.
+
+    This is deliberately disabled for multi-segment batches: a wrapper then does
+    not tell us which requested id the text belongs to, so accepting it would be
+    silent corruption. For exactly one expected id, common wrapper keys are safe.
+    """
+    for key in ("translation", "translated_text", "text", "result", "output"):
+        value = obj.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    nested = obj.get("data")
+    if isinstance(nested, dict):
+        for key in ("translation", "translated_text", "text", "result", "output"):
+            value = nested.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
 def assert_exact_ids(segments: list[Segment], obj: object, role: str) -> dict[str, str]:
     """Validate structured LLM output without any source/draft fallback."""
     if not isinstance(obj, dict):
@@ -129,6 +149,14 @@ def assert_exact_ids(segments: list[Segment], obj: object, role: str) -> dict[st
     expected = [s.id for s in segments]
     expected_set = set(expected)
     actual_set = {str(k) for k in obj}
+
+    # A single target is unambiguous even if Flash wrapped it in
+    # {"translation":"..."}. Never do this for 2+ targets.
+    if len(expected) == 1 and expected[0] not in actual_set:
+        recovered = _single_segment_wrapper(obj, expected[0])
+        if recovered is not None:
+            return {expected[0]: recovered}
+
     missing = expected_set - actual_set
     extra = actual_set - expected_set
     if missing or extra:
