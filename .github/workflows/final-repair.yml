@@ -1,0 +1,160 @@
+name: final-repair-book
+on:
+  push:
+    branches: [translation-recovery-v7]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore same-branch v7 cache when available
+        uses: actions/cache/restore@v4
+        with:
+          path: .bookai-cache
+          key: bookai-devices-final-v7-${{ github.run_id }}
+          restore-keys: |
+            bookai-devices-final-v7-
+
+      - name: Download v6 saved state when v7 cache is absent
+        if: ${{ hashFiles('.bookai-cache/*.optimal.json') == '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: translation-diagnostics
+          path: .v6-recovery
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 33875608715
+
+      - name: Import v6 saved state
+        if: ${{ hashFiles('.bookai-cache/*.optimal.json') == '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d .v6-recovery/.bookai-cache
+          mkdir -p .bookai-cache
+          cp -a .v6-recovery/.bookai-cache/. .bookai-cache/
+
+      - name: Verify recovery state
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import glob, json
+          paths = glob.glob('.bookai-cache/*.optimal.json')
+          assert paths, 'No recovery state found'
+          state = json.load(open(paths[0], encoding='utf-8'))
+          n = len(state.get('translations') or {})
+          print(f'[bookai-final-repair] restored_translations={n}')
+          assert n >= 3421, f'Expected at least 3421 saved translations, got {n}'
+          PY
+
+      - name: Install project
+        run: pip install -e .
+
+      - name: Repair remaining segments
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          source .env
+          set +a
+
+          export BOOKAI_TRANSLATOR_BACKEND='api'
+          export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_HARD_MODEL='deepseek/deepseek-v4-pro-0813'
+          export BOOKAI_REASONING='none'
+          export BOOKAI_RETRY_ATTEMPTS='3'
+          export BOOKAI_REQUEST_TIMEOUT='300'
+
+          test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
+          python scripts/repair_remaining.py 2>&1 | tee final-repair.log
+
+      - name: Validate every translated text segment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          from lxml import etree
+          from bookai.parsers.base import load_book
+          from bookai.pipeline import _should_translate
+
+          src = Path('Devices_and_Desires.fb2')
+          out = Path('Devices_and_Desires_RU.fb2')
+          assert out.exists() and out.stat().st_size > 100000
+          etree.parse(str(out))
+
+          source_doc = load_book(src)
+          output_doc = load_book(out)
+          source_by_id = {s.id: s for s in source_doc.segments}
+          output_by_id = {s.id: s for s in output_doc.segments}
+          assert len(source_doc.segments) == len(output_doc.segments), (len(source_doc.segments), len(output_doc.segments))
+
+          def bad(original, candidate):
+              candidate = (candidate or '').strip()
+              if not candidate:
+                  return True
+              lat = len(re.findall(r'[A-Za-z]', candidate))
+              cyr = len(re.findall(r'[А-Яа-яЁё]', candidate))
+              if candidate == original.strip() and lat >= 3 and cyr == 0:
+                  return True
+              return lat >= 6 and cyr < max(2, lat // 5)
+
+          targets = [s for s in source_doc.segments if _should_translate(s.text)]
+          remaining = [s.id for s in targets if s.id not in output_by_id or bad(s.text, output_by_id[s.id].text)]
+          text = '\n'.join(s.text for s in output_doc.segments)
+          cyr = len(re.findall(r'[А-Яа-яЁё]', text))
+          lat = len(re.findall(r'[A-Za-z]', text))
+          share = cyr / max(cyr + lat, 1)
+          print(f'source_segments={len(source_doc.segments)}')
+          print(f'translation_targets={len(targets)}')
+          print(f'remaining_untranslated={len(remaining)}')
+          print(f'text_cyrillic_share={share:.4f}')
+          if remaining:
+              print('remaining_ids=' + ','.join(remaining[:30]))
+          assert len(targets) == 3804, len(targets)
+          assert not remaining, f'Untranslated segments remain: {len(remaining)}'
+          assert share > 0.90, f'Unexpectedly low text Cyrillic share: {share:.3f}'
+          PY
+
+      - name: Upload translated book
+        uses: actions/upload-artifact@v4
+        with:
+          name: Devices_and_Desires_RU_FINAL
+          path: Devices_and_Desires_RU.fb2
+          retention-days: 3
+
+      - name: Save v7 repair cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .bookai-cache
+          key: bookai-devices-final-v7-${{ github.run_id }}
+
+      - name: Upload diagnostics on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-repair-diagnostics
+          path: |
+            final-repair.log
+            .bookai-cache/**
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 1
