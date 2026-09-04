@@ -5,7 +5,7 @@ import re
 from dataclasses import asdict
 
 from .llm import chapter_brief as _raw_chapter_brief, extract_json
-from .models import BookMemory, GateFinding, LLMProvider, Segment
+from .models import BookMemory, GateFinding, LLMProvider, Segment, StyleGuide
 
 # Scripts that have no legitimate reason to appear in a Russian scene brief.
 # Latin is deliberately allowed for source terms/names.
@@ -17,6 +17,98 @@ _FOREIGN_SCRIPT = re.compile(
 
 def _memory_prompt(memory: BookMemory) -> str:
     return json.dumps(asdict(memory), ensure_ascii=False, separators=(",", ":"))
+
+
+def _representative_slice(sample: str, budget: int) -> str:
+    """Use beginning/middle/end instead of feeding a huge prefix to the analyzer."""
+    sample = sample.strip()
+    if len(sample) <= budget:
+        return sample
+    each = max(1000, budget // 3)
+    middle_start = max(0, len(sample) // 2 - each // 2)
+    return (
+        sample[:each]
+        + "\n...[representative middle]...\n"
+        + sample[middle_start : middle_start + each]
+        + "\n...[representative end]...\n"
+        + sample[-each:]
+    )
+
+
+def safe_analyze_memory(
+    provider: LLMProvider,
+    sample: str,
+    *,
+    title: str = "",
+    author: str = "",
+    attempts: int = 3,
+) -> BookMemory:
+    """Build a compact translation bible and retry malformed/runaway JSON.
+
+    V4 Flash is strong enough for this role, but on large prompts it can
+    occasionally produce malformed or extremely verbose JSON. Each retry uses a
+    smaller representative sample while keeping beginning/middle/end coverage.
+    """
+    budgets = (30000, 18000, 10000)
+    last_error: BaseException | None = None
+    system = """You build a COMPACT translation bible for a Russian literary translation.
+Do not translate the sample. Infer only recurring evidence and never invent plot facts.
+Focus on narrative voice, sentence rhythm, irony mechanism, dialogue register, technical vocabulary,
+proper names/titles, recurring terms and character speech cues. Return ONLY valid compact JSON.
+The entire response must stay under 1200 words. No prose outside JSON."""
+
+    for attempt in range(max(1, attempts)):
+        budget = budgets[min(attempt, len(budgets) - 1)]
+        excerpt = _representative_slice(sample, budget)
+        user = f"""Book title: {title!r}\nAuthor: {author!r}
+Return exactly this schema:
+{{
+  "style": {{
+    "narrative_voice":"...",
+    "rhythm":"...",
+    "dialogue":"...",
+    "humor":"...",
+    "taboos":["specific failure modes to avoid"]
+  }},
+  "glossary": {{"English term/name":"preferred Russian rendering"}},
+  "characters": {{"name":"voice/personality cues only when evidenced"}},
+  "rolling_summary":"very short factual continuity summary in Russian"
+}}
+Rules: keep glossary high-confidence and compact; do not transliterate common English words.
+REPRESENTATIVE_SAMPLE:\n{excerpt}"""
+        try:
+            raw = provider.complete(system, user, temperature=0.0)
+            if len(raw) > 24000:
+                raise ValueError(f"Analyzer runaway output: {len(raw)} chars")
+            obj = extract_json(raw)
+            if not isinstance(obj, dict):
+                raise ValueError("Analyzer returned non-object JSON")
+            style_obj = obj.get("style") or {}
+            defaults = StyleGuide()
+            style = StyleGuide(
+                narrative_voice=str(style_obj.get("narrative_voice") or defaults.narrative_voice),
+                rhythm=str(style_obj.get("rhythm") or defaults.rhythm),
+                dialogue=str(style_obj.get("dialogue") or defaults.dialogue),
+                humor=str(style_obj.get("humor") or defaults.humor),
+                taboos=[str(x) for x in (style_obj.get("taboos") or defaults.taboos)],
+            )
+            return BookMemory(
+                title=title,
+                author=author,
+                style=style,
+                glossary={str(k): str(v) for k, v in (obj.get("glossary") or {}).items()},
+                characters={str(k): str(v) for k, v in (obj.get("characters") or {}).items()},
+                rolling_summary=str(obj.get("rolling_summary") or ""),
+            )
+        except BaseException as exc:
+            last_error = exc
+            print(
+                f"[bookai-analysis-retry] attempt={attempt + 1}/{max(1, attempts)} "
+                f"sample_chars={len(excerpt)} error={type(exc).__name__}",
+                flush=True,
+            )
+
+    raise ValueError("Book analysis repeatedly returned malformed/runaway output") from last_error
 
 
 def brief_is_corrupt(text: str) -> bool:
