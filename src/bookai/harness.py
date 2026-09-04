@@ -97,10 +97,17 @@ class TranslationHarness:
         key = os.getenv("OPENROUTER_API_KEY") or os.getenv("BOOKAI_API_KEY")
         base = os.getenv("BOOKAI_BASE_URL") or "https://openrouter.ai/api/v1"
         reasoning = os.getenv("BOOKAI_REASONING") or "none"
-        ceiling = (os.getenv("BOOKAI_MAX_MODEL") or FLASH_MODEL).strip()
 
-        # Literary harness v2 intentionally has one ceiling. Every LLM role is
-        # forced to it so stale .env settings cannot silently enable Pro/Qwen.
+        # This is a HARD ceiling, not a configurable default. The project may use
+        # a weaker/local draft backend, but no API role may exceed V4 Flash.
+        requested_ceiling = (os.getenv("BOOKAI_MAX_MODEL") or FLASH_MODEL).strip()
+        if requested_ceiling != FLASH_MODEL:
+            print(
+                f"[bookai-model-ceiling] requested_ceiling={requested_ceiling} forced={FLASH_MODEL}",
+                flush=True,
+            )
+        ceiling = FLASH_MODEL
+
         def p(env_name: str, role: str) -> OpenAICompatibleProvider:
             requested = (os.getenv(env_name) or FLASH_MODEL).strip()
             if requested != ceiling:
@@ -215,7 +222,7 @@ class TranslationHarness:
         return choose_candidate_batch(self.gate, originals, first, second, memory)
 
     def hard_edit(self, originals: list[Segment], draft: dict[str, str], memory: BookMemory) -> dict[str, str]:
-        # Compatibility surface: still Flash-only under the model ceiling.
+        # Compatibility surface: this is still forced to Flash under the ceiling.
         return qa_batch(self.hard_editor, originals, draft, memory)
 
     def update_memory(self, originals: list[Segment], translated: dict[str, str], memory: BookMemory) -> BookMemory:
