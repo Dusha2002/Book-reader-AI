@@ -20,12 +20,160 @@ jobs:
       - name: Install project
         run: pip install -e .
 
+      - name: Restore resumable translation cache
+        uses: actions/cache@v4
+        with:
+          path: .bookai-cache
+          key: bookai-devices-optimal-${{ github.run_id }}
+          restore-keys: |
+            bookai-devices-optimal-
+
+      - name: Harden runtime for OpenRouter and resumability
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          llm = Path('src/bookai/llm.py')
+          text = llm.read_text('utf-8')
+          text = text.replace(
+              'import re\nimport threading\n',
+              'import re\nimport threading\nimport time\nimport random\n',
+              1,
+          )
+          old = '''        response = httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=240.0,
+        )
+        response.raise_for_status()
+        data = response.json()
+'''
+          new = '''        max_attempts = max(1, int(os.getenv("BOOKAI_RETRY_ATTEMPTS") or "10"))
+        response = None
+        for attempt in range(max_attempts):
+            try:
+                response = httpx.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=240.0,
+                )
+                retryable = response.status_code in {408, 409, 425, 429} or response.status_code >= 500
+                if not retryable:
+                    response.raise_for_status()
+                    break
+                if attempt + 1 >= max_attempts:
+                    response.raise_for_status()
+                raw_retry_after = response.headers.get("Retry-After")
+                try:
+                    server_delay = float(raw_retry_after) if raw_retry_after else 0.0
+                except ValueError:
+                    server_delay = 0.0
+                delay = min(120.0, max(server_delay, min(60.0, 2.0 ** attempt)))
+                time.sleep(delay + random.uniform(0.15, 0.9))
+            except (httpx.TimeoutException, httpx.TransportError):
+                if attempt + 1 >= max_attempts:
+                    raise
+                delay = min(60.0, 2.0 ** attempt)
+                time.sleep(delay + random.uniform(0.15, 0.9))
+        assert response is not None
+        data = response.json()
+'''
+          if old not in text:
+              raise SystemExit('llm retry patch anchor not found')
+          llm.write_text(text.replace(old, new, 1), 'utf-8')
+
+          pipeline = Path('src/bookai/pipeline.py')
+          text = pipeline.read_text('utf-8')
+          old = '''    pending_chapters = [(name, chapter) for name, chapter in chapters if any(s.id not in translated for s in chapter)]
+    if concurrency == 1 or len(pending_chapters) <= 1:
+        results = [process_chapter(name, chapter) for name, chapter in pending_chapters]
+    else:
+        results = []
+        with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="bookai") as pool:
+            futures = {pool.submit(process_chapter, name, chapter): name for name, chapter in pending_chapters}
+            for future in as_completed(futures):
+                results.append(future.result())
+
+    completed_chapters = set(state.get("completed_chapters") or [])
+    for name, new, findings in results:
+        translated.update(new)
+        completed_chapters.add(name)
+        completed = sum(s.id in translated for s in source_segments)
+        state["translations"] = translated
+        state["memory"] = asdict(memory)
+        state["completed_chapters"] = sorted(completed_chapters)
+        state["last_findings"] = [asdict(f) for f in findings]
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
+        _notify(
+            progress,
+            phase="translating",
+            progress=min(95, 5 + int(completed / total * 90)),
+            completed=completed,
+            total=total,
+            chapter=name,
+            flagged=len(findings),
+            concurrency=concurrency,
+        )
+'''
+          new = '''    completed_chapters = set(state.get("completed_chapters") or [])
+
+    def persist_result(name: str, new: dict[str, str], findings) -> None:
+        nonlocal completed
+        translated.update(new)
+        completed_chapters.add(name)
+        completed = sum(s.id in translated for s in source_segments)
+        state["translations"] = translated
+        state["memory"] = asdict(memory)
+        state["completed_chapters"] = sorted(completed_chapters)
+        state["last_findings"] = [asdict(f) for f in findings]
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
+        _notify(
+            progress,
+            phase="translating",
+            progress=min(95, 5 + int(completed / total * 90)),
+            completed=completed,
+            total=total,
+            chapter=name,
+            flagged=len(findings),
+            concurrency=concurrency,
+        )
+
+    pending_chapters = [(name, chapter) for name, chapter in chapters if any(s.id not in translated for s in chapter)]
+    errors: list[tuple[str, BaseException]] = []
+    if concurrency == 1 or len(pending_chapters) <= 1:
+        for name, chapter in pending_chapters:
+            try:
+                persist_result(*process_chapter(name, chapter))
+            except BaseException as exc:
+                errors.append((name, exc))
+    else:
+        with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="bookai") as pool:
+            futures = {pool.submit(process_chapter, name, chapter): name for name, chapter in pending_chapters}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    persist_result(*future.result())
+                except BaseException as exc:
+                    errors.append((name, exc))
+
+    if errors:
+        failed_names = ", ".join(name for name, _ in errors)
+        raise RuntimeError(f"Chapter translation failed after retries: {failed_names}") from errors[0][1]
+'''
+          if old not in text:
+              raise SystemExit('pipeline resumability patch anchor not found')
+          pipeline.write_text(text.replace(old, new, 1), 'utf-8')
+          PY
+
       - name: Translate full book via OpenRouter
         shell: bash
         env:
-          BOOKAI_CONCURRENCY: '2'
-          BOOKAI_BATCH_CHARS: '50000'
+          BOOKAI_CONCURRENCY: '4'
+          BOOKAI_BATCH_CHARS: '100000'
           BOOKAI_ANALYSIS_CHARS: '1500000'
+          BOOKAI_RETRY_ATTEMPTS: '10'
         run: |
           set -euo pipefail
           set -a
@@ -33,7 +181,7 @@ jobs:
           set +a
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          echo "Starting full Optimal translation"
+          echo "Starting resumable full Optimal translation"
           bookai Devices_and_Desires.fb2 \
             --output Devices_and_Desires_RU.fb2 \
             --mode optimal 2>&1 | tee translation.log
@@ -75,4 +223,5 @@ jobs:
             translation.log
             .bookai-cache/**
           if-no-files-found: ignore
+          include-hidden-files: true
           retention-days: 1
