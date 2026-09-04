@@ -17,7 +17,7 @@ MODE_ALIASES = {"standard": "optimal", "high": "literary"}
 VALID_MODES = {"fast", "optimal", "literary", *MODE_ALIASES}
 
 
-def _batches(segments: list[Segment], char_limit: int = 30000):
+def _batches(segments: list[Segment], char_limit: int = 100000):
     batch: list[Segment] = []
     size = 0
     chapter = ""
@@ -119,7 +119,9 @@ def translate_book(
 
     translated: dict[str, str] = dict(state.get("translations") or {})
     source_segments = [s for s in document.segments if _should_translate(s.text)]
-    batch_chars = max(4000, int(os.getenv("BOOKAI_BATCH_CHARS") or "30000"))
+    # Modern Flash models have ~1M-token context. 100k characters keeps an ordinary
+    # novel chapter in one request while retaining a conservative output margin.
+    batch_chars = max(4000, int(os.getenv("BOOKAI_BATCH_CHARS") or "100000"))
     batches = list(_batches(source_segments, batch_chars))
     total = len(source_segments)
     completed = sum(1 for s in source_segments if s.id in translated)
@@ -156,7 +158,6 @@ def translate_book(
         completed += len(pending)
 
         # Update continuity once per completed chapter instead of once per translation batch.
-        # This cuts a large novel from O(batches) memory calls to roughly O(chapters).
         current_chapter = batch[-1].chapter if batch else ""
         next_chapter = batches[batch_index + 1][0].chapter if batch_index + 1 < len(batches) else None
         chapter_finished = next_chapter != current_chapter
