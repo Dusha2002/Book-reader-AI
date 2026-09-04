@@ -16,6 +16,7 @@ from .llm import (
     update_memory,
 )
 from .models import BookMemory, GateFinding, LLMProvider, Segment, SegmentTranslator
+from .polish import literary_polish_batch
 from .quality import batch_issues
 
 
@@ -38,7 +39,7 @@ class LLMTranslator:
 
 
 class MadladTranslator:
-    """Optional local MADLAD-400 draft translator. Flash still performs QA/editing."""
+    """Optional local MADLAD-400 draft translator. Flash still performs polish/QA."""
 
     def __init__(self, model_name: str | None = None, device: str | None = None, batch_size: int = 8):
         self.model_name = model_name or os.getenv("BOOKAI_MADLAD_MODEL") or "google/madlad400-3b-mt"
@@ -98,8 +99,8 @@ class TranslationHarness:
         reasoning = os.getenv("BOOKAI_REASONING") or "none"
         ceiling = (os.getenv("BOOKAI_MAX_MODEL") or FLASH_MODEL).strip()
 
-        # Literary harness v2 intentionally has one ceiling. Role env vars remain
-        # configurable only up to that ceiling; this prevents accidental Pro/Qwen use.
+        # Literary harness v2 intentionally has one ceiling. Every LLM role is
+        # forced to it so stale .env settings cannot silently enable Pro/Qwen.
         def p(env_name: str, role: str) -> OpenAICompatibleProvider:
             requested = (os.getenv(env_name) or FLASH_MODEL).strip()
             if requested != ceiling:
@@ -172,6 +173,16 @@ class TranslationHarness:
 
     def translate(self, segments, memory, *, context_before=None, context_after=None):
         return self.translator.translate(segments, memory, context_before=context_before, context_after=context_after)
+
+    def polish(
+        self,
+        originals: list[Segment],
+        draft: dict[str, str],
+        memory: BookMemory,
+        *,
+        context: list[dict] | None = None,
+    ) -> dict[str, str]:
+        return literary_polish_batch(self.editor, originals, draft, memory, context=context)
 
     def gate_findings(self, originals: list[Segment], draft: dict[str, str], memory: BookMemory) -> list[GateFinding]:
         merged: dict[str, GateFinding] = {}
