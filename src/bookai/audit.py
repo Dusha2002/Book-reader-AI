@@ -4,7 +4,7 @@ import json
 import re
 from dataclasses import asdict
 
-from .llm import chapter_brief as _raw_chapter_brief, extract_json
+from .llm import chapter_brief as _raw_chapter_brief, extract_json, update_memory as _raw_update_memory
 from .models import BookMemory, GateFinding, LLMProvider, Segment, StyleGuide
 
 # Scripts that have no legitimate reason to appear in a Russian scene brief.
@@ -13,26 +13,54 @@ _FOREIGN_SCRIPT = re.compile(
     r"[\u0370-\u03ff\u0590-\u05ff\u0600-\u06ff\u0900-\u097f"
     r"\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]"
 )
+_SECTION = re.compile(r"(?m)(?=^\s*###\s+)")
+_PROPERISH = re.compile(r"\b[A-Z][A-Za-z'’-]{2,}\b")
+_COMMON_CAPS = {
+    "The", "This", "That", "Then", "There", "When", "While", "With", "Without", "What", "Why",
+    "How", "He", "She", "His", "Her", "They", "Their", "It", "Its", "I", "We", "You", "But",
+    "And", "Or", "If", "As", "At", "By", "For", "From", "In", "Into", "No", "Not", "Of", "On",
+    "So", "To", "Was", "Were", "A", "An",
+}
 
 
 def _memory_prompt(memory: BookMemory) -> str:
     return json.dumps(asdict(memory), ensure_ascii=False, separators=(",", ":"))
 
 
+def _slice_text(text: str, budget: int) -> str:
+    text = text.strip()
+    if len(text) <= budget:
+        return text
+    if budget < 900:
+        return text[:budget]
+    each = max(250, budget // 3)
+    middle_start = max(0, len(text) // 2 - each // 2)
+    return (
+        text[:each]
+        + "\n...[middle]...\n"
+        + text[middle_start : middle_start + each]
+        + "\n...[end]...\n"
+        + text[-each:]
+    )[:budget]
+
+
 def _representative_slice(sample: str, budget: int) -> str:
-    """Use beginning/middle/end instead of feeding a huge prefix to the analyzer."""
+    """Shrink a book sample without silently dropping whole chapter sections.
+
+    `_analysis_sample` already labels chapter excerpts with `###`. If we simply
+    take beginning/middle/end again, most chapters disappear from the global
+    translation bible. Allocate the budget across every labelled section first;
+    fall back to ordinary beginning/middle/end only for unstructured text.
+    """
     sample = sample.strip()
     if len(sample) <= budget:
         return sample
-    each = max(1000, budget // 3)
-    middle_start = max(0, len(sample) // 2 - each // 2)
-    return (
-        sample[:each]
-        + "\n...[representative middle]...\n"
-        + sample[middle_start : middle_start + each]
-        + "\n...[representative end]...\n"
-        + sample[-each:]
-    )
+    sections = [part.strip() for part in _SECTION.split(sample) if part.strip()]
+    if len(sections) >= 4:
+        per = max(500, budget // len(sections))
+        packed = [_slice_text(section, per) for section in sections]
+        return "\n".join(packed)[:budget]
+    return _slice_text(sample, budget)
 
 
 def safe_analyze_memory(
@@ -43,12 +71,7 @@ def safe_analyze_memory(
     author: str = "",
     attempts: int = 3,
 ) -> BookMemory:
-    """Build a compact translation bible and retry malformed/runaway JSON.
-
-    V4 Flash is strong enough for this role, but on large prompts it can
-    occasionally produce malformed or extremely verbose JSON. Each retry uses a
-    smaller representative sample while keeping beginning/middle/end coverage.
-    """
+    """Build a compact translation bible and retry malformed/runaway JSON."""
     budgets = (30000, 18000, 10000)
     last_error: BaseException | None = None
     system = """You build a COMPACT translation bible for a Russian literary translation.
@@ -142,12 +165,7 @@ def safe_chapter_brief(
     *,
     attempts: int = 2,
 ) -> str:
-    """Build a chapter brief without allowing a control-plane call to block the book.
-
-    A chapter brief is a quality aid, not a source of truth. Corrupt, timed-out or
-    malformed responses are retried briefly; after that we use a neutral
-    deterministic instruction so translation can proceed from source + context.
-    """
+    """Build a chapter brief without allowing a control-plane call to block the book."""
     for attempt in range(max(1, attempts)):
         try:
             candidate = _raw_chapter_brief(provider, segments, memory)
@@ -164,17 +182,105 @@ def safe_chapter_brief(
     return _fallback_chapter_brief()
 
 
+def _chapter_memory_sample(
+    originals: list[Segment],
+    translated: dict[str, str],
+    memory: BookMemory,
+    budget: int,
+) -> list[Segment]:
+    """Pick bounded, ordered evidence for continuity updates.
+
+    Prioritise lines likely to contain new proper names/dialogue, then fill the
+    remainder with uniformly spaced evidence so beginning/middle/end all remain
+    represented. The returned Segment objects are unchanged; `_raw_update_memory`
+    reads their translations from the full translation dict.
+    """
+    if not originals:
+        return []
+    known = {key.casefold() for key in memory.glossary}
+    priority: list[int] = []
+    for idx, segment in enumerate(originals):
+        names = {
+            token for token in _PROPERISH.findall(segment.text)
+            if token not in _COMMON_CAPS and token.casefold() not in known
+        }
+        dialogue = '"' in segment.text or "'" in segment.text or "“" in segment.text or "”" in segment.text
+        if names or dialogue:
+            priority.append(idx)
+
+    uniform_count = min(len(originals), 36)
+    if uniform_count <= 1:
+        uniform = [0]
+    else:
+        uniform = [round(i * (len(originals) - 1) / (uniform_count - 1)) for i in range(uniform_count)]
+
+    ordered_candidates: list[int] = []
+    # Interleave priority with broad coverage instead of letting dialogue-heavy
+    # scenes consume the whole budget.
+    for pos in range(max(len(priority), len(uniform))):
+        if pos < len(uniform):
+            ordered_candidates.append(uniform[pos])
+        if pos < len(priority):
+            ordered_candidates.append(priority[pos])
+
+    selected: set[int] = set()
+    used = 0
+    for idx in ordered_candidates:
+        if idx in selected:
+            continue
+        segment = originals[idx]
+        cost = len(segment.text) + len(translated.get(segment.id, "")) + 80
+        if selected and used + cost > budget:
+            continue
+        selected.add(idx)
+        used += cost
+        if used >= budget:
+            break
+
+    # Always retain chapter edges when possible.
+    selected.add(0)
+    selected.add(len(originals) - 1)
+    return [originals[idx] for idx in sorted(selected)]
+
+
+def safe_update_memory(
+    provider: LLMProvider,
+    originals: list[Segment],
+    translated: dict[str, str],
+    memory: BookMemory,
+    *,
+    attempts: int = 2,
+) -> BookMemory:
+    """Update continuity from bounded evidence; retry smaller rather than sending a whole huge chapter."""
+    budgets = (24000, 12000)
+    last_error: BaseException | None = None
+    for attempt in range(max(1, attempts)):
+        budget = budgets[min(attempt, len(budgets) - 1)]
+        sample = _chapter_memory_sample(originals, translated, memory, budget)
+        try:
+            updated = _raw_update_memory(provider, sample, translated, memory)
+            print(
+                f"[bookai-memory-update] evidence_segments={len(sample)}/{len(originals)} budget={budget}",
+                flush=True,
+            )
+            return updated
+        except BaseException as exc:
+            last_error = exc
+            print(
+                f"[bookai-memory-retry] attempt={attempt + 1}/{max(1, attempts)} "
+                f"evidence_segments={len(sample)} error={type(exc).__name__}",
+                flush=True,
+            )
+    raise ValueError("Chapter memory update repeatedly failed") from last_error
+
+
 def semantic_gate_batch(
     provider: LLMProvider,
     originals: list[Segment],
     draft: dict[str, str],
     memory: BookMemory,
 ) -> list[GateFinding]:
-    """Independent fidelity audit intentionally separated from literary criticism.
-
-    Small models are much more reliable when they do one thing at a time. This
-    pass ignores elegance and checks whether every semantic obligation survived.
-    """
+    """Independent fidelity audit intentionally separated from literary criticism."""
     if not originals:
         return []
     system = """You are an adversarial EN→RU SEMANTIC COVERAGE auditor. Do NOT rewrite and do NOT judge style.
