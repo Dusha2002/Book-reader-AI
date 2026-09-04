@@ -1,7 +1,7 @@
 name: translate-book
 on:
   push:
-    branches: [translation-recovery-v5]
+    branches: [translation-recovery-v6]
 
 permissions:
   contents: read
@@ -10,7 +10,7 @@ permissions:
 jobs:
   translate:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -18,35 +18,35 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore same-branch v5 cache when available
+      - name: Restore same-branch v6 cache when available
         id: restore-bookai-cache
         uses: actions/cache/restore@v4
         with:
           path: .bookai-cache
-          key: bookai-devices-recovery-v5-${{ github.run_id }}
+          key: bookai-devices-recovery-v6-${{ github.run_id }}
           restore-keys: |
-            bookai-devices-recovery-v5-
+            bookai-devices-recovery-v6-
 
-      - name: Download exact v3 recovery artifact when cache is absent
+      - name: Download exact full v5 state when v6 cache is absent
         if: ${{ hashFiles('.bookai-cache/*.optimal.json') == '' }}
         uses: actions/download-artifact@v4
         with:
           name: translation-diagnostics
-          path: .v3-recovery
+          path: .v5-recovery
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
-          run-id: 33865525702
+          run-id: 33872838654
 
-      - name: Import exact v3 saved state
+      - name: Import full v5 saved state
         if: ${{ hashFiles('.bookai-cache/*.optimal.json') == '' }}
         shell: bash
         run: |
           set -euo pipefail
-          test -d .v3-recovery/.bookai-cache
+          test -d .v5-recovery/.bookai-cache
           mkdir -p .bookai-cache
-          cp -a .v3-recovery/.bookai-cache/. .bookai-cache/
+          cp -a .v5-recovery/.bookai-cache/. .bookai-cache/
 
-      - name: Verify recovery state
+      - name: Verify full recovery state
         shell: bash
         run: |
           set -euo pipefail
@@ -58,13 +58,13 @@ jobs:
           n = len(state.get('translations') or {})
           chapters = len(state.get('completed_chapters') or [])
           print(f'[bookai-recovery] restored_translations={n} completed_chapters={chapters}')
-          assert n >= 3294, f'Expected at least 3294 saved translations, got {n}'
+          assert n >= 3804, f'Expected full v5 state with 3804 translations, got {n}'
           PY
 
       - name: Install project
         run: pip install -e .
 
-      - name: Translate full book via OpenRouter
+      - name: Repair untranslated segments via OpenRouter
         shell: bash
         run: |
           set -euo pipefail
@@ -81,44 +81,54 @@ jobs:
           export BOOKAI_LLM_GATE='true'
           export BOOKAI_REASONING='none'
           export BOOKAI_CONCURRENCY='3'
-          export BOOKAI_BATCH_CHARS='40000'
-          export BOOKAI_GATE_BATCH_CHARS='18000'
-          export BOOKAI_EDIT_BATCH_CHARS='12000'
+          export BOOKAI_BATCH_CHARS='10000'
+          export BOOKAI_GATE_BATCH_CHARS='12000'
+          export BOOKAI_EDIT_BATCH_CHARS='8000'
           export BOOKAI_ANALYSIS_CHARS='104000'
           export BOOKAI_RETRY_ATTEMPTS='3'
           export BOOKAI_REQUEST_TIMEOUT='300'
 
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          echo "Starting v5 exact-state resumable Optimal translation"
-          echo "Runtime: concurrency=$BOOKAI_CONCURRENCY translate_batch=$BOOKAI_BATCH_CHARS gate_batch=$BOOKAI_GATE_BATCH_CHARS edit_batch=$BOOKAI_EDIT_BATCH_CHARS analyzer=$BOOKAI_ANALYZER_MODEL editor=$BOOKAI_EDITOR_MODEL"
+          echo "Starting v6 targeted untranslated-segment repair"
+          echo "Runtime: concurrency=$BOOKAI_CONCURRENCY translate_batch=$BOOKAI_BATCH_CHARS gate_batch=$BOOKAI_GATE_BATCH_CHARS edit_batch=$BOOKAI_EDIT_BATCH_CHARS editor=$BOOKAI_EDITOR_MODEL"
           bookai Devices_and_Desires.fb2 \
             --output Devices_and_Desires_RU.fb2 \
             --mode optimal 2>&1 | tee translation.log
 
-      - name: Validate translated FB2
+      - name: Validate translated FB2 text
         if: success()
         run: |
           python - <<'PY'
           from pathlib import Path
           from lxml import etree
+          from bookai.parsers.base import load_book
           import re
 
           p = Path('Devices_and_Desires_RU.fb2')
           assert p.exists() and p.stat().st_size > 100000
           etree.parse(str(p))
-          text = p.read_text('utf-8', errors='ignore')
-          cyr = len(re.findall(r'[А-Яа-яЁё]', text))
-          lat = len(re.findall(r'[A-Za-z]', text))
+          doc = load_book(p)
+          texts = [s.text for s in doc.segments]
+          cyr = sum(len(re.findall(r'[А-Яа-яЁё]', t)) for t in texts)
+          lat = sum(len(re.findall(r'[A-Za-z]', t)) for t in texts)
           share = cyr / max(cyr + lat, 1)
-          long_english = re.findall(r'(?i)(?:\b[a-z]{3,}\b[\s,.;:!?—\-]*){18,}', text)
+          suspicious = []
+          for s in doc.segments:
+              l = len(re.findall(r'[A-Za-z]', s.text))
+              c = len(re.findall(r'[А-Яа-яЁё]', s.text))
+              if l >= 20 and c < max(4, l // 4):
+                  suspicious.append((s.id, s.text[:160]))
           print(f'output_bytes={p.stat().st_size}')
+          print(f'text_segments={len(texts)}')
           print(f'cyrillic_letters={cyr}')
           print(f'latin_letters={lat}')
-          print(f'cyrillic_share={share:.4f}')
-          print(f'long_english_runs={len(long_english)}')
-          assert share > 0.70, f'Unexpectedly low Cyrillic share: {share:.3f}'
-          assert len(long_english) < 25, f'Too many long untranslated English runs: {len(long_english)}'
+          print(f'text_cyrillic_share={share:.4f}')
+          print(f'suspicious_english_segments={len(suspicious)}')
+          for item in suspicious[:10]:
+              print('SUSPECT', item)
+          assert share > 0.95, f'Unexpectedly low text Cyrillic share: {share:.3f}'
+          assert len(suspicious) <= 3, f'Untranslated English text remains: {len(suspicious)} segments'
           PY
 
       - name: Upload translated book
@@ -129,12 +139,12 @@ jobs:
           path: Devices_and_Desires_RU.fb2
           retention-days: 3
 
-      - name: Save v5 translation cache even after failure
+      - name: Save v6 translation cache even after failure
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .bookai-cache
-          key: bookai-devices-recovery-v5-${{ github.run_id }}
+          key: bookai-devices-recovery-v6-${{ github.run_id }}
 
       - name: Upload diagnostics
         if: failure() || cancelled()
