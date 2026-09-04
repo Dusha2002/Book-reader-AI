@@ -186,18 +186,10 @@ def translate_book(
                 new.update(harness.hard_edit(hard, {**existing, **new}, memory))
         return name, new, findings
 
-    pending_chapters = [(name, chapter) for name, chapter in chapters if any(s.id not in translated for s in chapter)]
-    if concurrency == 1 or len(pending_chapters) <= 1:
-        results = [process_chapter(name, chapter) for name, chapter in pending_chapters]
-    else:
-        results = []
-        with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="bookai") as pool:
-            futures = {pool.submit(process_chapter, name, chapter): name for name, chapter in pending_chapters}
-            for future in as_completed(futures):
-                results.append(future.result())
-
     completed_chapters = set(state.get("completed_chapters") or [])
-    for name, new, findings in results:
+
+    def persist_result(name: str, new: dict[str, str], findings) -> None:
+        nonlocal completed
         translated.update(new)
         completed_chapters.add(name)
         completed = sum(s.id in translated for s in source_segments)
@@ -216,6 +208,28 @@ def translate_book(
             flagged=len(findings),
             concurrency=concurrency,
         )
+
+    pending_chapters = [(name, chapter) for name, chapter in chapters if any(s.id not in translated for s in chapter)]
+    errors: list[tuple[str, BaseException]] = []
+    if concurrency == 1 or len(pending_chapters) <= 1:
+        for name, chapter in pending_chapters:
+            try:
+                persist_result(*process_chapter(name, chapter))
+            except BaseException as exc:
+                errors.append((name, exc))
+    else:
+        with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="bookai") as pool:
+            futures = {pool.submit(process_chapter, name, chapter): name for name, chapter in pending_chapters}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    persist_result(*future.result())
+                except BaseException as exc:
+                    errors.append((name, exc))
+
+    if errors:
+        failed_names = ", ".join(name for name, _ in errors)
+        raise RuntimeError(f"Chapter translation failed after retries: {failed_names}") from errors[0][1]
 
     # One final continuity update keeps useful cache metadata without serializing every chapter.
     if memory_updates and mode != "fast" and chapters:
