@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 
 from .contracts import issue_rows
@@ -8,8 +9,31 @@ from .llm import extract_json
 from .models import BookMemory, GateFinding, LLMProvider, Segment
 
 
+_SUB_ID = re.compile(r"^(s\d{6})(?:[_\-.:/]\d+)$")
+
+
 def _memory_prompt(memory: BookMemory) -> str:
     return json.dumps(asdict(memory), ensure_ascii=False, separators=(",", ":"))
+
+
+def _resolve_issue_id(raw_id: object, valid_ids: set[str], role: str) -> str:
+    """Resolve only an unambiguous critic-created sub-id.
+
+    Flash sometimes decomposes one paragraph internally and returns an id such as
+    ``s003324_1`` even though the caller supplied only ``s003324``. For QA findings
+    it is safe to attach such a numbered sub-finding back to the exact supplied
+    parent segment. Translation/edit outputs remain under the stricter exact-id
+    contract and do NOT use this relaxation.
+    """
+    sid = str(raw_id or "").strip()
+    if sid in valid_ids:
+        return sid
+    match = _SUB_ID.fullmatch(sid)
+    if match and match.group(1) in valid_ids:
+        parent = match.group(1)
+        print(f"[bookai-critic-id-normalized] role={role} raw={sid} parent={parent}", flush=True)
+        return parent
+    raise ValueError(f"{role} returned unknown id: {sid!r}")
 
 
 def semantic_gate_batch(
@@ -35,6 +59,7 @@ Do not flag harmless paraphrase, Russian word order, or stylistic choices if mea
 A missing/added source fact, missing enumeration member, wrong relation/referent, or changed technical referent is HARD.
 Return ONLY JSON with key "issues". "issues" MUST ALWAYS BE A JSON ARRAY; for no problems use exactly [].
 Schema: {"issues":[{"id":"...","code":"semantic_omission|semantic_addition|relation|enumeration|term|modality|other","reason":"specific source obligation that failed"}]}.
+Use ONLY the exact segment ids supplied in PAIRS. Never invent sub-ids or suffixes.
 Never return an integer issue count instead of the array."""
     pairs = {s.id: {"en": s.text, "ru": draft.get(s.id, "")} for s in originals}
     user = f"TRANSLATION_BIBLE:{_memory_prompt(memory)}\nPAIRS:{json.dumps(pairs, ensure_ascii=False)}"
@@ -42,9 +67,7 @@ Never return an integer issue count instead of the array."""
     valid_ids = {s.id for s in originals}
     findings: list[GateFinding] = []
     for raw in issue_rows(obj, "semantic gate"):
-        sid = str(raw.get("id") or "")
-        if sid not in valid_ids:
-            raise ValueError(f"semantic gate returned unknown id: {sid!r}")
+        sid = _resolve_issue_id(raw.get("id"), valid_ids, "semantic gate")
         code = str(raw.get("code") or "semantic")
         reason = str(raw.get("reason") or "").strip()
         if not reason:
@@ -77,6 +100,7 @@ Do NOT demand prettier prose than the source and do NOT rewrite deliberate awkwa
 Severity hard only for severe voice/function destruction or obvious semantic corruption; medium for a real literary defect.
 Return ONLY JSON with key "issues". "issues" MUST ALWAYS BE A JSON ARRAY; for no problems use exactly [].
 Schema: {"issues":[{"id":"...","severity":"medium|hard","code":"calque|rhythm|voice|irony|idiom|dialogue|term|meaning|other","reason":"specific concise defect"}]}.
+Use ONLY the exact segment ids supplied in PAIRS. Never invent sub-ids or suffixes.
 Never return an integer issue count instead of the array."""
     pairs = {s.id: {"en": s.text, "ru": draft.get(s.id, "")} for s in originals}
     user = f"TRANSLATION_BIBLE:{_memory_prompt(memory)}\nPAIRS:{json.dumps(pairs, ensure_ascii=False)}"
@@ -84,9 +108,7 @@ Never return an integer issue count instead of the array."""
     valid_ids = {s.id for s in originals}
     findings: list[GateFinding] = []
     for raw in issue_rows(obj, "literary gate"):
-        sid = str(raw.get("id") or "")
-        if sid not in valid_ids:
-            raise ValueError(f"literary gate returned unknown id: {sid!r}")
+        sid = _resolve_issue_id(raw.get("id"), valid_ids, "literary gate")
         severity = str(raw.get("severity") or "medium").lower()
         if severity not in {"medium", "hard"}:
             raise ValueError(f"literary gate returned invalid severity for {sid}: {severity!r}")
