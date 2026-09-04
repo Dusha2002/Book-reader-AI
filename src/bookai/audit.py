@@ -21,7 +21,7 @@ def _memory_prompt(memory: BookMemory) -> str:
 
 def brief_is_corrupt(text: str) -> bool:
     """Reject mixed-script/model-garbage briefs before they contaminate translation context."""
-    if not text or len(text.strip()) < 40:
+    if not text or len(text.strip()) < 15:
         return True
     if _FOREIGN_SCRIPT.search(text):
         return True
@@ -29,7 +29,7 @@ def brief_is_corrupt(text: str) -> bool:
     alpha = len(re.findall(r"[A-Za-zА-Яа-яЁё]", text))
     if alpha >= 80 and cyr / max(alpha, 1) < 0.55:
         return True
-    garbage_markers = ("assistant", "system prompt", "dавайте честно", "перегрузил контекст")
+    garbage_markers = ("assistant", "system prompt", "дaвайте честно", "давайте честно", "перегрузил контекст")
     low = text.lower()
     return any(marker in low for marker in garbage_markers)
 
