@@ -16,6 +16,8 @@ class RoleProvider:
         self.calls.append((system, user))
         self.usage["requests"] += 1
         if self.role == "analyzer":
+            if "CHAPTER_SOURCE:" in user:
+                return json.dumps({"brief": "Короткая локальная сцена."})
             return json.dumps({"style": {}, "glossary": {}, "characters": {}, "rolling_summary": ""})
         if self.role == "translator":
             ids = []
@@ -56,7 +58,11 @@ def test_optimal_only_edits_flagged_segments(tmp_path: Path):
     assert "Первый." in text
     assert "Хороший литературный перевод." in text
     assert "Третий." in text
-    assert len(editor.calls) == 1
-    assert '"s000001"' in editor.calls[0][1]
-    assert '"s000000"' not in editor.calls[0][1]
+    # The v2 harness permits two bounded repair passes if the QA model keeps
+    # flagging the same segment. Unflagged segments must never reach the editor.
+    assert len(editor.calls) == 2
+    for _system, user in editor.calls:
+        assert '"s000001"' in user
+        assert '"s000000"' not in user
+        assert '"s000002"' not in user
     assert not hard.calls
