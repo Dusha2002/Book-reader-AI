@@ -1,0 +1,47 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Protocol
+
+
+@dataclass(slots=True)
+class Segment:
+    id: str
+    text: str
+    locator: str
+
+
+@dataclass(slots=True)
+class StyleGuide:
+    narrative_voice: str = "Preserve the original author's voice and register."
+    rhythm: str = "Preserve sentence rhythm and paragraph structure where natural in Russian."
+    dialogue: str = "Preserve each character's individual speech patterns."
+    humor: str = "Adapt jokes and wordplay for meaning and effect rather than literally."
+    taboos: list[str] = field(default_factory=lambda: [
+        "Do not simplify the author's ideas.",
+        "Do not add explanations absent from the original.",
+        "Do not censor profanity or intensity.",
+    ])
+
+
+@dataclass(slots=True)
+class BookMemory:
+    title: str = ""
+    author: str = ""
+    style: StyleGuide = field(default_factory=StyleGuide)
+    glossary: dict[str, str] = field(default_factory=dict)
+    characters: dict[str, str] = field(default_factory=dict)
+    rolling_summary: str = ""
+
+
+@dataclass(slots=True)
+class BookDocument:
+    source: Path
+    format: str
+    segments: list[Segment]
+    payload: object
+
+
+class LLMProvider(Protocol):
+    def complete(self, system: str, user: str, *, temperature: float = 0.2) -> str: ...
