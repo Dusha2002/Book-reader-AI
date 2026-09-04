@@ -230,10 +230,36 @@ class TranslationHarness:
         return edit_batch(self.editor, originals, draft, memory, reasons=reasons, context=context)
 
     def alternative(self, originals: list[Segment], memory: BookMemory) -> dict[str, str]:
-        return alternative_batch(self.editor, originals, memory)
+        # Alternative generation is an optional quality booster, not a single
+        # point of failure. Invalid JSON/empty ids must fall through to the
+        # targeted semantic repair pass that follows.
+        last_error: BaseException | None = None
+        for attempt in range(2):
+            try:
+                return alternative_batch(self.editor, originals, memory)
+            except BaseException as exc:
+                last_error = exc
+                print(
+                    f"[bookai-alternative-retry] attempt={attempt + 1}/2 error={type(exc).__name__}",
+                    flush=True,
+                )
+        print(
+            f"[bookai-alternative-skip] error={type(last_error).__name__ if last_error else 'unknown'}",
+            flush=True,
+        )
+        # English source is deliberately returned as a poisoned sentinel. The
+        # deterministic QA immediately rejects it, so it can never replace the
+        # valid current translation; targeted repair still runs afterwards.
+        return {s.id: s.text for s in originals}
 
     def choose(self, originals: list[Segment], first: dict[str, str], second: dict[str, str], memory: BookMemory) -> dict[str, str]:
-        return choose_candidate_batch(self.gate, originals, first, second, memory)
+        try:
+            return choose_candidate_batch(self.gate, originals, first, second, memory)
+        except BaseException as exc:
+            # A/B selection is also optional. Preserve the known-good candidate
+            # and let the explicit defect-driven editor repair it next.
+            print(f"[bookai-judge-skip] error={type(exc).__name__}", flush=True)
+            return dict(first)
 
     def hard_edit(self, originals: list[Segment], draft: dict[str, str], memory: BookMemory) -> dict[str, str]:
         # Compatibility surface: this is still forced to Flash under the ceiling.
