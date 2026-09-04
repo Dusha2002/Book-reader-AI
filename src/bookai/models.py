@@ -10,6 +10,7 @@ class Segment:
     id: str
     text: str
     locator: str
+    chapter: str = ""
 
 
 @dataclass(slots=True)
@@ -33,6 +34,7 @@ class BookMemory:
     glossary: dict[str, str] = field(default_factory=dict)
     characters: dict[str, str] = field(default_factory=dict)
     rolling_summary: str = ""
+    last_chapter: str = ""
 
 
 @dataclass(slots=True)
