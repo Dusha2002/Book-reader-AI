@@ -1,7 +1,7 @@
 name: translate-book
 on:
   push:
-    branches: [translation-run-devices-desires]
+    branches: [translation-recovery-v2]
 
 permissions:
   contents: read
@@ -9,7 +9,7 @@ permissions:
 jobs:
   translate:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -22,9 +22,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .bookai-cache
-          key: bookai-devices-optimal-${{ github.run_id }}
+          key: bookai-devices-recovery-${{ github.run_id }}
           restore-keys: |
-            bookai-devices-optimal-
+            bookai-devices-recovery-
 
       - name: Install project
         run: pip install -e .
@@ -32,10 +32,11 @@ jobs:
       - name: Translate full book via OpenRouter
         shell: bash
         env:
-          BOOKAI_CONCURRENCY: '4'
-          BOOKAI_BATCH_CHARS: '50000'
+          BOOKAI_CONCURRENCY: '3'
+          BOOKAI_BATCH_CHARS: '40000'
           BOOKAI_ANALYSIS_CHARS: '1500000'
-          BOOKAI_RETRY_ATTEMPTS: '4'
+          BOOKAI_RETRY_ATTEMPTS: '3'
+          BOOKAI_REQUEST_TIMEOUT: '300'
           BOOKAI_EDITOR_MODEL: 'deepseek/deepseek-v4-flash-0731'
         run: |
           set -euo pipefail
@@ -44,7 +45,7 @@ jobs:
           set +a
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          echo "Starting recovery Optimal translation"
+          echo "Starting hardened resumable Optimal translation"
           bookai Devices_and_Desires.fb2 \
             --output Devices_and_Desires_RU.fb2 \
             --mode optimal 2>&1 | tee translation.log
@@ -55,18 +56,23 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           from lxml import etree
+          import re
+
           p = Path('Devices_and_Desires_RU.fb2')
           assert p.exists() and p.stat().st_size > 100000
           etree.parse(str(p))
           text = p.read_text('utf-8', errors='ignore')
-          cyr = sum(ch.isalpha() and ('А' <= ch <= 'я' or ch in 'Ёё') for ch in text)
-          lat = sum(ch.isalpha() and ('A' <= ch <= 'Z' or 'a' <= ch <= 'z') for ch in text)
+          cyr = len(re.findall(r'[А-Яа-яЁё]', text))
+          lat = len(re.findall(r'[A-Za-z]', text))
           share = cyr / max(cyr + lat, 1)
+          long_english = re.findall(r'(?i)(?:\b[a-z]{3,}\b[\s,.;:!?—\-]*){18,}', text)
           print(f'output_bytes={p.stat().st_size}')
           print(f'cyrillic_letters={cyr}')
           print(f'latin_letters={lat}')
           print(f'cyrillic_share={share:.4f}')
+          print(f'long_english_runs={len(long_english)}')
           assert share > 0.70, f'Unexpectedly low Cyrillic share: {share:.3f}'
+          assert len(long_english) < 25, f'Too many long untranslated English runs: {len(long_english)}'
           PY
 
       - name: Upload translated book
@@ -82,7 +88,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .bookai-cache
-          key: bookai-devices-optimal-${{ github.run_id }}
+          key: bookai-devices-recovery-${{ github.run_id }}
 
       - name: Upload diagnostics
         if: failure() || cancelled()
