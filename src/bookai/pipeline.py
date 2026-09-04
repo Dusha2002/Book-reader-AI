@@ -62,6 +62,22 @@ def _should_translate(text: str) -> bool:
     return True
 
 
+def _looks_untranslated(original: str, candidate: str) -> bool:
+    """Detect silent source fallbacks / overwhelmingly English output."""
+    candidate = (candidate or "").strip()
+    if not candidate:
+        return True
+    latin = len(re.findall(r"[A-Za-z]", candidate))
+    cyrillic = len(re.findall(r"[А-Яа-яЁё]", candidate))
+    if candidate == original.strip() and latin >= 3 and cyrillic == 0:
+        return True
+    # A translated literary paragraph may keep names in Latin, but it should not
+    # remain overwhelmingly English. Low thresholds catch short missed dialogue too.
+    if latin >= 6 and cyrillic < max(2, latin // 5):
+        return True
+    return False
+
+
 def _cache_path(source: Path, cache_dir: Path, mode: str) -> Path:
     digest = hashlib.sha256(source.read_bytes()).hexdigest()[:20]
     return cache_dir / f"{digest}.{mode}.json"
@@ -151,11 +167,36 @@ def translate_book(
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
 
     translated: dict[str, str] = dict(state.get("translations") or {})
+    completed_chapters = set(state.get("completed_chapters") or [])
+
+    # Old runs silently fell back to the English source when a model returned
+    # incomplete JSON. Remove only those suspicious cached values so a resume
+    # repairs them instead of paying to translate the whole book again.
+    suspicious = [
+        s for s in source_segments
+        if s.id in translated and _looks_untranslated(s.text, translated[s.id])
+    ]
+    if suspicious:
+        affected_chapters = {s.chapter for s in suspicious}
+        for s in suspicious:
+            translated.pop(s.id, None)
+        completed_chapters.difference_update(affected_chapters)
+        state["translations"] = translated
+        state["completed_chapters"] = sorted(completed_chapters)
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
+        _notify(
+            progress,
+            phase="repairing_untranslated",
+            progress=4,
+            suspicious=len(suspicious),
+            affected_chapters=len(affected_chapters),
+        )
+
     total = len(source_segments)
     completed = sum(s.id in translated for s in source_segments)
-    batch_chars = max(4000, int(os.getenv("BOOKAI_BATCH_CHARS") or "40000"))
-    gate_batch_chars = max(4000, int(os.getenv("BOOKAI_GATE_BATCH_CHARS") or "18000"))
-    edit_batch_chars = max(4000, int(os.getenv("BOOKAI_EDIT_BATCH_CHARS") or "12000"))
+    batch_chars = max(4000, int(os.getenv("BOOKAI_BATCH_CHARS") or "10000"))
+    gate_batch_chars = max(4000, int(os.getenv("BOOKAI_GATE_BATCH_CHARS") or "12000"))
+    edit_batch_chars = max(4000, int(os.getenv("BOOKAI_EDIT_BATCH_CHARS") or "8000"))
     concurrency = max(1, min(16, int(os.getenv("BOOKAI_CONCURRENCY") or "3")))
     _notify(
         progress,
@@ -179,6 +220,30 @@ def translate_book(
                 continue
             before, after = _context_for(source_segments, pending)
             draft = harness.translate(pending, memory, context_before=before, context_after=after)
+
+            # Repair incomplete model JSON / unchanged-English outputs immediately.
+            for repair_round in range(2):
+                bad = [s for s in pending if _looks_untranslated(s.text, draft.get(s.id, ""))]
+                if not bad:
+                    break
+                repaired: dict[str, str] = {}
+                for repair_chunk in _batches(bad, 6000):
+                    rb, ra = _context_for(source_segments, repair_chunk)
+                    repaired.update(harness.translate(repair_chunk, memory, context_before=rb, context_after=ra))
+                draft.update(repaired)
+                _notify(
+                    progress,
+                    phase="chapter_repair",
+                    chapter=name,
+                    round=repair_round + 1,
+                    repaired=len(bad),
+                )
+
+            bad = [s for s in pending if _looks_untranslated(s.text, draft.get(s.id, ""))]
+            if bad:
+                ids = ", ".join(s.id for s in bad[:12])
+                raise RuntimeError(f"Translator still returned untranslated output after repair: {ids}")
+
             new.update(draft)
             target_for_gate.extend(pending)
             translated_in_chapter += len(pending)
@@ -240,8 +305,6 @@ def translate_book(
                     )
         return name, new, findings
 
-    completed_chapters = set(state.get("completed_chapters") or [])
-
     def persist_result(name: str, new: dict[str, str], findings) -> None:
         nonlocal completed
         translated.update(new)
@@ -284,6 +347,16 @@ def translate_book(
     if errors:
         failed_names = ", ".join(name for name, _ in errors)
         raise RuntimeError(f"Chapter translation failed after retries: {failed_names}") from errors[0][1]
+
+    remaining = [
+        s for s in source_segments
+        if s.id not in translated or _looks_untranslated(s.text, translated.get(s.id, ""))
+    ]
+    if remaining:
+        state["translations"] = translated
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
+        ids = ", ".join(s.id for s in remaining[:20])
+        raise RuntimeError(f"Untranslated segments remain after repair ({len(remaining)}): {ids}")
 
     if memory_updates and mode != "fast" and chapters:
         _, last_chapter_segments = chapters[-1]
