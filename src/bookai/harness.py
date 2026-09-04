@@ -3,11 +3,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from .audit import safe_chapter_brief, semantic_gate_batch
+from .audit import safe_analyze_memory, safe_chapter_brief, semantic_gate_batch
 from .llm import (
     OpenAICompatibleProvider,
     alternative_batch,
-    analyze_memory,
     choose_candidate_batch,
     edit_batch,
     qa_batch,
@@ -17,6 +16,7 @@ from .llm import (
 )
 from .models import BookMemory, GateFinding, LLMProvider, Segment, SegmentTranslator
 from .polish import literary_polish_batch
+from .providers import CappedOpenAICompatibleProvider
 from .quality import batch_issues
 
 
@@ -115,6 +115,17 @@ class TranslationHarness:
                     f"[bookai-model-ceiling] role={role} requested={requested} forced={ceiling}",
                     flush=True,
                 )
+            compact_caps = {"analyzer": 4096, "gate": 8192, "memory": 4096}
+            if role in compact_caps:
+                cap = int(os.getenv(f"BOOKAI_{role.upper()}_MAX_TOKENS") or compact_caps[role])
+                return CappedOpenAICompatibleProvider(
+                    key,
+                    base,
+                    ceiling,
+                    reasoning,
+                    role=role,
+                    max_tokens=cap,
+                )
             return OpenAICompatibleProvider(key, base, ceiling, reasoning, role=role)
 
         translator_provider = p("BOOKAI_TRANSLATOR_MODEL", "translator")
@@ -173,7 +184,7 @@ class TranslationHarness:
         return {"total": total, "roles": roles, "translator": self.translator.name}
 
     def analyze(self, sample: str) -> BookMemory:
-        return analyze_memory(self.analyzer, sample)
+        return safe_analyze_memory(self.analyzer, sample)
 
     def chapter_brief(self, originals: list[Segment], memory: BookMemory) -> str:
         return safe_chapter_brief(self.analyzer, originals, memory)
