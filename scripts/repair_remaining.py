@@ -34,7 +34,6 @@ def persist(path: Path, state: dict, translations: dict[str, str]) -> None:
 def main() -> None:
     document = load_book(SOURCE)
     source_segments = [s for s in document.segments if _should_translate(s.text)]
-    by_id = {s.id: s for s in source_segments}
 
     state_path = _cache_path(SOURCE, CACHE_DIR, "optimal")
     if not state_path.exists():
@@ -50,38 +49,62 @@ def main() -> None:
     print(f"[bookai-final-repair] initial_remaining={len(remaining)} total={len(source_segments)}", flush=True)
 
     harness = TranslationHarness.from_env()
+    failed: list[str] = []
 
     for index, segment in enumerate(remaining, 1):
         candidate = ""
         before, after = _context_for(source_segments, [segment])
 
-        # Content-level retries, one segment at a time. HTTP retries are handled by the provider.
-        for attempt in range(3):
-            result = harness.translate([segment], memory, context_before=before, context_after=after)
-            candidate = (result.get(segment.id) or "").strip()
+        # One segment at a time. Malformed model JSON must never abort the whole book.
+        for attempt in range(2):
+            try:
+                result = harness.translate([segment], memory, context_before=before, context_after=after)
+                candidate = (result.get(segment.id) or "").strip()
+            except Exception as exc:
+                print(
+                    f"[bookai-final-repair] flash_error id={segment.id} attempt={attempt + 1}/2 "
+                    f"error={type(exc).__name__}",
+                    flush=True,
+                )
+                # Invalid JSON is unlikely to improve by hammering the same role; try once more,
+                # then fall through to the stronger model.
+                continue
             if not looks_untranslated(segment.text, candidate):
                 break
             print(
-                f"[bookai-final-repair] flash_retry id={segment.id} attempt={attempt + 1}/3",
+                f"[bookai-final-repair] flash_retry id={segment.id} attempt={attempt + 1}/2",
                 flush=True,
             )
 
-        # Stubborn passages go through the stronger model one at a time.
+        # Stubborn or malformed Flash responses go through V4 Pro one segment at a time.
         if looks_untranslated(segment.text, candidate):
             draft = {segment.id: candidate or segment.text}
-            for attempt in range(2):
-                result = harness.hard_edit([segment], draft, memory)
-                candidate = (result.get(segment.id) or "").strip()
+            for attempt in range(3):
+                try:
+                    result = harness.hard_edit([segment], draft, memory)
+                    candidate = (result.get(segment.id) or "").strip()
+                except Exception as exc:
+                    print(
+                        f"[bookai-final-repair] pro_error id={segment.id} attempt={attempt + 1}/3 "
+                        f"error={type(exc).__name__}",
+                        flush=True,
+                    )
+                    continue
                 if not looks_untranslated(segment.text, candidate):
                     break
                 draft[segment.id] = candidate or segment.text
                 print(
-                    f"[bookai-final-repair] pro_retry id={segment.id} attempt={attempt + 1}/2",
+                    f"[bookai-final-repair] pro_retry id={segment.id} attempt={attempt + 1}/3",
                     flush=True,
                 )
 
         if looks_untranslated(segment.text, candidate):
-            raise RuntimeError(f"Final per-segment repair failed for {segment.id}")
+            failed.append(segment.id)
+            print(
+                f"[bookai-final-repair] unresolved={len(failed)} id={segment.id}; continuing",
+                flush=True,
+            )
+            continue
 
         translations[segment.id] = candidate
         persist(state_path, state, translations)
@@ -94,11 +117,11 @@ def main() -> None:
         s for s in source_segments
         if s.id not in translations or looks_untranslated(s.text, translations.get(s.id, ""))
     ]
+    persist(state_path, state, translations)
     if final_remaining:
         ids = ", ".join(s.id for s in final_remaining[:20])
         raise RuntimeError(f"Untranslated segments remain ({len(final_remaining)}): {ids}")
 
-    persist(state_path, state, translations)
     save_book(document, translations, OUTPUT)
     print(
         f"[bookai-final-repair] done translated={len(source_segments)} output={OUTPUT} bytes={OUTPUT.stat().st_size}",
