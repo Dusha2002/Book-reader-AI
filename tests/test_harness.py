@@ -29,6 +29,10 @@ class RoleProvider:
         if self.role == "gate":
             return json.dumps({"issues": [{"id": "s000001", "severity": "medium", "reason": "awkward"}]})
         if self.role == "editor":
+            if "LITERARY POLISH PASS" in system:
+                raw = user.split("TARGETS:", 1)[1].split("\nSilently", 1)[0]
+                targets = json.loads(raw)
+                return json.dumps({sid: item["faithful_draft_ru"] for sid, item in targets.items()})
             return json.dumps({"s000001": "Хороший литературный перевод."})
         if self.role == "memory":
             return json.dumps({"glossary": {}, "characters": {}, "rolling_summary": "", "last_chapter": ""})
@@ -37,7 +41,7 @@ class RoleProvider:
         return json.dumps({})
 
 
-def test_optimal_only_edits_flagged_segments(tmp_path: Path):
+def test_optimal_polishes_all_then_only_repairs_flagged_segments(tmp_path: Path):
     src = tmp_path / "book.fb2"
     src.write_text(
         '<?xml version="1.0"?><FictionBook><body><section><p>First.</p><p>Second.</p><p>Third.</p></section></body></FictionBook>',
@@ -58,14 +62,20 @@ def test_optimal_only_edits_flagged_segments(tmp_path: Path):
     assert "Первый." in text
     assert "Хороший литературный перевод." in text
     assert "Третий." in text
-    # Two bounded repair passes are allowed if the mock gate keeps flagging the
-    # same segment. Neighbours may be visible as context, but only the flagged
-    # segment may appear in the editable PAIRS payload.
-    assert len(editor.calls) == 2
-    for _system, user in editor.calls:
-        pairs_text = user.split("PAIRS:", 1)[1]
-        pairs = json.loads(pairs_text)
+
+    polish_calls = [(system, user) for system, user in editor.calls if "LITERARY POLISH PASS" in system]
+    repair_calls = [(system, user) for system, user in editor.calls if "repair pass" in system]
+    assert len(polish_calls) == 1
+    polish_targets = json.loads(polish_calls[0][1].split("TARGETS:", 1)[1].split("\nSilently", 1)[0])
+    assert set(polish_targets) == {"s000000", "s000001", "s000002"}
+
+    # The mock gate keeps flagging the same segment, so two bounded repairs are
+    # allowed. Neighbours remain read-only context and never become edit targets.
+    assert len(repair_calls) == 2
+    for _system, user in repair_calls:
+        pairs = json.loads(user.split("PAIRS:", 1)[1])
         assert set(pairs) == {"s000001"}
-        assert '"s000000"' in user.split("PAIRS:", 1)[0]
-        assert '"s000002"' in user.split("PAIRS:", 1)[0]
+        context = user.split("PAIRS:", 1)[0]
+        assert '"s000000"' in context
+        assert '"s000002"' in context
     assert not hard.calls
