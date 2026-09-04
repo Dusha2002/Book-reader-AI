@@ -2,7 +2,7 @@ name: literary-benchmark
 
 on:
   push:
-    branches: [literary-harness-v4]
+    branches: [literary-harness-v5]
     paths:
       - '.github/workflows/literary-benchmark.yml'
       - 'scripts/literary_benchmark.py'
@@ -63,7 +63,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: literary-benchmark-flash-v4
+          name: literary-benchmark-flash-v5
           path: |
             literary_benchmark_output.json
             literary-benchmark.log
