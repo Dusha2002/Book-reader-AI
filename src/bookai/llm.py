@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import threading
+import time
 from dataclasses import asdict
 
 import httpx
@@ -55,12 +57,37 @@ class OpenAICompatibleProvider:
         if self.reasoning_effort == "none":
             payload["temperature"] = temperature
 
-        response = httpx.post(
-            f"{self.base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=240.0,
-        )
+        max_attempts = max(1, int(os.getenv("BOOKAI_RETRY_ATTEMPTS") or "10"))
+        response: httpx.Response | None = None
+        for attempt in range(max_attempts):
+            try:
+                response = httpx.post(
+                    f"{self.base_url}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=240.0,
+                )
+                retryable = response.status_code in {408, 409, 425, 429} or response.status_code >= 500
+                if not retryable:
+                    response.raise_for_status()
+                    break
+                if attempt + 1 >= max_attempts:
+                    response.raise_for_status()
+                raw_retry_after = response.headers.get("Retry-After")
+                try:
+                    server_delay = float(raw_retry_after) if raw_retry_after else 0.0
+                except ValueError:
+                    server_delay = 0.0
+                delay = min(120.0, max(server_delay, min(60.0, 2.0**attempt)))
+                time.sleep(delay + random.uniform(0.15, 0.9))
+            except (httpx.TimeoutException, httpx.TransportError):
+                if attempt + 1 >= max_attempts:
+                    raise
+                delay = min(60.0, 2.0**attempt)
+                time.sleep(delay + random.uniform(0.15, 0.9))
+
+        if response is None:
+            raise RuntimeError("LLM request did not produce a response")
         response.raise_for_status()
         data = response.json()
         usage = data.get("usage") or {}
