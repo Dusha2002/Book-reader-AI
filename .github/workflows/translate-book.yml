@@ -1,7 +1,7 @@
 name: translate-book
 on:
   push:
-    branches: [translation-recovery-v4]
+    branches: [translation-recovery-v5]
 
 permissions:
   contents: read
@@ -72,7 +72,6 @@ jobs:
           source .env
           set +a
 
-          # Runtime settings MUST override stale values tracked in .env.
           export BOOKAI_TRANSLATOR_BACKEND='api'
           export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4-flash-0731'
