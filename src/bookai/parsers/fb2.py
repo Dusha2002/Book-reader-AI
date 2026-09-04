@@ -8,6 +8,7 @@ from lxml import etree
 from ..models import BookDocument, Segment
 
 _TEXT_TAGS = {"p", "subtitle", "text-author", "date", "v"}
+_FB2_NS = "http://www.gribuser.ru/xml/fictionbook/2.0"
 
 
 def _local(tag: str) -> str:
@@ -47,10 +48,29 @@ def load_fb2(path: Path) -> BookDocument:
 
 
 def _replace_text_preserving_inline(node: etree._Element, text: str) -> None:
+    # The current segment contract translates a whole FB2 paragraph as one unit.
+    # Keep inline element shells/attributes instead of deleting them; their textual
+    # content is cleared so English fragments cannot survive inside a translated p.
     node.text = text
     for child in node:
         child.text = None
         child.tail = None
+
+
+def _set_translation_language(tree: etree._ElementTree) -> None:
+    root = tree.getroot()
+    ns = root.nsmap.get(None) or _FB2_NS
+    title_infos = root.xpath("//*[local-name()='description']/*[local-name()='title-info']")
+    for title_info in title_infos:
+        lang = next((c for c in title_info if isinstance(c.tag, str) and _local(c.tag) == "lang"), None)
+        old_lang = (lang.text or "").strip() if lang is not None else ""
+        if lang is None:
+            lang = etree.SubElement(title_info, f"{{{ns}}}lang")
+        lang.text = "ru"
+        src_lang = next((c for c in title_info if isinstance(c.tag, str) and _local(c.tag) == "src-lang"), None)
+        if src_lang is None and old_lang and old_lang.lower() != "ru":
+            src_lang = etree.SubElement(title_info, f"{{{ns}}}src-lang")
+            src_lang.text = old_lang
 
 
 def save_fb2(document: BookDocument, translations: dict[str, str], output: Path) -> None:
@@ -60,5 +80,6 @@ def save_fb2(document: BookDocument, translations: dict[str, str], output: Path)
         sid = node.attrib.pop("data-bookai-id", None)
         if sid and sid in translations:
             _replace_text_preserving_inline(node, translations[sid])
+    _set_translation_language(tree)
     output.parent.mkdir(parents=True, exist_ok=True)
     tree.write(str(output), encoding="utf-8", xml_declaration=True, pretty_print=False)
