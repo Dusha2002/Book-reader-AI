@@ -22,8 +22,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .bookai-cache
-          key: bookai-devices-recovery-v3-${{ github.run_id }}
+          key: bookai-devices-recovery-v4-${{ github.run_id }}
           restore-keys: |
+            bookai-devices-recovery-v4-
             bookai-devices-recovery-v3-
 
       - name: Install project
@@ -31,22 +32,33 @@ jobs:
 
       - name: Translate full book via OpenRouter
         shell: bash
-        env:
-          BOOKAI_CONCURRENCY: '3'
-          BOOKAI_BATCH_CHARS: '40000'
-          BOOKAI_ANALYSIS_CHARS: '104000'
-          BOOKAI_RETRY_ATTEMPTS: '3'
-          BOOKAI_REQUEST_TIMEOUT: '300'
-          BOOKAI_ANALYZER_MODEL: 'deepseek/deepseek-v4-flash-0731'
-          BOOKAI_EDITOR_MODEL: 'deepseek/deepseek-v4-flash-0731'
         run: |
           set -euo pipefail
           set -a
           source .env
           set +a
+
+          # Runtime settings MUST override stale values tracked in .env.
+          export BOOKAI_TRANSLATOR_BACKEND='api'
+          export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_LLM_GATE='true'
+          export BOOKAI_REASONING='none'
+          export BOOKAI_CONCURRENCY='3'
+          export BOOKAI_BATCH_CHARS='40000'
+          export BOOKAI_GATE_BATCH_CHARS='18000'
+          export BOOKAI_EDIT_BATCH_CHARS='12000'
+          export BOOKAI_ANALYSIS_CHARS='104000'
+          export BOOKAI_RETRY_ATTEMPTS='3'
+          export BOOKAI_REQUEST_TIMEOUT='300'
+
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          echo "Starting compact-analysis resumable Optimal translation"
+          echo "Starting v4 resumable Optimal translation"
+          echo "Runtime: concurrency=$BOOKAI_CONCURRENCY translate_batch=$BOOKAI_BATCH_CHARS gate_batch=$BOOKAI_GATE_BATCH_CHARS edit_batch=$BOOKAI_EDIT_BATCH_CHARS analyzer=$BOOKAI_ANALYZER_MODEL editor=$BOOKAI_EDITOR_MODEL"
           bookai Devices_and_Desires.fb2 \
             --output Devices_and_Desires_RU.fb2 \
             --mode optimal 2>&1 | tee translation.log
@@ -89,7 +101,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .bookai-cache
-          key: bookai-devices-recovery-v3-${{ github.run_id }}
+          key: bookai-devices-recovery-v4-${{ github.run_id }}
 
       - name: Upload diagnostics
         if: failure() || cancelled()
