@@ -1,5 +1,6 @@
 import pytest
 
+from bookai.harness import FLASH_MODEL, LLMTranslator, TranslationHarness
 from bookai.models import BookMemory, Segment
 from bookai.quality import assert_exact_ids, candidate_issues
 
@@ -33,3 +34,20 @@ def test_exact_id_contract_never_silently_falls_back():
         assert_exact_ids(segments, {"s000001": "Один"}, "translator")
     with pytest.raises(ValueError, match="id contract"):
         assert_exact_ids(segments, {"s000001": "Один", "s000002": "Два", "extra": "x"}, "translator")
+
+
+def test_env_cannot_raise_model_above_flash(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-only-key")
+    monkeypatch.setenv("BOOKAI_MAX_MODEL", "deepseek/deepseek-v4-pro-0813")
+    monkeypatch.setenv("BOOKAI_EDITOR_MODEL", "qwen/qwen3.8-flash")
+    monkeypatch.setenv("BOOKAI_HARD_MODEL", "deepseek/deepseek-v4-pro-0813")
+    monkeypatch.setenv("BOOKAI_TRANSLATOR_BACKEND", "api")
+
+    harness = TranslationHarness.from_env()
+    assert harness.analyzer.model == FLASH_MODEL
+    assert harness.gate.model == FLASH_MODEL
+    assert harness.editor.model == FLASH_MODEL
+    assert harness.hard_editor.model == FLASH_MODEL
+    assert harness.memory_model.model == FLASH_MODEL
+    assert isinstance(harness.translator, LLMTranslator)
+    assert harness.translator.provider.model == FLASH_MODEL
