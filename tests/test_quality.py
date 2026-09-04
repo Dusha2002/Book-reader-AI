@@ -36,6 +36,20 @@ def test_exact_id_contract_never_silently_falls_back():
         assert_exact_ids(segments, {"s000001": "Один", "s000002": "Два", "extra": "x"}, "translator")
 
 
+def test_single_segment_wrapper_is_recovered_but_multi_segment_wrapper_is_rejected():
+    one = [Segment("s000010", "He left.", "/p")]
+    assert assert_exact_ids(one, {"type": "translation", "translation": "Он ушёл."}, "editor") == {
+        "s000010": "Он ушёл."
+    }
+
+    many = [
+        Segment("s000010", "He left.", "/p"),
+        Segment("s000012", "She stayed.", "/p"),
+    ]
+    with pytest.raises(ValueError, match="id contract"):
+        assert_exact_ids(many, {"type": "translation", "translation": "Он ушёл."}, "editor")
+
+
 def test_env_cannot_raise_model_above_flash(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-only-key")
     monkeypatch.setenv("BOOKAI_MAX_MODEL", "deepseek/deepseek-v4-pro-0813")
