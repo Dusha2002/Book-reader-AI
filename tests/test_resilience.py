@@ -1,5 +1,5 @@
-from bookai.models import Segment
-from bookai.resilience import resilient_segment_map
+from bookai.models import GateFinding, Segment
+from bookai.resilience import resilient_findings, resilient_segment_map
 
 
 def test_structured_failure_splits_until_single_targets():
@@ -39,3 +39,39 @@ def test_provider_errors_do_not_fan_out_into_many_calls():
     else:
         raise AssertionError("expected provider failure")
     assert calls == 2
+
+
+def test_critic_schema_failure_retries_then_splits():
+    segments = [
+        Segment("s1", "One", "/p"),
+        Segment("s2", "Two", "/p"),
+        Segment("s3", "Three", "/p"),
+    ]
+    calls = []
+
+    def critic(chunk):
+        calls.append([s.id for s in chunk])
+        if len(chunk) > 1:
+            raise TypeError("mock issues contract")
+        if chunk[0].id == "s2":
+            return [GateFinding("s2", "hard", "enumeration: missing item")]
+        return []
+
+    findings = resilient_findings(segments, critic, label="semantic_gate", attempts=1)
+    assert [(f.id, f.severity) for f in findings] == [("s2", "hard")]
+    assert ["s1", "s2", "s3"] in calls
+    assert ["s1"] in calls and ["s2"] in calls and ["s3"] in calls
+
+
+def test_persistent_single_critic_schema_failure_fails_closed():
+    segment = Segment("s1", "One", "/p")
+
+    def critic(_chunk):
+        raise ValueError("bad schema")
+
+    try:
+        resilient_findings([segment], critic, label="literary_gate", attempts=2)
+    except RuntimeError as exc:
+        assert "failed strict QA contract" in str(exc)
+    else:
+        raise AssertionError("expected fail-closed critic error")
