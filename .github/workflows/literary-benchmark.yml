@@ -1,0 +1,62 @@
+name: literary-benchmark
+
+on:
+  push:
+    branches: [literary-harness-v2]
+    paths:
+      - '.github/workflows/literary-benchmark.yml'
+      - 'scripts/literary_benchmark.py'
+      - 'src/bookai/**'
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install project
+        run: pip install -e .
+
+      - name: Run blind literary benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          source .env
+          set +a
+
+          # Explicit runtime settings are applied AFTER .env. The Python harness
+          # also enforces DeepSeek V4 Flash as a hard ceiling.
+          export BOOKAI_TRANSLATOR_BACKEND='api'
+          export BOOKAI_MAX_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_HARD_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_REASONING='none'
+          export BOOKAI_RETRY_ATTEMPTS='3'
+          export BOOKAI_REQUEST_TIMEOUT='180'
+          test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
+
+          python scripts/literary_benchmark.py 2>&1 | tee literary-benchmark.log
+
+      - name: Upload benchmark
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: literary-benchmark-flash-v2
+          path: |
+            literary_benchmark_output.json
+            literary-benchmark.log
+          if-no-files-found: ignore
+          retention-days: 2
