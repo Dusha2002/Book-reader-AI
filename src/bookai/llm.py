@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from dataclasses import asdict
 
 import httpx
+from dotenv import load_dotenv
 
 from .models import BookMemory, GateFinding, LLMProvider, Segment, StyleGuide
 
@@ -25,6 +27,7 @@ class OpenAICompatibleProvider:
         reasoning_effort: str | None = None,
         role: str = "llm",
     ):
+        load_dotenv()
         self.api_key = api_key or os.getenv("OPENROUTER_API_KEY") or os.getenv("BOOKAI_API_KEY")
         self.base_url = (base_url or os.getenv("BOOKAI_BASE_URL") or "https://openrouter.ai/api/v1").rstrip("/")
         self.model = model or os.getenv("BOOKAI_MODEL") or "deepseek/deepseek-v4-flash-0731"
@@ -33,6 +36,7 @@ class OpenAICompatibleProvider:
         if not self.api_key:
             raise ValueError("OPENROUTER_API_KEY or BOOKAI_API_KEY is required")
         self.usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 0}
+        self._usage_lock = threading.Lock()
 
     def complete(self, system: str, user: str, *, temperature: float = 0.2) -> str:
         payload: dict = {
@@ -60,10 +64,11 @@ class OpenAICompatibleProvider:
         response.raise_for_status()
         data = response.json()
         usage = data.get("usage") or {}
-        self.usage["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
-        self.usage["completion_tokens"] += int(usage.get("completion_tokens") or 0)
-        self.usage["total_tokens"] += int(usage.get("total_tokens") or 0)
-        self.usage["requests"] += 1
+        with self._usage_lock:
+            self.usage["prompt_tokens"] += int(usage.get("prompt_tokens") or 0)
+            self.usage["completion_tokens"] += int(usage.get("completion_tokens") or 0)
+            self.usage["total_tokens"] += int(usage.get("total_tokens") or 0)
+            self.usage["requests"] += 1
         return data["choices"][0]["message"]["content"]
 
 
@@ -90,6 +95,7 @@ def extract_json(text: str) -> object:
 def analyze_memory(provider: LLMProvider, sample: str, title: str = "", author: str = "") -> BookMemory:
     system = """You are a senior literary editor preparing a compact translation bible for an English novel translated into Russian.
 Return ONLY valid JSON. Never invent plot details. Analyze only evidence in the supplied sample."""
+    analysis_limit = max(50000, int(os.getenv("BOOKAI_ANALYSIS_CHARS") or "1500000"))
     user = f"""Book title: {title!r}\nAuthor: {author!r}
 Return an object with keys:
 style: {{narrative_voice, rhythm, dialogue, humor, taboos:[...]}},
@@ -97,7 +103,7 @@ glossary: {{original_term: preferred_russian}},
 characters: {{name: speech/personality note}},
 rolling_summary: a short factual summary in Russian.
 
-SAMPLE:\n{sample[:50000]}"""
+SAMPLE:\n{sample[:analysis_limit]}"""
     try:
         obj = extract_json(provider.complete(system, user, temperature=0.1))
         assert isinstance(obj, dict)
