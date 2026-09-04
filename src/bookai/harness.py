@@ -3,11 +3,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from .audit import safe_chapter_brief, semantic_gate_batch
 from .llm import (
     OpenAICompatibleProvider,
     alternative_batch,
     analyze_memory,
-    chapter_brief,
     choose_candidate_batch,
     edit_batch,
     qa_batch,
@@ -176,7 +176,7 @@ class TranslationHarness:
         return analyze_memory(self.analyzer, sample)
 
     def chapter_brief(self, originals: list[Segment], memory: BookMemory) -> str:
-        return chapter_brief(self.analyzer, originals, memory)
+        return safe_chapter_brief(self.analyzer, originals, memory)
 
     def translate(self, segments, memory, *, context_before=None, context_after=None):
         return self.translator.translate(segments, memory, context_before=context_before, context_after=context_after)
@@ -191,17 +191,31 @@ class TranslationHarness:
     ) -> dict[str, str]:
         return literary_polish_batch(self.editor, originals, draft, memory, context=context)
 
+    @staticmethod
+    def _merge_finding(merged: dict[str, GateFinding], finding: GateFinding) -> None:
+        old = merged.get(finding.id)
+        if old is None:
+            merged[finding.id] = finding
+            return
+        if finding.severity == "hard" and old.severity != "hard":
+            old.severity = "hard"
+        if finding.reason and finding.reason not in old.reason:
+            old.reason = old.reason + "; " + finding.reason
+
     def gate_findings(self, originals: list[Segment], draft: dict[str, str], memory: BookMemory) -> list[GateFinding]:
         merged: dict[str, GateFinding] = {}
         for issue in batch_issues(originals, draft, memory):
-            merged[issue.id] = GateFinding(issue.id, issue.severity, f"{issue.code}: {issue.reason}")
+            self._merge_finding(
+                merged,
+                GateFinding(issue.id, issue.severity, f"{issue.code}: {issue.reason}"),
+            )
         if self.use_llm_gate:
+            # Two independent cheap-model critics instead of one overloaded judge:
+            # first semantic completeness, then literary Russian/voice.
+            for finding in semantic_gate_batch(self.gate, originals, draft, memory):
+                self._merge_finding(merged, finding)
             for finding in quality_gate_batch(self.gate, originals, draft, memory):
-                old = merged.get(finding.id)
-                if old is None or finding.severity == "hard":
-                    merged[finding.id] = finding
-                elif finding.reason and finding.reason not in old.reason:
-                    old.reason = old.reason + "; " + finding.reason
+                self._merge_finding(merged, finding)
         return list(merged.values())
 
     def edit(
