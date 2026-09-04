@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from .audit import safe_analyze_memory, safe_chapter_brief, semantic_gate_batch
+from .audit import safe_analyze_memory, safe_chapter_brief, safe_update_memory, semantic_gate_batch
 from .llm import (
     OpenAICompatibleProvider,
     alternative_batch,
@@ -12,7 +12,6 @@ from .llm import (
     qa_batch,
     quality_gate_batch,
     translate_batch,
-    update_memory,
 )
 from .models import BookMemory, GateFinding, LLMProvider, Segment, SegmentTranslator
 from .polish import literary_polish_batch
@@ -277,4 +276,4 @@ class TranslationHarness:
         return qa_batch(self.hard_editor, originals, draft, memory)
 
     def update_memory(self, originals: list[Segment], translated: dict[str, str], memory: BookMemory) -> BookMemory:
-        return update_memory(self.memory_model, originals, translated, memory)
+        return safe_update_memory(self.memory_model, originals, translated, memory)
