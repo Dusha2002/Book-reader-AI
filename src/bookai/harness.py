@@ -17,6 +17,7 @@ from .models import BookMemory, GateFinding, LLMProvider, Segment, SegmentTransl
 from .polish import literary_polish_batch
 from .providers import CappedOpenAICompatibleProvider
 from .quality import batch_issues
+from .resilience import resilient_segment_map
 
 
 FLASH_MODEL = "deepseek/deepseek-v4-flash-0731"
@@ -189,7 +190,25 @@ class TranslationHarness:
         return safe_chapter_brief(self.analyzer, originals, memory)
 
     def translate(self, segments, memory, *, context_before=None, context_after=None):
-        return self.translator.translate(segments, memory, context_before=context_before, context_after=context_after)
+        chunk = list(segments)
+        if not isinstance(self.translator, LLMTranslator):
+            return self.translator.translate(
+                chunk,
+                memory,
+                context_before=context_before,
+                context_after=context_after,
+            )
+        return resilient_segment_map(
+            chunk,
+            lambda part: self.translator.translate(
+                part,
+                memory,
+                context_before=context_before,
+                context_after=context_after,
+            ),
+            label="translator",
+            attempts=2,
+        )
 
     def polish(
         self,
@@ -199,7 +218,12 @@ class TranslationHarness:
         *,
         context: list[dict] | None = None,
     ) -> dict[str, str]:
-        return literary_polish_batch(self.editor, originals, draft, memory, context=context)
+        return resilient_segment_map(
+            list(originals),
+            lambda part: literary_polish_batch(self.editor, part, draft, memory, context=context),
+            label="literary_polish",
+            attempts=2,
+        )
 
     @staticmethod
     def _merge_finding(merged: dict[str, GateFinding], finding: GateFinding) -> None:
@@ -237,37 +261,46 @@ class TranslationHarness:
         reasons: dict[str, str] | None = None,
         context: list[dict] | None = None,
     ) -> dict[str, str]:
-        return edit_batch(self.editor, originals, draft, memory, reasons=reasons, context=context)
+        return resilient_segment_map(
+            list(originals),
+            lambda part: edit_batch(
+                self.editor,
+                part,
+                draft,
+                memory,
+                reasons=reasons,
+                context=context,
+            ),
+            label="editor",
+            attempts=2,
+        )
 
     def alternative(self, originals: list[Segment], memory: BookMemory) -> dict[str, str]:
         # Alternative generation is an optional quality booster, not a single
-        # point of failure. Invalid JSON/empty ids must fall through to the
-        # targeted semantic repair pass that follows.
-        last_error: BaseException | None = None
-        for attempt in range(2):
-            try:
-                return alternative_batch(self.editor, originals, memory)
-            except BaseException as exc:
-                last_error = exc
-                print(
-                    f"[bookai-alternative-retry] attempt={attempt + 1}/2 error={type(exc).__name__}",
-                    flush=True,
-                )
-        print(
-            f"[bookai-alternative-skip] error={type(last_error).__name__ if last_error else 'unknown'}",
-            flush=True,
-        )
-        # English source is deliberately returned as a poisoned sentinel. The
-        # deterministic QA immediately rejects it, so it can never replace the
-        # valid current translation; targeted repair still runs afterwards.
-        return {s.id: s.text for s in originals}
+        # point of failure. Strict structured failures are divided into smaller
+        # batches; total provider failure still falls through to targeted repair.
+        try:
+            return resilient_segment_map(
+                list(originals),
+                lambda part: alternative_batch(self.editor, part, memory),
+                label="alternative",
+                attempts=2,
+            )
+        except BaseException as exc:
+            print(
+                f"[bookai-alternative-skip] error={type(exc).__name__}",
+                flush=True,
+            )
+            # English source is a poisoned sentinel. Deterministic QA rejects it,
+            # so it can never replace the valid current translation.
+            return {s.id: s.text for s in originals}
 
     def choose(self, originals: list[Segment], first: dict[str, str], second: dict[str, str], memory: BookMemory) -> dict[str, str]:
         try:
             return choose_candidate_batch(self.gate, originals, first, second, memory)
         except BaseException as exc:
-            # A/B selection is also optional. Preserve the known-good candidate
-            # and let the explicit defect-driven editor repair it next.
+            # A/B selection is optional. Preserve the known-good candidate and
+            # let the explicit defect-driven editor repair it next.
             print(f"[bookai-judge-skip] error={type(exc).__name__}", flush=True)
             return dict(first)
 
