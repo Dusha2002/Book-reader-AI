@@ -14,7 +14,10 @@ class SequenceProvider:
     def complete(self, system: str, user: str, *, temperature: float = 0.2) -> str:
         self.calls.append((system, user))
         self.usage["requests"] += 1
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
 
 
 def test_corrupt_mixed_script_brief_is_retried():
@@ -27,6 +30,15 @@ def test_corrupt_mixed_script_brief_is_retried():
     brief = safe_chapter_brief(provider, segments, BookMemory(), attempts=2)
     assert "сухая ирония" in brief
     assert len(provider.calls) == 2
+
+
+def test_brief_transport_failures_fall_back_without_inventing_plot():
+    provider = SequenceProvider([TimeoutError("slow"), TimeoutError("slow again")])
+    segments = [Segment("s000001", "Valens practised fencing.", "/p")]
+    brief = safe_chapter_brief(provider, segments, BookMemory(), attempts=2)
+    assert len(provider.calls) == 2
+    assert "исходный текст" in brief
+    assert "не добавляй фактов" in brief
 
 
 def test_semantic_gate_promotes_missing_enumeration_to_hard():
