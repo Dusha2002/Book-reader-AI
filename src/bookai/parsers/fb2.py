@@ -14,6 +14,20 @@ def _local(tag: str) -> str:
     return etree.QName(tag).localname
 
 
+def _chapter_for(node: etree._Element, tree: etree._ElementTree) -> str:
+    parent = node
+    while parent is not None:
+        if isinstance(parent.tag, str) and _local(parent.tag) == "section":
+            for child in parent:
+                if isinstance(child.tag, str) and _local(child.tag) == "title":
+                    title = " ".join("".join(child.itertext()).split())
+                    if title:
+                        return title[:200]
+            return tree.getpath(parent)
+        parent = parent.getparent()
+    return "book"
+
+
 def load_fb2(path: Path) -> BookDocument:
     parser = etree.XMLParser(remove_blank_text=False, recover=True, huge_tree=True)
     tree = etree.parse(str(path), parser)
@@ -26,7 +40,7 @@ def load_fb2(path: Path) -> BookDocument:
         if not text:
             continue
         sid = f"s{idx:06d}"
-        segments.append(Segment(id=sid, text=text, locator=tree.getpath(node)))
+        segments.append(Segment(id=sid, text=text, locator=tree.getpath(node), chapter=_chapter_for(node, tree)))
         node.set("data-bookai-id", sid)
         idx += 1
     return BookDocument(source=path, format="fb2", segments=segments, payload=tree)

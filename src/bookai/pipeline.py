@@ -6,11 +6,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Callable
 
-from .llm import analyze_memory, edit_batch, qa_batch, translate_batch, update_memory
+from .harness import TranslationHarness
 from .models import BookMemory, LLMProvider, Segment, StyleGuide
 from .parsers.base import load_book, save_book
 
 ProgressCallback = Callable[[dict], None]
+MODE_ALIASES = {"standard": "optimal", "high": "literary"}
+VALID_MODES = {"fast", "optimal", "literary", *MODE_ALIASES}
 
 
 def _batches(segments: list[Segment], char_limit: int = 12000):
@@ -30,9 +32,9 @@ def _batches(segments: list[Segment], char_limit: int = 12000):
         yield batch
 
 
-def _cache_path(source: Path, cache_dir: Path) -> Path:
+def _cache_path(source: Path, cache_dir: Path, mode: str) -> Path:
     digest = hashlib.sha256(source.read_bytes()).hexdigest()[:20]
-    return cache_dir / f"{digest}.json"
+    return cache_dir / f"{digest}.{mode}.json"
 
 
 def _memory_from_dict(data: dict) -> BookMemory:
@@ -53,18 +55,27 @@ def _notify(callback: ProgressCallback | None, **payload) -> None:
         callback(payload)
 
 
+def _context_for(segments: list[Segment], batch: list[Segment], radius: int = 2) -> tuple[list[Segment], list[Segment]]:
+    by_id = {s.id: i for i, s in enumerate(segments)}
+    start = by_id[batch[0].id]
+    end = by_id[batch[-1].id]
+    return segments[max(0, start - radius) : start], segments[end + 1 : end + 1 + radius]
+
+
 def translate_book(
     source: Path,
     output: Path,
-    provider: LLMProvider,
+    provider_or_harness: LLMProvider | TranslationHarness,
     *,
-    mode: str = "high",
+    mode: str = "optimal",
     cache_dir: Path | None = None,
     progress: ProgressCallback | None = None,
     memory_updates: bool = True,
 ) -> Path:
-    if mode not in {"fast", "standard", "high"}:
-        raise ValueError("mode must be fast, standard, or high")
+    if mode not in VALID_MODES:
+        raise ValueError("mode must be fast, optimal/literary (legacy aliases: standard/high)")
+    mode = MODE_ALIASES.get(mode, mode)
+    harness = provider_or_harness if isinstance(provider_or_harness, TranslationHarness) else TranslationHarness.single_provider(provider_or_harness)
 
     _notify(progress, phase="parsing", progress=1)
     document = load_book(source)
@@ -73,7 +84,7 @@ def translate_book(
 
     cache_dir = cache_dir or source.parent / ".bookai-cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    state_path = _cache_path(source, cache_dir)
+    state_path = _cache_path(source, cache_dir, mode)
     state: dict = {}
     if state_path.exists():
         try:
@@ -87,7 +98,7 @@ def translate_book(
     else:
         _notify(progress, phase="analyzing_style", progress=3)
         sample = "\n\n".join(s.text for s in document.segments[:150])[:50000]
-        memory = analyze_memory(provider, sample)
+        memory = harness.analyze(sample)
         state["memory"] = asdict(memory)
         state["translations"] = {}
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
@@ -102,24 +113,37 @@ def translate_book(
         pending = [s for s in batch if s.id not in translated]
         if not pending:
             continue
-        final = translate_batch(provider, pending, memory)
-        if mode in {"standard", "high"}:
-            _notify(progress, phase="literary_edit", progress=max(5, int(completed / total * 90)), completed=completed, total=total)
-            final = edit_batch(provider, pending, final, memory)
-        if mode == "high":
-            _notify(progress, phase="quality_check", progress=max(5, int(completed / total * 90)), completed=completed, total=total)
-            final = qa_batch(provider, pending, final, memory)
+        before, after = _context_for(document.segments, pending)
+        final = harness.translate(pending, memory, context_before=before, context_after=after)
+
+        findings = []
+        if mode in {"optimal", "literary"}:
+            _notify(progress, phase="quality_gate", progress=max(5, int(completed / total * 90)), completed=completed, total=total)
+            findings = harness.gate_findings(pending, final, memory)
+            finding_by_id = {f.id: f for f in findings}
+            medium = [s for s in pending if s.id in finding_by_id and finding_by_id[s.id].severity == "medium"]
+            hard = [s for s in pending if s.id in finding_by_id and finding_by_id[s.id].severity == "hard"]
+
+            to_edit = medium + hard
+            if to_edit:
+                _notify(progress, phase="selective_edit", progress=max(5, int(completed / total * 90)), completed=completed, total=total, flagged=len(to_edit))
+                final.update(harness.edit(to_edit, final, memory))
+
+            if mode == "literary" and hard:
+                _notify(progress, phase="hard_cases", progress=max(5, int(completed / total * 90)), completed=completed, total=total, hard=len(hard))
+                final.update(harness.hard_edit(hard, final, memory))
 
         translated.update(final)
         completed += len(pending)
 
         if memory_updates and mode != "fast":
             _notify(progress, phase="updating_memory", progress=max(5, int(completed / total * 90)), completed=completed, total=total)
-            memory = update_memory(provider, pending, final, memory)
+            memory = harness.update_memory(pending, final, memory)
 
         state["translations"] = translated
         state["memory"] = asdict(memory)
         state["last_batch"] = batch_index
+        state["last_findings"] = [asdict(f) for f in findings]
         state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
         _notify(
             progress,
@@ -128,6 +152,7 @@ def translate_book(
             completed=completed,
             total=total,
             chapter=pending[-1].chapter if pending else "",
+            flagged=len(findings),
         )
 
     _notify(progress, phase="building_book", progress=97, completed=completed, total=total)

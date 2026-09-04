@@ -24,6 +24,15 @@ def _visible_nodes(soup: BeautifulSoup) -> list[NavigableString]:
     return out
 
 
+def _chapter_name(soup: BeautifulSoup, fallback: str) -> str:
+    heading = soup.find(["h1", "h2", "h3", "title"])
+    if heading:
+        value = " ".join(heading.get_text(" ", strip=True).split())
+        if value:
+            return value[:200]
+    return fallback
+
+
 def load_epub(path: Path) -> BookDocument:
     with zipfile.ZipFile(path, "r") as zf:
         files = {name: zf.read(name) for name in zf.namelist()}
@@ -34,10 +43,11 @@ def load_epub(path: Path) -> BookDocument:
     for name in text_files:
         soup = BeautifulSoup(files[name], "lxml-xml")
         visible = _visible_nodes(soup)
+        chapter = _chapter_name(soup, name)
         for pos, node in enumerate(visible):
             text = str(node).strip()
             sid = f"s{idx:06d}"
-            segments.append(Segment(id=sid, text=text, locator=f"{name}#{pos}"))
+            segments.append(Segment(id=sid, text=text, locator=f"{name}#{pos}", chapter=chapter))
             segment_map[sid] = (name, pos)
             idx += 1
     return BookDocument(path, "epub", segments, EpubPayload(files, text_files, segment_map))

@@ -4,24 +4,26 @@ from pathlib import Path
 
 import typer
 
-from .llm import OpenAICompatibleProvider
-from .pipeline import translate_book
+from .harness import TranslationHarness
+from .pipeline import MODE_ALIASES, translate_book
 
-app = typer.Typer(no_args_is_help=True, help="Translate FB2/EPUB books with context-aware literary editing.")
+app = typer.Typer(no_args_is_help=True, help="Translate FB2/EPUB/DOCX/TXT with a selective multi-model literary harness.")
 
 
 @app.command()
 def translate(
     source: Path = typer.Argument(..., exists=True, dir_okay=False),
     output: Path | None = typer.Option(None, "--output", "-o"),
-    mode: str = typer.Option("high", help="fast = translation, standard = + literary edit, high = + bilingual QA"),
+    mode: str = typer.Option("optimal", help="fast | optimal | literary"),
 ):
-    if mode not in {"fast", "standard", "high"}:
-        raise typer.BadParameter("mode must be fast, standard, or high")
+    if mode not in {"fast", "optimal", "literary", "standard", "high"}:
+        raise typer.BadParameter("mode must be fast, optimal, or literary")
+    mode = MODE_ALIASES.get(mode, mode)
     output = output or source.with_name(f"{source.stem}.ru{source.suffix}")
-    provider = OpenAICompatibleProvider()
-    result = translate_book(source, output, provider, mode=mode)
+    harness = TranslationHarness.from_env()
+    result = translate_book(source, output, harness, mode=mode)
     typer.echo(f"Done: {result}")
+    typer.echo(f"Usage: {harness.usage}")
 
 
 if __name__ == "__main__":

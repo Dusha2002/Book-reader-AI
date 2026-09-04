@@ -1,3 +1,3 @@
-"""Book Reader AI: context-aware literary translation for ebooks."""
+"""Book Reader AI: selective multi-model literary translation harness."""
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
