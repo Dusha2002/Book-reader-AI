@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass
 
 from .llm import (
     OpenAICompatibleProvider,
+    alternative_batch,
     analyze_memory,
+    chapter_brief,
+    choose_candidate_batch,
     edit_batch,
     qa_batch,
     quality_gate_batch,
@@ -14,6 +16,10 @@ from .llm import (
     update_memory,
 )
 from .models import BookMemory, GateFinding, LLMProvider, Segment, SegmentTranslator
+from .quality import batch_issues
+
+
+FLASH_MODEL = "deepseek/deepseek-v4-flash-0731"
 
 
 class LLMTranslator:
@@ -32,7 +38,7 @@ class LLMTranslator:
 
 
 class MadladTranslator:
-    """Optional local MADLAD-400 translator. Install with: pip install -e '.[local]'"""
+    """Optional local MADLAD-400 draft translator. Flash still performs QA/editing."""
 
     def __init__(self, model_name: str | None = None, device: str | None = None, batch_size: int = 8):
         self.model_name = model_name or os.getenv("BOOKAI_MADLAD_MODEL") or "google/madlad400-3b-mt"
@@ -75,35 +81,6 @@ class MadladTranslator:
         return out
 
 
-def _numbers(text: str) -> set[str]:
-    return set(re.findall(r"\d+(?:[.,]\d+)?", text))
-
-
-def heuristic_findings(originals: list[Segment], draft: dict[str, str], memory: BookMemory) -> list[GateFinding]:
-    findings: dict[str, GateFinding] = {}
-    for s in originals:
-        ru = draft.get(s.id, "").strip()
-        en = s.text.strip()
-        reason = ""
-        severity = "medium"
-        if not ru or ru == en:
-            reason = "empty or untranslated output"
-            severity = "hard"
-        elif len(en) >= 40 and (len(ru) / max(len(en), 1) < 0.35 or len(ru) / max(len(en), 1) > 2.8):
-            reason = "suspicious length ratio"
-        elif _numbers(en) != _numbers(ru):
-            reason = "numbers changed or disappeared"
-            severity = "hard"
-        else:
-            for src_term, preferred in memory.glossary.items():
-                if src_term and preferred and src_term.lower() in en.lower() and preferred.lower() not in ru.lower():
-                    reason = f"glossary mismatch: {src_term}"
-                    break
-        if reason:
-            findings[s.id] = GateFinding(s.id, severity, reason)
-    return list(findings.values())
-
-
 @dataclass
 class TranslationHarness:
     analyzer: LLMProvider
@@ -119,11 +96,20 @@ class TranslationHarness:
         key = os.getenv("OPENROUTER_API_KEY") or os.getenv("BOOKAI_API_KEY")
         base = os.getenv("BOOKAI_BASE_URL") or "https://openrouter.ai/api/v1"
         reasoning = os.getenv("BOOKAI_REASONING") or "none"
+        ceiling = (os.getenv("BOOKAI_MAX_MODEL") or FLASH_MODEL).strip()
 
-        def p(env_name: str, default: str, role: str) -> OpenAICompatibleProvider:
-            return OpenAICompatibleProvider(key, base, os.getenv(env_name) or default, reasoning, role=role)
+        # Literary harness v2 intentionally has one ceiling. Role env vars remain
+        # configurable only up to that ceiling; this prevents accidental Pro/Qwen use.
+        def p(env_name: str, role: str) -> OpenAICompatibleProvider:
+            requested = (os.getenv(env_name) or FLASH_MODEL).strip()
+            if requested != ceiling:
+                print(
+                    f"[bookai-model-ceiling] role={role} requested={requested} forced={ceiling}",
+                    flush=True,
+                )
+            return OpenAICompatibleProvider(key, base, ceiling, reasoning, role=role)
 
-        translator_provider = p("BOOKAI_TRANSLATOR_MODEL", "deepseek/deepseek-v4-flash-0731", "translator")
+        translator_provider = p("BOOKAI_TRANSLATOR_MODEL", "translator")
         backend = (os.getenv("BOOKAI_TRANSLATOR_BACKEND") or "api").lower()
         translator: SegmentTranslator
         if backend == "madlad":
@@ -134,12 +120,12 @@ class TranslationHarness:
             raise ValueError("BOOKAI_TRANSLATOR_BACKEND must be 'api' or 'madlad'")
 
         return cls(
-            analyzer=p("BOOKAI_ANALYZER_MODEL", "deepseek/deepseek-v4-flash-0731", "analyzer"),
+            analyzer=p("BOOKAI_ANALYZER_MODEL", "analyzer"),
             translator=translator,
-            gate=p("BOOKAI_GATE_MODEL", "deepseek/deepseek-v4-flash-0731", "gate"),
-            editor=p("BOOKAI_EDITOR_MODEL", "qwen/qwen3.8-flash", "editor"),
-            hard_editor=p("BOOKAI_HARD_MODEL", "deepseek/deepseek-v4-pro-0813", "hard_editor"),
-            memory_model=p("BOOKAI_MEMORY_MODEL", "deepseek/deepseek-v4-flash-0731", "memory"),
+            gate=p("BOOKAI_GATE_MODEL", "gate"),
+            editor=p("BOOKAI_EDITOR_MODEL", "editor"),
+            hard_editor=p("BOOKAI_HARD_MODEL", "hard_editor"),
+            memory_model=p("BOOKAI_MEMORY_MODEL", "memory"),
             use_llm_gate=(os.getenv("BOOKAI_LLM_GATE", "true").lower() not in {"0", "false", "no"}),
         )
 
@@ -159,7 +145,13 @@ class TranslationHarness:
         if isinstance(self.translator, LLMTranslator):
             providers["translator"] = self.translator.provider
         roles: dict[str, dict] = {}
-        total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "requests": 0}
+        total: dict[str, int | float] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "requests": 0,
+            "cost": 0.0,
+        }
         seen: set[int] = set()
         for role, provider in providers.items():
             usage = dict(getattr(provider, "usage", {}) or {})
@@ -167,29 +159,52 @@ class TranslationHarness:
             if id(provider) in seen:
                 continue
             seen.add(id(provider))
-            for key in total:
-                total[key] += int(usage.get(key) or 0)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens", "requests"):
+                total[key] = int(total[key]) + int(usage.get(key) or 0)
+            total["cost"] = float(total["cost"]) + float(usage.get("cost") or 0.0)
         return {"total": total, "roles": roles, "translator": self.translator.name}
 
     def analyze(self, sample: str) -> BookMemory:
         return analyze_memory(self.analyzer, sample)
 
+    def chapter_brief(self, originals: list[Segment], memory: BookMemory) -> str:
+        return chapter_brief(self.analyzer, originals, memory)
+
     def translate(self, segments, memory, *, context_before=None, context_after=None):
         return self.translator.translate(segments, memory, context_before=context_before, context_after=context_after)
 
     def gate_findings(self, originals: list[Segment], draft: dict[str, str], memory: BookMemory) -> list[GateFinding]:
-        merged = {f.id: f for f in heuristic_findings(originals, draft, memory)}
+        merged: dict[str, GateFinding] = {}
+        for issue in batch_issues(originals, draft, memory):
+            merged[issue.id] = GateFinding(issue.id, issue.severity, f"{issue.code}: {issue.reason}")
         if self.use_llm_gate:
             for finding in quality_gate_batch(self.gate, originals, draft, memory):
                 old = merged.get(finding.id)
                 if old is None or finding.severity == "hard":
                     merged[finding.id] = finding
+                elif finding.reason and finding.reason not in old.reason:
+                    old.reason = old.reason + "; " + finding.reason
         return list(merged.values())
 
-    def edit(self, originals: list[Segment], draft: dict[str, str], memory: BookMemory) -> dict[str, str]:
-        return edit_batch(self.editor, originals, draft, memory)
+    def edit(
+        self,
+        originals: list[Segment],
+        draft: dict[str, str],
+        memory: BookMemory,
+        *,
+        reasons: dict[str, str] | None = None,
+        context: list[dict] | None = None,
+    ) -> dict[str, str]:
+        return edit_batch(self.editor, originals, draft, memory, reasons=reasons, context=context)
+
+    def alternative(self, originals: list[Segment], memory: BookMemory) -> dict[str, str]:
+        return alternative_batch(self.editor, originals, memory)
+
+    def choose(self, originals: list[Segment], first: dict[str, str], second: dict[str, str], memory: BookMemory) -> dict[str, str]:
+        return choose_candidate_batch(self.gate, originals, first, second, memory)
 
     def hard_edit(self, originals: list[Segment], draft: dict[str, str], memory: BookMemory) -> dict[str, str]:
+        # Compatibility surface: still Flash-only under the model ceiling.
         return qa_batch(self.hard_editor, originals, draft, memory)
 
     def update_memory(self, originals: list[Segment], translated: dict[str, str], memory: BookMemory) -> BookMemory:
