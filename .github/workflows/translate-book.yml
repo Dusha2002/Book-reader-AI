@@ -1,16 +1,17 @@
-name: translate-book
+name: translate-book-quality
+
+# Staged manually on purpose. After the blind benchmark is accepted, this
+# workflow can be activated without changing translation code.
 on:
-  push:
-    branches: [translation-recovery-v6]
+  workflow_dispatch:
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   translate:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
 
@@ -18,53 +19,18 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore same-branch v6 cache when available
-        id: restore-bookai-cache
+      - name: Restore same-branch resumable cache
         uses: actions/cache/restore@v4
         with:
           path: .bookai-cache
-          key: bookai-devices-recovery-v6-${{ github.run_id }}
+          key: bookai-literary-full-v1-${{ github.run_id }}
           restore-keys: |
-            bookai-devices-recovery-v6-
-
-      - name: Download exact full v5 state when v6 cache is absent
-        if: ${{ hashFiles('.bookai-cache/*.optimal.json') == '' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: translation-diagnostics
-          path: .v5-recovery
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: 33872838654
-
-      - name: Import full v5 saved state
-        if: ${{ hashFiles('.bookai-cache/*.optimal.json') == '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -d .v5-recovery/.bookai-cache
-          mkdir -p .bookai-cache
-          cp -a .v5-recovery/.bookai-cache/. .bookai-cache/
-
-      - name: Verify full recovery state
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import glob, json
-          paths = glob.glob('.bookai-cache/*.optimal.json')
-          assert paths, 'No recovery state found'
-          state = json.load(open(paths[0], encoding='utf-8'))
-          n = len(state.get('translations') or {})
-          chapters = len(state.get('completed_chapters') or [])
-          print(f'[bookai-recovery] restored_translations={n} completed_chapters={chapters}')
-          assert n >= 3804, f'Expected full v5 state with 3804 translations, got {n}'
-          PY
+            bookai-literary-full-v1-
 
       - name: Install project
         run: pip install -e .
 
-      - name: Repair untranslated segments via OpenRouter
+      - name: Translate full book with Flash-only literary harness
         shell: bash
         run: |
           set -euo pipefail
@@ -72,88 +38,139 @@ jobs:
           source .env
           set +a
 
+          # Hard model ceiling and runtime values come AFTER .env.
           export BOOKAI_TRANSLATOR_BACKEND='api'
+          export BOOKAI_MAX_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_HARD_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_LLM_GATE='true'
           export BOOKAI_REASONING='none'
-          export BOOKAI_CONCURRENCY='3'
-          export BOOKAI_BATCH_CHARS='10000'
-          export BOOKAI_GATE_BATCH_CHARS='12000'
-          export BOOKAI_EDIT_BATCH_CHARS='8000'
-          export BOOKAI_ANALYSIS_CHARS='104000'
+
+          # Quality-first batch sizes. Speed tuning comes only after this run.
+          export BOOKAI_BATCH_CHARS='12000'
+          export BOOKAI_POLISH_BATCH_CHARS='8000'
+          export BOOKAI_GATE_BATCH_CHARS='10000'
+          export BOOKAI_EDIT_BATCH_CHARS='7000'
+          export BOOKAI_ANALYSIS_CHARS='90000'
+          export BOOKAI_QUALITY_REPAIR_ROUNDS='2'
+
+          # Translation/polish can retry normally. Compact control roles are
+          # bounded separately to prevent nested multi-minute stalls.
           export BOOKAI_RETRY_ATTEMPTS='3'
-          export BOOKAI_REQUEST_TIMEOUT='300'
+          export BOOKAI_REQUEST_TIMEOUT='180'
+          export BOOKAI_ANALYZER_RETRY_ATTEMPTS='1'
+          export BOOKAI_ANALYZER_REQUEST_TIMEOUT='75'
+          export BOOKAI_GATE_RETRY_ATTEMPTS='2'
+          export BOOKAI_GATE_REQUEST_TIMEOUT='90'
+          export BOOKAI_MEMORY_RETRY_ATTEMPTS='2'
+          export BOOKAI_MEMORY_REQUEST_TIMEOUT='75'
 
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          echo "Starting v6 targeted untranslated-segment repair"
-          echo "Runtime: concurrency=$BOOKAI_CONCURRENCY translate_batch=$BOOKAI_BATCH_CHARS gate_batch=$BOOKAI_GATE_BATCH_CHARS edit_batch=$BOOKAI_EDIT_BATCH_CHARS editor=$BOOKAI_EDITOR_MODEL"
+          echo 'Starting clean Flash-only literary full-book run'
           bookai Devices_and_Desires.fb2 \
-            --output Devices_and_Desires_RU.fb2 \
+            --output Devices_and_Desires_RU_LITERARY.fb2 \
             --mode optimal 2>&1 | tee translation.log
 
-      - name: Validate translated FB2 text
+      - name: Independent structural and deterministic validation
         if: success()
+        shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
+          from collections import defaultdict
           from lxml import etree
           from bookai.parsers.base import load_book
+          from bookai.pipeline import _should_translate
+          from bookai.quality import candidate_issues
           import re
 
-          p = Path('Devices_and_Desires_RU.fb2')
-          assert p.exists() and p.stat().st_size > 100000
-          etree.parse(str(p))
-          doc = load_book(p)
-          texts = [s.text for s in doc.segments]
+          src_path = Path('Devices_and_Desires.fb2')
+          out_path = Path('Devices_and_Desires_RU_LITERARY.fb2')
+          assert out_path.exists() and out_path.stat().st_size > 100_000
+          root = etree.parse(str(out_path))
+
+          ns = {'f':'http://www.gribuser.ru/xml/fictionbook/2.0'}
+          langs = [str(x).strip().lower() for x in root.xpath('//f:description//f:lang/text()', namespaces=ns)]
+          src_langs = [str(x).strip().lower() for x in root.xpath('//f:description//f:src-lang/text()', namespaces=ns)]
+          assert 'ru' in langs, f'FB2 target language is not ru: {langs}'
+          assert not src_langs or 'en' in src_langs, f'Unexpected src-lang: {src_langs}'
+
+          src = load_book(src_path)
+          out = load_book(out_path)
+          src_by_id = {s.id:s for s in src.segments}
+          out_by_id = {s.id:s for s in out.segments}
+          targets = [s for s in src.segments if _should_translate(s.text)]
+          assert len(targets) == 3804, f'Expected 3804 targets, got {len(targets)}'
+
+          missing = [s.id for s in targets if s.id not in out_by_id]
+          assert not missing, f'Missing output segment ids: {missing[:20]}'
+
+          hard = []
+          medium = []
+          translated = {}
+          for source in targets:
+              candidate = out_by_id[source.id].text
+              translated[source.id] = candidate
+              for issue in candidate_issues(source, candidate):
+                  (hard if issue.severity == 'hard' else medium).append(issue)
+
+          # Catch copy/paste collapse that ordinary per-segment QA can miss.
+          reverse = defaultdict(list)
+          for source in targets:
+              candidate = re.sub(r'\s+', ' ', translated[source.id]).strip()
+              if len(candidate) >= 120:
+                  reverse[candidate].append(source.id)
+          duplicate_groups = [ids for ids in reverse.values() if len(ids) >= 2]
+
+          texts = [translated[s.id] for s in targets]
           cyr = sum(len(re.findall(r'[А-Яа-яЁё]', t)) for t in texts)
           lat = sum(len(re.findall(r'[A-Za-z]', t)) for t in texts)
           share = cyr / max(cyr + lat, 1)
-          suspicious = []
-          for s in doc.segments:
-              l = len(re.findall(r'[A-Za-z]', s.text))
-              c = len(re.findall(r'[А-Яа-яЁё]', s.text))
-              if l >= 20 and c < max(4, l // 4):
-                  suspicious.append((s.id, s.text[:160]))
-          print(f'output_bytes={p.stat().st_size}')
-          print(f'text_segments={len(texts)}')
-          print(f'cyrillic_letters={cyr}')
-          print(f'latin_letters={lat}')
-          print(f'text_cyrillic_share={share:.4f}')
-          print(f'suspicious_english_segments={len(suspicious)}')
-          for item in suspicious[:10]:
-              print('SUSPECT', item)
-          assert share > 0.95, f'Unexpectedly low text Cyrillic share: {share:.3f}'
-          assert len(suspicious) <= 3, f'Untranslated English text remains: {len(suspicious)} segments'
+
+          print(f'output_bytes={out_path.stat().st_size}')
+          print(f'target_segments={len(targets)}')
+          print(f'hard_deterministic_issues={len(hard)}')
+          print(f'medium_deterministic_issues={len(medium)}')
+          print(f'duplicate_long_translation_groups={len(duplicate_groups)}')
+          print(f'text_cyrillic_share={share:.5f}')
+          for issue in hard[:20]:
+              print('HARD', issue)
+          for ids in duplicate_groups[:10]:
+              print('DUPLICATE', ids)
+
+          assert not hard, f'Hard deterministic issues remain: {len(hard)}'
+          assert not duplicate_groups, f'Suspicious repeated long translations: {len(duplicate_groups)}'
+          assert share > 0.965, f'Unexpectedly low target Cyrillic share: {share:.4f}'
           PY
 
       - name: Upload translated book
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Devices_and_Desires_RU
-          path: Devices_and_Desires_RU.fb2
-          retention-days: 3
+          name: Devices_and_Desires_RU_LITERARY
+          path: Devices_and_Desires_RU_LITERARY.fb2
+          retention-days: 5
 
-      - name: Save v6 translation cache even after failure
+      - name: Save resumable cache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .bookai-cache
-          key: bookai-devices-recovery-v6-${{ github.run_id }}
+          key: bookai-literary-full-v1-${{ github.run_id }}
 
-      - name: Upload diagnostics
+      - name: Upload diagnostics and state
         if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
-          name: translation-diagnostics
+          name: literary-full-diagnostics
           path: |
             translation.log
             .bookai-cache/**
           if-no-files-found: ignore
           include-hidden-files: true
-          retention-days: 1
+          retention-days: 2
