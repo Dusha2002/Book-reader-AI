@@ -5,7 +5,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 from bookai.harness import TranslationHarness
-from bookai.pipeline import _analysis_sample, _batches, _chapter_groups, _context_for, _translated_context, _should_translate
+from bookai.pipeline import _analysis_sample, _chapter_groups, _context_for, _translated_context, _should_translate
 from bookai.quality import batch_issues, hard_ids
 from bookai.parsers.base import load_book
 
@@ -87,6 +87,11 @@ def run_group(harness: TranslationHarness, source_segments, by_id, memory, name:
     }
 
 
+def _persist_result(result: dict, harness: TranslationHarness) -> None:
+    result["usage"] = harness.usage
+    OUTPUT.write_text(json.dumps(result, ensure_ascii=False, indent=2), "utf-8")
+
+
 def main() -> None:
     doc = load_book(SOURCE)
     source_segments = [s for s in doc.segments if _should_translate(s.text)]
@@ -104,13 +109,21 @@ def main() -> None:
         "reference_used_in_generation": False,
         "scenes": {},
     }
+    _persist_result(result, harness)
+
     for name, ids in BENCHMARK.items():
         print(f"[benchmark] starting {name}", flush=True)
-        result["scenes"][name] = run_group(harness, source_segments, by_id, memory, name, ids)
-        print(f"[benchmark] finished {name}", flush=True)
+        try:
+            result["scenes"][name] = run_group(harness, source_segments, by_id, memory, name, ids)
+        except BaseException as exc:
+            result["failed_scene"] = {"name": name, "error": type(exc).__name__, "message": str(exc)}
+            _persist_result(result, harness)
+            raise
+        else:
+            result.pop("failed_scene", None)
+            _persist_result(result, harness)
+            print(f"[benchmark] finished {name}", flush=True)
 
-    result["usage"] = harness.usage
-    OUTPUT.write_text(json.dumps(result, ensure_ascii=False, indent=2), "utf-8")
     print("[benchmark] usage=" + json.dumps(harness.usage, ensure_ascii=False), flush=True)
     print(f"[benchmark] output={OUTPUT}", flush=True)
 
