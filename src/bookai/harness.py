@@ -3,21 +3,21 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from .audit import safe_analyze_memory, safe_chapter_brief, safe_update_memory, semantic_gate_batch
+from .audit import safe_analyze_memory, safe_chapter_brief, safe_update_memory
+from .critics import literary_gate_batch, semantic_gate_batch
 from .llm import (
     OpenAICompatibleProvider,
     alternative_batch,
     choose_candidate_batch,
     edit_batch,
     qa_batch,
-    quality_gate_batch,
     translate_batch,
 )
 from .models import BookMemory, GateFinding, LLMProvider, Segment, SegmentTranslator
 from .polish import literary_polish_batch
 from .providers import CappedOpenAICompatibleProvider
 from .quality import batch_issues
-from .resilience import resilient_segment_map
+from .resilience import resilient_findings, resilient_segment_map
 
 
 FLASH_MODEL = "deepseek/deepseek-v4-flash-0731"
@@ -244,11 +244,19 @@ class TranslationHarness:
                 GateFinding(issue.id, issue.severity, f"{issue.code}: {issue.reason}"),
             )
         if self.use_llm_gate:
-            # Two independent cheap-model critics instead of one overloaded judge:
-            # first semantic completeness, then literary Russian/voice.
-            for finding in semantic_gate_batch(self.gate, originals, draft, memory):
-                self._merge_finding(merged, finding)
-            for finding in quality_gate_batch(self.gate, originals, draft, memory):
+            semantic = resilient_findings(
+                list(originals),
+                lambda part: semantic_gate_batch(self.gate, part, draft, memory),
+                label="semantic_gate",
+                attempts=2,
+            )
+            literary = resilient_findings(
+                list(originals),
+                lambda part: literary_gate_batch(self.gate, part, draft, memory),
+                label="literary_gate",
+                attempts=2,
+            )
+            for finding in semantic + literary:
                 self._merge_finding(merged, finding)
         return list(merged.values())
 
