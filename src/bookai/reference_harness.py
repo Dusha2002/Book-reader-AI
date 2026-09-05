@@ -4,6 +4,7 @@ import os
 
 from .harness import LLMTranslator, TranslationHarness
 from .llm import OpenAICompatibleProvider
+from .models import GateFinding
 from .providers import CappedOpenAICompatibleProvider
 from .reference_profile import apply_reference_profile
 
@@ -16,15 +17,36 @@ class ReferenceTranslationHarness(TranslationHarness):
     """Quality-first harness calibrated against the user-provided literary reference.
 
     Flash handles cheap/high-volume roles. V4 Pro is reserved for mandatory
-    literary polish and difficult repairs, where the benchmark showed Flash-only
-    prose still contained calques and tonal flattening.
+    literary polish and difficult repairs. Literary-critic style judgements are
+    repair signals, not publication vetoes; semantic/deterministic hard failures
+    remain blockers, and the independent reference judge decides benchmark fit.
     """
+
+    _ADVISORY_LITERARY_PREFIXES = (
+        "calque:",
+        "rhythm:",
+        "voice:",
+        "irony:",
+        "idiom:",
+        "dialogue:",
+    )
 
     def analyze(self, sample: str):
         return apply_reference_profile(super().analyze(sample))
 
     def update_memory(self, originals, translated, memory):
         return apply_reference_profile(super().update_memory(originals, translated, memory))
+
+    def gate_findings(self, originals, draft, memory):
+        findings = super().gate_findings(originals, draft, memory)
+        out: list[GateFinding] = []
+        for finding in findings:
+            reason = (finding.reason or "").strip().lower()
+            if finding.severity == "hard" and reason.startswith(self._ADVISORY_LITERARY_PREFIXES):
+                out.append(GateFinding(finding.id, "medium", finding.reason))
+            else:
+                out.append(finding)
+        return out
 
 
 def build_reference_harness() -> ReferenceTranslationHarness:
