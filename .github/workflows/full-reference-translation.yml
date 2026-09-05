@@ -1,0 +1,239 @@
+name: full-reference-translation
+
+on:
+  push:
+    branches: [full-literary-reference-v8]
+
+permissions:
+  contents: read
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore resumable reference cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .bookai-cache-reference-v8
+          key: bookai-reference-v8-${{ github.run_id }}
+          restore-keys: |
+            bookai-reference-v8-
+
+      - name: Install project
+        run: pip install -e .
+
+      - name: Reference preflight — blind generation then compare with user benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          source .env
+          set +a
+
+          export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4-pro-0813'
+          export BOOKAI_HARD_MODEL='deepseek/deepseek-v4-pro-0813'
+          export BOOKAI_REFERENCE_JUDGE_MODEL='deepseek/deepseek-v4-pro-0813'
+          export BOOKAI_LLM_GATE='true'
+          export BOOKAI_REASONING='none'
+          export BOOKAI_RETRY_ATTEMPTS='3'
+          export BOOKAI_REQUEST_TIMEOUT='240'
+          export BOOKAI_ANALYZER_RETRY_ATTEMPTS='2'
+          export BOOKAI_ANALYZER_REQUEST_TIMEOUT='90'
+          export BOOKAI_GATE_RETRY_ATTEMPTS='2'
+          export BOOKAI_GATE_REQUEST_TIMEOUT='120'
+          export BOOKAI_MEMORY_RETRY_ATTEMPTS='2'
+          export BOOKAI_MEMORY_REQUEST_TIMEOUT='90'
+          export BOOKAI_ANALYZER_MAX_TOKENS='4096'
+          export BOOKAI_GATE_MAX_TOKENS='8192'
+          export BOOKAI_MEMORY_MAX_TOKENS='4096'
+
+          test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
+          python scripts/reference_quality_gate.py \
+            --output reference-quality-preflight.json 2>&1 | tee reference-preflight.log
+
+      - name: Translate complete book — Flash draft + Pro literary polish
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          source .env
+          set +a
+
+          export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4-pro-0813'
+          export BOOKAI_HARD_MODEL='deepseek/deepseek-v4-pro-0813'
+          export BOOKAI_LLM_GATE='true'
+          export BOOKAI_REASONING='none'
+
+          export BOOKAI_BATCH_CHARS='12000'
+          export BOOKAI_POLISH_BATCH_CHARS='6500'
+          export BOOKAI_GATE_BATCH_CHARS='9000'
+          export BOOKAI_EDIT_BATCH_CHARS='5000'
+          export BOOKAI_ANALYSIS_CHARS='90000'
+          export BOOKAI_CHAPTER_BRIEF_CHARS='26000'
+          export BOOKAI_QUALITY_REPAIR_ROUNDS='2'
+
+          export BOOKAI_RETRY_ATTEMPTS='3'
+          export BOOKAI_REQUEST_TIMEOUT='240'
+          export BOOKAI_ANALYZER_RETRY_ATTEMPTS='2'
+          export BOOKAI_ANALYZER_REQUEST_TIMEOUT='90'
+          export BOOKAI_GATE_RETRY_ATTEMPTS='2'
+          export BOOKAI_GATE_REQUEST_TIMEOUT='120'
+          export BOOKAI_MEMORY_RETRY_ATTEMPTS='2'
+          export BOOKAI_MEMORY_REQUEST_TIMEOUT='90'
+          export BOOKAI_ANALYZER_MAX_TOKENS='4096'
+          export BOOKAI_GATE_MAX_TOKENS='8192'
+          export BOOKAI_MEMORY_MAX_TOKENS='4096'
+
+          test -f Devices_and_Desires.fb2
+          test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
+          echo '[full-reference] strategy=flash-draft+pro-polish+flash-bilingual-gates+pro-repair'
+          python scripts/full_reference_translation.py 2>&1 | tee translation.log
+
+      - name: Set Russian FB2 metadata
+        if: success()
+        shell: bash
+        run: |
+          python - <<'PY'
+          from lxml import etree
+          from pathlib import Path
+          path = Path('Devices_and_Desires_RU_REFERENCE.fb2')
+          tree = etree.parse(str(path))
+          titles = tree.xpath("//*[local-name()='description']/*[local-name()='title-info']/*[local-name()='book-title']")
+          if titles:
+              titles[0].text = 'Замыслы и желания'
+          langs = tree.xpath("//*[local-name()='description']/*[local-name()='title-info']/*[local-name()='lang']")
+          if langs:
+              langs[0].text = 'ru'
+          tree.write(str(path), encoding='utf-8', xml_declaration=True, pretty_print=False)
+          PY
+
+      - name: Validate complete translated FB2
+        if: success()
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from lxml import etree
+          from bookai.parsers.base import load_book
+          from bookai.pipeline import _should_translate
+          import re
+
+          src = Path('Devices_and_Desires.fb2')
+          out = Path('Devices_and_Desires_RU_REFERENCE.fb2')
+          assert out.exists() and out.stat().st_size > 100000
+          tree = etree.parse(str(out))
+          source_doc = load_book(src)
+          output_doc = load_book(out)
+          assert len(source_doc.segments) == len(output_doc.segments)
+
+          targets = [s for s in source_doc.segments if _should_translate(s.text)]
+          out_by_id = {s.id: s.text for s in output_doc.segments}
+          assert len(targets) == 3804, len(targets)
+          assert all(s.id in out_by_id for s in targets)
+
+          suspicious = []
+          unchanged = []
+          cyr = lat = 0
+          for s in targets:
+              text = out_by_id[s.id]
+              l = len(re.findall(r'[A-Za-z]', text))
+              c = len(re.findall(r'[А-Яа-яЁё]', text))
+              lat += l
+              cyr += c
+              if l >= 20 and c < max(4, l // 4):
+                  suspicious.append(s.id)
+              if text.strip() == s.text.strip():
+                  unchanged.append(s.id)
+          share = cyr / max(cyr + lat, 1)
+          langs = tree.xpath("//*[local-name()='description']/*[local-name()='title-info']/*[local-name()='lang']/text()")
+          titles = tree.xpath("//*[local-name()='description']/*[local-name()='title-info']/*[local-name()='book-title']/text()")
+
+          print(f'[full-reference] targets={len(targets)}')
+          print(f'[full-reference] output_bytes={out.stat().st_size}')
+          print(f'[full-reference] cyrillic_share={share:.5f}')
+          print(f'[full-reference] suspicious_english={len(suspicious)}')
+          print(f'[full-reference] unchanged={len(unchanged)}')
+          print(f'[full-reference] title={titles[0] if titles else None}')
+          print(f'[full-reference] lang={langs[0] if langs else None}')
+
+          assert share > 0.96, share
+          assert len(suspicious) <= 3, suspicious[:20]
+          assert not unchanged, unchanged[:20]
+          assert langs and langs[0] == 'ru'
+          assert titles and titles[0] == 'Замыслы и желания'
+          PY
+
+      - name: Reference postflight — compare actual full-book passages with benchmark
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -a
+          source .env
+          set +a
+          export BOOKAI_REFERENCE_JUDGE_MODEL='deepseek/deepseek-v4-pro-0813'
+          export BOOKAI_REASONING='none'
+          export BOOKAI_RETRY_ATTEMPTS='3'
+          export BOOKAI_REQUEST_TIMEOUT='240'
+          python scripts/reference_quality_gate.py \
+            --candidate Devices_and_Desires_RU_REFERENCE.fb2 \
+            --output reference-quality-postflight.json 2>&1 | tee reference-postflight.log
+
+      - name: Upload final translated book
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Devices_and_Desires_RU_REFERENCE_FINAL
+          path: Devices_and_Desires_RU_REFERENCE.fb2
+          retention-days: 5
+
+      - name: Upload reference reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reference-quality-reports
+          path: |
+            reference-quality-preflight.json
+            reference-quality-postflight.json
+            reference-preflight.log
+            reference-postflight.log
+          if-no-files-found: ignore
+          retention-days: 5
+
+      - name: Save resumable translation cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .bookai-cache-reference-v8
+          key: bookai-reference-v8-${{ github.run_id }}
+
+      - name: Upload resumable state and logs on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-reference-diagnostics
+          path: |
+            translation.log
+            reference-preflight.log
+            reference-postflight.log
+            reference-quality-preflight.json
+            reference-quality-postflight.json
+            .bookai-cache-reference-v8/**
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 3
