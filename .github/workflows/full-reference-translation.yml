@@ -2,7 +2,7 @@ name: full-reference-translation
 
 on:
   push:
-    branches: [full-literary-reference-v8]
+    branches: [full-literary-reference-v9]
 
 permissions:
   contents: read
@@ -21,10 +21,10 @@ jobs:
       - name: Restore resumable reference cache
         uses: actions/cache/restore@v4
         with:
-          path: .bookai-cache-reference-v8
-          key: bookai-reference-v8-${{ github.run_id }}
+          path: .bookai-cache-reference-v9
+          key: bookai-reference-v9-${{ github.run_id }}
           restore-keys: |
-            bookai-reference-v8-
+            bookai-reference-v9-
 
       - name: Install project
         run: pip install -e .
@@ -59,7 +59,7 @@ jobs:
           export BOOKAI_MEMORY_MAX_TOKENS='4096'
 
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          python scripts/reference_quality_gate.py \
+          python scripts/reference_quality_gate_v2.py \
             --output reference-quality-preflight.json 2>&1 | tee reference-preflight.log
 
       - name: Translate complete book — Flash draft + Pro literary polish
@@ -79,13 +79,13 @@ jobs:
           export BOOKAI_LLM_GATE='true'
           export BOOKAI_REASONING='none'
 
-          export BOOKAI_BATCH_CHARS='12000'
-          export BOOKAI_POLISH_BATCH_CHARS='6500'
-          export BOOKAI_GATE_BATCH_CHARS='9000'
-          export BOOKAI_EDIT_BATCH_CHARS='5000'
+          export BOOKAI_BATCH_CHARS='11000'
+          export BOOKAI_POLISH_BATCH_CHARS='5500'
+          export BOOKAI_GATE_BATCH_CHARS='8500'
+          export BOOKAI_EDIT_BATCH_CHARS='4500'
           export BOOKAI_ANALYSIS_CHARS='90000'
           export BOOKAI_CHAPTER_BRIEF_CHARS='26000'
-          export BOOKAI_QUALITY_REPAIR_ROUNDS='2'
+          export BOOKAI_QUALITY_REPAIR_ROUNDS='3'
 
           export BOOKAI_RETRY_ATTEMPTS='3'
           export BOOKAI_REQUEST_TIMEOUT='240'
@@ -101,7 +101,7 @@ jobs:
 
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          echo '[full-reference] strategy=flash-draft+pro-polish+flash-bilingual-gates+pro-repair'
+          echo '[full-reference] strategy=flash-draft+pro-polish+flash-semantic-gate+pro-repair reference=v9'
           python scripts/full_reference_translation.py 2>&1 | tee translation.log
 
       - name: Set Russian FB2 metadata
@@ -190,7 +190,7 @@ jobs:
           export BOOKAI_REASONING='none'
           export BOOKAI_RETRY_ATTEMPTS='3'
           export BOOKAI_REQUEST_TIMEOUT='240'
-          python scripts/reference_quality_gate.py \
+          python scripts/reference_quality_gate_v2.py \
             --candidate Devices_and_Desires_RU_REFERENCE.fb2 \
             --output reference-quality-postflight.json 2>&1 | tee reference-postflight.log
 
@@ -219,8 +219,8 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: .bookai-cache-reference-v8
-          key: bookai-reference-v8-${{ github.run_id }}
+          path: .bookai-cache-reference-v9
+          key: bookai-reference-v9-${{ github.run_id }}
 
       - name: Upload resumable state and logs on failure
         if: failure() || cancelled()
@@ -233,7 +233,7 @@ jobs:
             reference-postflight.log
             reference-quality-preflight.json
             reference-quality-postflight.json
-            .bookai-cache-reference-v8/**
+            .bookai-cache-reference-v9/**
           if-no-files-found: ignore
           include-hidden-files: true
           retention-days: 3
