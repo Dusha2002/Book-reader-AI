@@ -9,7 +9,7 @@ from bookai.reference_harness import build_reference_harness
 
 SOURCE = Path("Devices_and_Desires.fb2")
 OUTPUT = Path("Devices_and_Desires_RU_REFERENCE.fb2")
-CACHE = Path(".bookai-cache-reference-v8")
+CACHE = Path(".bookai-cache-reference-v9")
 
 
 def progress(event: dict) -> None:
