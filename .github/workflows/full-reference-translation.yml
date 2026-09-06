@@ -51,7 +51,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           if python - <<'PY'
           import json
           from pathlib import Path
@@ -69,11 +68,9 @@ jobs:
             echo '[reference-preflight] previous v10 preflight already passed; resuming saved full-book state'
             exit 0
           fi
-
           set -a
           source .env
           set +a
-
           export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-flash-0731'
@@ -94,14 +91,10 @@ jobs:
           export BOOKAI_ANALYZER_MAX_TOKENS='4096'
           export BOOKAI_GATE_MAX_TOKENS='8192'
           export BOOKAI_MEMORY_MAX_TOKENS='4096'
-
-          # v10 micro-translation: complex paragraphs are isolated; multi-sentence
-          # ones are translated in tiny sentence batches with the whole context.
           export BOOKAI_V10_DECOMPOSE_CHARS='650'
           export BOOKAI_V10_DECOMPOSE_SENTENCES='4'
           export BOOKAI_V10_ISOLATE_SENTENCE_CHARS='420'
-          export BOOKAI_V10_SENTENCE_BATCH='2'
-
+          export BOOKAI_V10_SENTENCE_BATCH='1'
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
           python scripts/reference_quality_gate_v2.py \
             --output reference-quality-preflight.json 2>&1 | tee reference-preflight.log
@@ -113,7 +106,6 @@ jobs:
           set -a
           source .env
           set +a
-
           export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-flash-0731'
@@ -122,23 +114,17 @@ jobs:
           export BOOKAI_HARD_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_LLM_GATE='true'
           export BOOKAI_REASONING='none'
-
           export BOOKAI_BATCH_CHARS='11000'
           export BOOKAI_POLISH_BATCH_CHARS='4500'
-          # Keep QA and defect-driven repair batches deliberately small. Long hard
-          # paragraphs then get almost isolated Flash attention instead of competing
-          # with many neighboring targets in one response.
           export BOOKAI_GATE_BATCH_CHARS='3200'
           export BOOKAI_EDIT_BATCH_CHARS='2200'
           export BOOKAI_ANALYSIS_CHARS='90000'
           export BOOKAI_CHAPTER_BRIEF_CHARS='26000'
           export BOOKAI_QUALITY_REPAIR_ROUNDS='4'
-
           export BOOKAI_V10_DECOMPOSE_CHARS='650'
           export BOOKAI_V10_DECOMPOSE_SENTENCES='4'
           export BOOKAI_V10_ISOLATE_SENTENCE_CHARS='420'
-          export BOOKAI_V10_SENTENCE_BATCH='2'
-
+          export BOOKAI_V10_SENTENCE_BATCH='1'
           export BOOKAI_RETRY_ATTEMPTS='3'
           export BOOKAI_REQUEST_TIMEOUT='240'
           export BOOKAI_ANALYZER_RETRY_ATTEMPTS='2'
@@ -150,10 +136,9 @@ jobs:
           export BOOKAI_ANALYZER_MAX_TOKENS='4096'
           export BOOKAI_GATE_MAX_TOKENS='8192'
           export BOOKAI_MEMORY_MAX_TOKENS='4096'
-
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          echo '[full-reference] strategy=flash-only-v10+contextual-sentence-micro-batches+isolated-hard-repairs+semantic-confirmation+literary-polish external-judge=pro'
+          echo '[full-reference] strategy=flash-only-v10+single-sentence-targets+isolated-hard-repairs+semantic-confirmation+literary-polish external-judge=pro'
           python scripts/full_reference_translation.py 2>&1 | tee translation.log
 
       - name: Set Russian FB2 metadata
@@ -184,7 +169,6 @@ jobs:
           from bookai.parsers.base import load_book
           from bookai.pipeline import _should_translate
           import re
-
           src = Path('Devices_and_Desires.fb2')
           out = Path('Devices_and_Desires_RU_REFERENCE.fb2')
           assert out.exists() and out.stat().st_size > 100000
@@ -192,12 +176,10 @@ jobs:
           source_doc = load_book(src)
           output_doc = load_book(out)
           assert len(source_doc.segments) == len(output_doc.segments)
-
           targets = [s for s in source_doc.segments if _should_translate(s.text)]
           out_by_id = {s.id: s.text for s in output_doc.segments}
           assert len(targets) == 3804, len(targets)
           assert all(s.id in out_by_id for s in targets)
-
           suspicious = []
           unchanged = []
           cyr = lat = 0
@@ -207,14 +189,11 @@ jobs:
               c = len(re.findall(r'[А-Яа-яЁё]', text))
               lat += l
               cyr += c
-              if l >= 20 and c < max(4, l // 4):
-                  suspicious.append(s.id)
-              if text.strip() == s.text.strip():
-                  unchanged.append(s.id)
+              if l >= 20 and c < max(4, l // 4): suspicious.append(s.id)
+              if text.strip() == s.text.strip(): unchanged.append(s.id)
           share = cyr / max(cyr + lat, 1)
           langs = tree.xpath("//*[local-name()='description']/*[local-name()='title-info']/*[local-name()='lang']/text()")
           titles = tree.xpath("//*[local-name()='description']/*[local-name()='title-info']/*[local-name()='book-title']/text()")
-
           print(f'[full-reference] targets={len(targets)}')
           print(f'[full-reference] output_bytes={out.stat().st_size}')
           print(f'[full-reference] cyrillic_share={share:.5f}')
@@ -222,7 +201,6 @@ jobs:
           print(f'[full-reference] unchanged={len(unchanged)}')
           print(f'[full-reference] title={titles[0] if titles else None}')
           print(f'[full-reference] lang={langs[0] if langs else None}')
-
           assert share > 0.96, share
           assert len(suspicious) <= 3, suspicious[:20]
           assert not unchanged, unchanged[:20]
