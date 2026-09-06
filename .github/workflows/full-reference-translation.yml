@@ -21,10 +21,10 @@ jobs:
       - name: Restore resumable reference cache
         uses: actions/cache/restore@v4
         with:
-          path: .bookai-cache-reference-v9
-          key: bookai-reference-v9-${{ github.run_id }}
+          path: .bookai-cache-reference-v10
+          key: bookai-reference-v10-${{ github.run_id }}
           restore-keys: |
-            bookai-reference-v9-
+            bookai-reference-v10-
 
       - name: Install project
         run: pip install -e .
@@ -37,7 +37,7 @@ jobs:
           if python - <<'PY'
           import json
           from pathlib import Path
-          states = list(Path('.bookai-cache-reference-v9').glob('*.json'))
+          states = list(Path('.bookai-cache-reference-v10').glob('*.json'))
           restored = 0
           for path in states:
               try:
@@ -48,7 +48,7 @@ jobs:
           raise SystemExit(0 if restored > 0 else 1)
           PY
           then
-            echo '[reference-preflight] previous preflight already passed; resuming saved full-book state'
+            echo '[reference-preflight] previous v10 preflight already passed; resuming saved full-book state'
             exit 0
           fi
 
@@ -60,8 +60,8 @@ jobs:
           export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4-flash-0731'
-          export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4-pro-0813'
-          export BOOKAI_HARD_MODEL='deepseek/deepseek-v4-pro-0813'
+          export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_HARD_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_REFERENCE_JUDGE_MODEL='deepseek/deepseek-v4-pro-0813'
           export BOOKAI_LLM_GATE='true'
           export BOOKAI_REASONING='none'
@@ -76,12 +76,14 @@ jobs:
           export BOOKAI_ANALYZER_MAX_TOKENS='4096'
           export BOOKAI_GATE_MAX_TOKENS='8192'
           export BOOKAI_MEMORY_MAX_TOKENS='4096'
+          export BOOKAI_V10_DECOMPOSE_CHARS='850'
+          export BOOKAI_V10_DECOMPOSE_SENTENCES='5'
 
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
           python scripts/reference_quality_gate_v2.py \
             --output reference-quality-preflight.json 2>&1 | tee reference-preflight.log
 
-      - name: Translate complete book — Flash draft + Pro literary polish
+      - name: Translate complete book — Flash-only v10 literary harness
         shell: bash
         run: |
           set -euo pipefail
@@ -91,10 +93,10 @@ jobs:
 
           export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4-flash-0731'
-          export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-pro-0813'
+          export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4-flash-0731'
-          export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4-pro-0813'
-          export BOOKAI_HARD_MODEL='deepseek/deepseek-v4-pro-0813'
+          export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_HARD_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_LLM_GATE='true'
           export BOOKAI_REASONING='none'
 
@@ -105,6 +107,8 @@ jobs:
           export BOOKAI_ANALYSIS_CHARS='90000'
           export BOOKAI_CHAPTER_BRIEF_CHARS='26000'
           export BOOKAI_QUALITY_REPAIR_ROUNDS='3'
+          export BOOKAI_V10_DECOMPOSE_CHARS='850'
+          export BOOKAI_V10_DECOMPOSE_SENTENCES='5'
 
           export BOOKAI_RETRY_ATTEMPTS='3'
           export BOOKAI_REQUEST_TIMEOUT='240'
@@ -120,7 +124,7 @@ jobs:
 
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          echo '[full-reference] strategy=flash-draft+pro-polish+pro-bilingual-gate+pro-repair reference=v9-resume'
+          echo '[full-reference] strategy=flash-only-v10+sentence-decomposition+explicit-semantic-confirmation+literary-polish+repair external-judge=pro'
           python scripts/full_reference_translation.py 2>&1 | tee translation.log
 
       - name: Set Russian FB2 metadata
@@ -238,8 +242,8 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: .bookai-cache-reference-v9
-          key: bookai-reference-v9-${{ github.run_id }}
+          path: .bookai-cache-reference-v10
+          key: bookai-reference-v10-${{ github.run_id }}
 
       - name: Upload resumable state and logs on failure
         if: failure() || cancelled()
@@ -252,7 +256,7 @@ jobs:
             reference-postflight.log
             reference-quality-preflight.json
             reference-quality-postflight.json
-            .bookai-cache-reference-v9/**
+            .bookai-cache-reference-v10/**
           if-no-files-found: ignore
           include-hidden-files: true
           retention-days: 3
