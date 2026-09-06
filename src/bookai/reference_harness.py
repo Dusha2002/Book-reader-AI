@@ -258,9 +258,29 @@ Return ONLY one JSON object mapping EXACTLY every target sentence id to its Russ
                             temperature=0.1 if attempt == 0 else 0.0,
                         )
                     )
+                    if not isinstance(sentence_obj, dict):
+                        raise ValueError("v10_sentence_translator returned non-object JSON")
+
+                    # The model occasionally translates one or more upcoming context
+                    # sentences as well as every requested target. Those spillover
+                    # rows are harmless, so keep the target contract strict on
+                    # missing/invalid requested ids while discarding context extras.
+                    expected_ids = {s.id for s in batch}
+                    extra_ids = sorted({str(k) for k in sentence_obj} - expected_ids)
+                    if extra_ids:
+                        print(
+                            f"[bookai-v10] sentence_context_spillover id={segment.id} "
+                            f"start={start} ignored={extra_ids[:6]}",
+                            flush=True,
+                        )
+                    target_obj = {
+                        sid: sentence_obj[sid]
+                        for sid in expected_ids
+                        if sid in sentence_obj
+                    }
                     translated_part = assert_exact_ids(
                         batch,
-                        sentence_obj,
+                        target_obj,
                         "v10_sentence_translator",
                     )
                     sentence_ru.update(translated_part)
