@@ -33,6 +33,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          if python - <<'PY'
+          import json
+          from pathlib import Path
+          states = list(Path('.bookai-cache-reference-v9').glob('*.json'))
+          restored = 0
+          for path in states:
+              try:
+                  restored = max(restored, len((json.loads(path.read_text('utf-8')).get('translations') or {})))
+              except Exception:
+                  pass
+          print(f'[reference-preflight] restored_translations={restored}')
+          raise SystemExit(0 if restored > 0 else 1)
+          PY
+          then
+            echo '[reference-preflight] previous preflight already passed; resuming saved full-book state'
+            exit 0
+          fi
+
           set -a
           source .env
           set +a
@@ -72,7 +91,7 @@ jobs:
 
           export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4-flash-0731'
-          export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-flash-0731'
+          export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-pro-0813'
           export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4-flash-0731'
           export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4-pro-0813'
           export BOOKAI_HARD_MODEL='deepseek/deepseek-v4-pro-0813'
@@ -81,7 +100,7 @@ jobs:
 
           export BOOKAI_BATCH_CHARS='11000'
           export BOOKAI_POLISH_BATCH_CHARS='5500'
-          export BOOKAI_GATE_BATCH_CHARS='8500'
+          export BOOKAI_GATE_BATCH_CHARS='6500'
           export BOOKAI_EDIT_BATCH_CHARS='4500'
           export BOOKAI_ANALYSIS_CHARS='90000'
           export BOOKAI_CHAPTER_BRIEF_CHARS='26000'
@@ -92,7 +111,7 @@ jobs:
           export BOOKAI_ANALYZER_RETRY_ATTEMPTS='2'
           export BOOKAI_ANALYZER_REQUEST_TIMEOUT='90'
           export BOOKAI_GATE_RETRY_ATTEMPTS='2'
-          export BOOKAI_GATE_REQUEST_TIMEOUT='120'
+          export BOOKAI_GATE_REQUEST_TIMEOUT='180'
           export BOOKAI_MEMORY_RETRY_ATTEMPTS='2'
           export BOOKAI_MEMORY_REQUEST_TIMEOUT='90'
           export BOOKAI_ANALYZER_MAX_TOKENS='4096'
@@ -101,7 +120,7 @@ jobs:
 
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          echo '[full-reference] strategy=flash-draft+pro-polish+flash-semantic-gate+pro-repair reference=v9'
+          echo '[full-reference] strategy=flash-draft+pro-polish+pro-bilingual-gate+pro-repair reference=v9-resume'
           python scripts/full_reference_translation.py 2>&1 | tee translation.log
 
       - name: Set Russian FB2 metadata
