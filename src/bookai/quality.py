@@ -48,11 +48,6 @@ def _balanced(text: str, left: str, right: str) -> bool:
 
 
 def candidate_issues(segment: Segment, candidate: str, memory: BookMemory | None = None) -> list[QualityIssue]:
-    """Cheap deterministic rejection rules.
-
-    These are intentionally high-precision. A candidate that fails a hard rule must
-    never be silently accepted or replaced with the source text.
-    """
     original = segment.text.strip()
     candidate = (candidate or "").strip()
     out: list[QualityIssue] = []
@@ -65,19 +60,15 @@ def candidate_issues(segment: Segment, candidate: str, memory: BookMemory | None
         return out
     if candidate == original and _LATIN_WORD.search(original):
         add("hard", "unchanged", "translation is identical to English source")
-
     scripts = _unexpected_scripts(original, candidate)
     if scripts:
         add("hard", "unexpected_script", "unexpected writing system: " + ", ".join(scripts))
-
     latin_words = _LATIN_WORD.findall(candidate)
     cyr = len(_CYRILLIC.findall(candidate))
     if len(latin_words) >= 5 and cyr < max(8, sum(map(len, latin_words)) // 2):
         add("hard", "english_leftover", f"too much English remains ({len(latin_words)} words)")
-
     if _numbers(original) != _numbers(candidate):
         add("hard", "numbers", "numbers changed, disappeared, or were added")
-
     if len(original) >= 80:
         ratio = len(candidate) / max(1, len(original))
         if ratio < 0.42:
@@ -86,18 +77,15 @@ def candidate_issues(segment: Segment, candidate: str, memory: BookMemory | None
             add("hard", "too_long", f"translation/source length ratio is {ratio:.2f}")
         elif ratio < 0.58 or ratio > 1.75:
             add("medium", "length", f"unusual translation/source length ratio is {ratio:.2f}")
-
     for left, right, label in (("(", ")", "parentheses"), ("[", "]", "brackets"), ("«", "»", "Russian quotes")):
         if not _balanced(candidate, left, right):
             add("medium", "unbalanced_punctuation", f"unbalanced {label}")
             break
-
     if is_heading(segment):
         if "\n" in candidate:
             add("hard", "heading_multiline", "chapter/title translation became multiline")
         if len(candidate) > max(180, len(original) * 4):
             add("hard", "heading_expanded", "heading expanded into body-like prose")
-
     if memory is not None:
         lower_original = original.casefold()
         lower_candidate = candidate.casefold()
@@ -107,7 +95,6 @@ def candidate_issues(segment: Segment, candidate: str, memory: BookMemory | None
             if src.casefold() in lower_original and preferred.casefold() not in lower_candidate:
                 add("medium", "glossary", f"preferred term missing: {src} → {preferred}")
                 break
-
     return out
 
 
@@ -122,7 +109,7 @@ def batch_issues(segments: list[Segment], translations: dict[str, str], memory: 
 
 
 def _single_segment_wrapper(obj: dict, sid: str) -> str | None:
-    """Recover only unambiguous one-segment wrappers emitted by small models."""
+    # Single-target recovery is safe because there is no possible cross-target mapping.
     for key in ("translation", "translated_text", "text", "result", "output"):
         value = obj.get(key)
         if isinstance(value, str) and value.strip():
@@ -133,9 +120,6 @@ def _single_segment_wrapper(obj: dict, sid: str) -> str | None:
             value = nested.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
-    # If the request had exactly one target and the model returned exactly one
-    # scalar translation under a fabricated/positional key, the mapping is still
-    # unambiguous. This is never used for multi-target requests.
     if len(obj) == 1:
         only = next(iter(obj.values()))
         if isinstance(only, str) and only.strip():
@@ -144,7 +128,6 @@ def _single_segment_wrapper(obj: dict, sid: str) -> str | None:
 
 
 def _unwrap_exact_id_envelope(obj: dict, expected_set: set[str]) -> dict:
-    """Safely unwrap provider/model envelopes only when the nested ids are exact."""
     current = obj
     wrapper_keys = {"type", "data", "result", "output", "json", "response", "content"}
     for _ in range(3):
@@ -169,26 +152,20 @@ def _unwrap_exact_id_envelope(obj: dict, expected_set: set[str]) -> dict:
 
 
 def assert_exact_ids(segments: list[Segment], obj: object, role: str) -> dict[str, str]:
-    """Validate structured LLM output without any source/draft fallback."""
     if not isinstance(obj, dict):
         raise ValueError(f"{role} returned non-object JSON")
     expected = [s.id for s in segments]
     expected_set = set(expected)
-
     obj = _unwrap_exact_id_envelope(obj, expected_set)
     actual_set = {str(k) for k in obj}
-
     if len(expected) == 1 and expected[0] not in actual_set:
         recovered = _single_segment_wrapper(obj, expected[0])
         if recovered is not None:
             return {expected[0]: recovered}
-
     missing = expected_set - actual_set
     extra = actual_set - expected_set
     if missing or extra:
-        raise ValueError(
-            f"{role} id contract violation: missing={sorted(missing)[:12]} extra={sorted(extra)[:12]}"
-        )
+        raise ValueError(f"{role} id contract violation: missing={sorted(missing)[:12]} extra={sorted(extra)[:12]}")
     out: dict[str, str] = {}
     for sid in expected:
         value = obj[sid]
