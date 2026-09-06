@@ -16,6 +16,9 @@ from .resilience import resilient_findings
 
 
 FLASH_MODEL = "deepseek/deepseek-v4-flash-0731"
+# Compatibility constant for the independent benchmark judge only.
+# ReferenceTranslationHarness itself hard-forces every operational role to FLASH_MODEL.
+PRO_MODEL = "deepseek/deepseek-v4-pro-0813"
 
 _CLOSERS = "\"'”’»)]}"
 _OPENERS = "\"'“‘«([{"
@@ -41,7 +44,7 @@ def _memory_prompt(memory: BookMemory) -> str:
 
 
 def _sentence_units(text: str) -> list[str]:
-    """Conservative English sentence splitter used only for v10 hard paragraphs."""
+    """Conservative English sentence splitter used by the v10 micro-translation path."""
     text = text.strip()
     if not text:
         return []
@@ -105,10 +108,12 @@ class ReferenceTranslationHarness(TranslationHarness):
     judging are hard-capped at V4 Flash. V4 Pro is intentionally outside this
     harness and may only be used by the independent benchmark judge.
 
-    Long/complex paragraphs are decomposed into sentence obligations first, then
-    Flash reassembles the translated sentences into one literary Russian paragraph.
-    Every paragraph later receives an explicit semantic confirmation row, so a
-    batched critic cannot silently skip an id.
+    Difficult paragraphs are isolated from ordinary batches. Multi-sentence hard
+    paragraphs are translated as small sentence micro-batches while every call
+    still receives the complete paragraph, neighboring paragraphs, the style bible,
+    and previously accepted Russian sentences. Flash then reassembles the faithful
+    sentence drafts into one literary paragraph. This keeps the task cognitively
+    small without sacrificing context or Parker's paragraph-level rhythm.
     """
 
     _ADVISORY_LITERARY_PREFIXES = (
@@ -131,11 +136,35 @@ class ReferenceTranslationHarness(TranslationHarness):
         if is_heading(segment):
             return False
         units = _sentence_units(segment.text)
-        if len(units) < 2:
+        if not units:
             return False
-        char_threshold = max(450, int(os.getenv("BOOKAI_V10_DECOMPOSE_CHARS") or "850"))
-        sentence_threshold = max(3, int(os.getenv("BOOKAI_V10_DECOMPOSE_SENTENCES") or "5"))
-        return len(segment.text) >= char_threshold or len(units) >= sentence_threshold
+
+        char_threshold = max(420, int(os.getenv("BOOKAI_V10_DECOMPOSE_CHARS") or "650"))
+        sentence_threshold = max(3, int(os.getenv("BOOKAI_V10_DECOMPOSE_SENTENCES") or "4"))
+        isolate_sentence_chars = max(
+            280,
+            int(os.getenv("BOOKAI_V10_ISOLATE_SENTENCE_CHARS") or "420"),
+        )
+        max_sentence_chars = max(len(unit) for unit in units)
+        clause_pressure = (
+            segment.text.count(",")
+            + 2 * segment.text.count(";")
+            + segment.text.count(":")
+            + segment.text.count("—")
+            + segment.text.count(" - ")
+        )
+
+        # A very long single sentence is not split further, but is still isolated
+        # into its own Flash request so it cannot be diluted inside a large batch.
+        if len(units) == 1:
+            return max_sentence_chars >= isolate_sentence_chars or clause_pressure >= 10
+
+        return (
+            len(segment.text) >= char_threshold
+            or len(units) >= sentence_threshold
+            or max_sentence_chars >= isolate_sentence_chars
+            or clause_pressure >= 10
+        )
 
     def _translate_decomposed(
         self,
@@ -155,6 +184,8 @@ class ReferenceTranslationHarness(TranslationHarness):
 
         units = _sentence_units(segment.text)
         if len(units) < 2:
+            # Long/complex one-sentence paragraphs are deliberately isolated into
+            # one request, but need no artificial clause splitting.
             return super().translate(
                 [segment],
                 memory,
@@ -174,29 +205,86 @@ class ReferenceTranslationHarness(TranslationHarness):
         before = [{"id": s.id, "text": s.text} for s in (context_before or [])]
         after = [{"id": s.id, "text": s.text} for s in (context_after or [])]
         provider = self.translator.provider
+        batch_size = max(
+            1,
+            min(4, int(os.getenv("BOOKAI_V10_SENTENCE_BATCH") or "2")),
+        )
 
         sentence_system = """You are the fidelity stage of a Flash-only EN→RU literary translation harness.
-The target is one difficult source paragraph already split into sentence obligations.
-Translate EVERY supplied sentence id faithfully into natural Russian while using the FULL SOURCE PARAGRAPH,
-neighboring source paragraphs and translation bible to resolve pronouns, ellipsis, irony, terminology and subtext.
-Do not merge ids, omit clauses, add explanations, normalize away deliberate ambiguity, or translate context passages.
-Return ONLY one JSON object mapping EXACTLY every sentence id to its Russian translation."""
-        sentence_user = (
-            f"TRANSLATION_BIBLE:{_memory_prompt(memory)}\n"
-            f"CONTEXT_BEFORE:{json.dumps(before, ensure_ascii=False)}\n"
-            f"FULL_SOURCE_PARAGRAPH:{json.dumps(segment.text, ensure_ascii=False)}\n"
-            f"TARGET_SENTENCES:{json.dumps({s.id: s.text for s in sentence_segments}, ensure_ascii=False)}\n"
-            f"CONTEXT_AFTER:{json.dumps(after, ensure_ascii=False)}"
-        )
-        sentence_obj = extract_json(provider.complete(sentence_system, sentence_user, temperature=0.1))
-        sentence_ru = assert_exact_ids(sentence_segments, sentence_obj, "v10_sentence_translator")
+The hard paragraph has been decomposed into sentence obligations to keep each generation task small.
+Translate ONLY the TARGET_SENTENCES supplied in this call. Use the COMPLETE SOURCE PARAGRAPH,
+the full sentence map, neighboring source paragraphs, previously accepted Russian sentence translations
+and the translation bible to resolve pronouns, ellipsis, irony, terminology, causality and subtext.
+Each target sentence must be complete: preserve every proposition, relation, number, negation,
+qualification, image, joke premise and technical detail. Natural Russian wording is required; literal
+English syntax is not. Do not merge ids, omit clauses, add explanations, or translate context passages.
+Return ONLY one JSON object mapping EXACTLY every target sentence id to its Russian translation."""
 
-        reassembly_system = """You are the reassembly stage of a Flash-only EN→RU literary translation harness.
-Rebuild ONE finished Russian literary paragraph from faithful sentence translations.
-Preserve every fact, relation, number, negation, qualification, joke premise and image from the full English paragraph.
-You may change Russian sentence boundaries, connective wording and word order only to make the paragraph read as native,
-intentional Russian prose in the author's voice. Do not summarize, omit, add, explain or beautify beyond the source.
-Return ONLY one JSON object mapping the exact paragraph id to the complete Russian paragraph."""
+        sentence_ru: dict[str, str] = {}
+        source_map = {s.id: s.text for s in sentence_segments}
+        for start in range(0, len(sentence_segments), batch_size):
+            batch = sentence_segments[start : start + batch_size]
+            previous = [
+                {
+                    "id": prior.id,
+                    "source": prior.text,
+                    "translation": sentence_ru[prior.id],
+                }
+                for prior in sentence_segments[:start]
+                if prior.id in sentence_ru
+            ][-3:]
+            upcoming = [
+                {"id": item.id, "text": item.text}
+                for item in sentence_segments[start + len(batch) : start + len(batch) + 3]
+            ]
+            sentence_user = (
+                f"TRANSLATION_BIBLE:{_memory_prompt(memory)}\n"
+                f"CONTEXT_BEFORE:{json.dumps(before, ensure_ascii=False)}\n"
+                f"FULL_SOURCE_PARAGRAPH:{json.dumps(segment.text, ensure_ascii=False)}\n"
+                f"PARAGRAPH_SENTENCE_MAP:{json.dumps(source_map, ensure_ascii=False)}\n"
+                f"PREVIOUS_ACCEPTED_RUSSIAN:{json.dumps(previous, ensure_ascii=False)}\n"
+                f"TARGET_SENTENCES:{json.dumps({s.id: s.text for s in batch}, ensure_ascii=False)}\n"
+                f"UPCOMING_SOURCE_SENTENCES:{json.dumps(upcoming, ensure_ascii=False)}\n"
+                f"CONTEXT_AFTER:{json.dumps(after, ensure_ascii=False)}"
+            )
+
+            last_error: Exception | None = None
+            for attempt in range(2):
+                try:
+                    sentence_obj = extract_json(
+                        provider.complete(
+                            sentence_system,
+                            sentence_user,
+                            temperature=0.1 if attempt == 0 else 0.0,
+                        )
+                    )
+                    translated_part = assert_exact_ids(
+                        batch,
+                        sentence_obj,
+                        "v10_sentence_translator",
+                    )
+                    sentence_ru.update(translated_part)
+                    last_error = None
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    print(
+                        f"[bookai-v10] sentence_batch_retry id={segment.id} "
+                        f"start={start} attempt={attempt + 1} error={type(exc).__name__}",
+                        flush=True,
+                    )
+            if last_error is not None:
+                raise last_error
+
+        reassembly_system = """You are the literary reassembly stage of a Flash-only EN→RU translation harness.
+Rebuild ONE finished Russian literary paragraph from the already faithful sentence translations.
+The sentence translations are semantic anchors, not a demand to preserve their exact syntax.
+Keep every source fact, relation, number, negation, qualification, joke premise and image, while restoring
+the author's paragraph-level cadence: restrained, precise, dryly ironic, natural Russian prose.
+Preserve accumulation and punch-line placement when functional. You may change Russian sentence boundaries,
+connectives and word order only to improve idiomatic flow and voice. Never summarize, omit, add, explain,
+intensify emotion, or flatten technical/physical meaning. Return ONLY one JSON object mapping the exact
+paragraph id to the complete Russian paragraph."""
         sentence_pairs = [
             {"id": s.id, "source": s.text, "translation": sentence_ru[s.id]}
             for s in sentence_segments
@@ -209,7 +297,9 @@ Return ONLY one JSON object mapping the exact paragraph id to the complete Russi
             f"CONTEXT_AFTER:{json.dumps(after, ensure_ascii=False)}\n"
             f"PARAGRAPH_ID:{segment.id}"
         )
-        paragraph_obj = extract_json(self.editor.complete(reassembly_system, reassembly_user, temperature=0.1))
+        paragraph_obj = extract_json(
+            self.editor.complete(reassembly_system, reassembly_user, temperature=0.1)
+        )
         result = assert_exact_ids([segment], paragraph_obj, "v10_paragraph_reassembly")
 
         hard = hard_ids(batch_issues([segment], result, memory))
@@ -217,7 +307,7 @@ Return ONLY one JSON object mapping the exact paragraph id to the complete Russi
             return result
 
         # A stylistic reassembly must never defeat deterministic acceptance.
-        # The sentence-by-sentence form is a safe last resort and is polished later.
+        # The sentence-anchored form is a safe last resort and is polished later.
         joined = " ".join(sentence_ru[s.id] for s in sentence_segments).strip()
         fallback = {segment.id: joined}
         fallback_hard = hard_ids(batch_issues([segment], fallback, memory))
@@ -258,8 +348,10 @@ Return ONLY one JSON object mapping the exact paragraph id to the complete Russi
 
         for segment in complex_segments:
             units = _sentence_units(segment.text)
+            mode = "sentence_micro_batches" if len(units) >= 2 else "isolated_long_sentence"
             print(
-                f"[bookai-v10] sentence_decompose id={segment.id} chars={len(segment.text)} sentences={len(units)}",
+                f"[bookai-v10] micro_translate id={segment.id} mode={mode} "
+                f"chars={len(segment.text)} sentences={len(units)}",
                 flush=True,
             )
             out.update(
@@ -404,7 +496,8 @@ def build_reference_harness() -> ReferenceTranslationHarness:
         )
 
     print(
-        "[bookai-v10] strategy=flash-only+sentence-decomposition+explicit-semantic-confirmation "
+        "[bookai-v10] strategy=flash-only+contextual-sentence-micro-batches+"
+        "isolated-long-sentences+explicit-semantic-confirmation "
         "external_reference_judge=separate",
         flush=True,
     )

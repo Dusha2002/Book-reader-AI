@@ -29,6 +29,24 @@ jobs:
       - name: Install project
         run: pip install -e .
 
+      - name: Validate v10 harness imports and sentence splitter
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m compileall -q src scripts/reference_quality_gate.py scripts/reference_quality_gate_v2.py
+          python - <<'PY'
+          from bookai.reference_harness import FLASH_MODEL, PRO_MODEL, _sentence_units
+          assert FLASH_MODEL == 'deepseek/deepseek-v4-flash-0731'
+          assert PRO_MODEL == 'deepseek/deepseek-v4-pro-0813'
+          assert _sentence_units('One thing happened. Then another? Finally, this!') == [
+              'One thing happened.',
+              'Then another?',
+              'Finally, this!',
+          ]
+          print('[bookai-v10] import_and_splitter_sanity=ok')
+          PY
+          mkdir -p .bookai-cache-reference-v10
+
       - name: Reference preflight — blind generation then compare with user benchmark
         shell: bash
         run: |
@@ -76,8 +94,13 @@ jobs:
           export BOOKAI_ANALYZER_MAX_TOKENS='4096'
           export BOOKAI_GATE_MAX_TOKENS='8192'
           export BOOKAI_MEMORY_MAX_TOKENS='4096'
-          export BOOKAI_V10_DECOMPOSE_CHARS='850'
-          export BOOKAI_V10_DECOMPOSE_SENTENCES='5'
+
+          # v10 micro-translation: complex paragraphs are isolated; multi-sentence
+          # ones are translated in tiny sentence batches with the whole context.
+          export BOOKAI_V10_DECOMPOSE_CHARS='650'
+          export BOOKAI_V10_DECOMPOSE_SENTENCES='4'
+          export BOOKAI_V10_ISOLATE_SENTENCE_CHARS='420'
+          export BOOKAI_V10_SENTENCE_BATCH='2'
 
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
           python scripts/reference_quality_gate_v2.py \
@@ -107,8 +130,11 @@ jobs:
           export BOOKAI_ANALYSIS_CHARS='90000'
           export BOOKAI_CHAPTER_BRIEF_CHARS='26000'
           export BOOKAI_QUALITY_REPAIR_ROUNDS='3'
-          export BOOKAI_V10_DECOMPOSE_CHARS='850'
-          export BOOKAI_V10_DECOMPOSE_SENTENCES='5'
+
+          export BOOKAI_V10_DECOMPOSE_CHARS='650'
+          export BOOKAI_V10_DECOMPOSE_SENTENCES='4'
+          export BOOKAI_V10_ISOLATE_SENTENCE_CHARS='420'
+          export BOOKAI_V10_SENTENCE_BATCH='2'
 
           export BOOKAI_RETRY_ATTEMPTS='3'
           export BOOKAI_REQUEST_TIMEOUT='240'
@@ -124,7 +150,7 @@ jobs:
 
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          echo '[full-reference] strategy=flash-only-v10+sentence-decomposition+explicit-semantic-confirmation+literary-polish+repair external-judge=pro'
+          echo '[full-reference] strategy=flash-only-v10+contextual-sentence-micro-batches+isolated-long-sentences+semantic-confirmation+literary-polish+repair external-judge=pro'
           python scripts/full_reference_translation.py 2>&1 | tee translation.log
 
       - name: Set Russian FB2 metadata
