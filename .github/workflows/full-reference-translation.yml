@@ -124,12 +124,15 @@ jobs:
           export BOOKAI_REASONING='none'
 
           export BOOKAI_BATCH_CHARS='11000'
-          export BOOKAI_POLISH_BATCH_CHARS='5500'
-          export BOOKAI_GATE_BATCH_CHARS='6500'
-          export BOOKAI_EDIT_BATCH_CHARS='4500'
+          export BOOKAI_POLISH_BATCH_CHARS='4500'
+          # Keep QA and defect-driven repair batches deliberately small. Long hard
+          # paragraphs then get almost isolated Flash attention instead of competing
+          # with many neighboring targets in one response.
+          export BOOKAI_GATE_BATCH_CHARS='3200'
+          export BOOKAI_EDIT_BATCH_CHARS='2200'
           export BOOKAI_ANALYSIS_CHARS='90000'
           export BOOKAI_CHAPTER_BRIEF_CHARS='26000'
-          export BOOKAI_QUALITY_REPAIR_ROUNDS='3'
+          export BOOKAI_QUALITY_REPAIR_ROUNDS='4'
 
           export BOOKAI_V10_DECOMPOSE_CHARS='650'
           export BOOKAI_V10_DECOMPOSE_SENTENCES='4'
@@ -150,7 +153,7 @@ jobs:
 
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-${BOOKAI_API_KEY:-}}"
-          echo '[full-reference] strategy=flash-only-v10+contextual-sentence-micro-batches+isolated-long-sentences+semantic-confirmation+literary-polish+repair external-judge=pro'
+          echo '[full-reference] strategy=flash-only-v10+contextual-sentence-micro-batches+isolated-hard-repairs+semantic-confirmation+literary-polish external-judge=pro'
           python scripts/full_reference_translation.py 2>&1 | tee translation.log
 
       - name: Set Russian FB2 metadata
