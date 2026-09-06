@@ -17,13 +17,17 @@ def _memory_prompt(memory: BookMemory) -> str:
 
 
 def _resolve_issue_id(raw_id: object, valid_ids: set[str], role: str) -> str:
-    """Resolve only an unambiguous critic-created sub-id.
+    """Resolve only critic ids that are unambiguous for the supplied targets.
 
     Flash sometimes decomposes one paragraph internally and returns an id such as
     ``s003324_1`` even though the caller supplied only ``s003324``. For QA findings
     it is safe to attach such a numbered sub-finding back to the exact supplied
     parent segment. Translation/edit outputs remain under the stricter exact-id
     contract and do NOT use this relaxation.
+
+    On a *single-target* critic call, some small-model responses also replace the
+    supplied id with a positional pseudo-id such as ``1``. That is unambiguous only
+    because exactly one target exists, so normalize it there and nowhere else.
     """
     sid = str(raw_id or "").strip()
     if sid in valid_ids:
@@ -32,6 +36,10 @@ def _resolve_issue_id(raw_id: object, valid_ids: set[str], role: str) -> str:
     if match and match.group(1) in valid_ids:
         parent = match.group(1)
         print(f"[bookai-critic-id-normalized] role={role} raw={sid} parent={parent}", flush=True)
+        return parent
+    if len(valid_ids) == 1 and sid in {"0", "1"}:
+        parent = next(iter(valid_ids))
+        print(f"[bookai-critic-id-normalized] role={role} raw={sid} parent={parent} mode=single-target-position", flush=True)
         return parent
     raise ValueError(f"{role} returned unknown id: {sid!r}")
 
