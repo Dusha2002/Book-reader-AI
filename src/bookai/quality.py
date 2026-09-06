@@ -72,7 +72,6 @@ def candidate_issues(segment: Segment, candidate: str, memory: BookMemory | None
 
     latin_words = _LATIN_WORD.findall(candidate)
     cyr = len(_CYRILLIC.findall(candidate))
-    # Product names and short quotations may remain Latin, but prose must not.
     if len(latin_words) >= 5 and cyr < max(8, sum(map(len, latin_words)) // 2):
         add("hard", "english_leftover", f"too much English remains ({len(latin_words)} words)")
 
@@ -123,12 +122,7 @@ def batch_issues(segments: list[Segment], translations: dict[str, str], memory: 
 
 
 def _single_segment_wrapper(obj: dict, sid: str) -> str | None:
-    """Recover only unambiguous one-segment wrappers emitted by small models.
-
-    This is deliberately disabled for multi-segment batches: a wrapper then does
-    not tell us which requested id the text belongs to, so accepting it would be
-    silent corruption. For exactly one expected id, common wrapper keys are safe.
-    """
+    """Recover only unambiguous one-segment wrappers emitted by small models."""
     for key in ("translation", "translated_text", "text", "result", "output"):
         value = obj.get(key)
         if isinstance(value, str) and value.strip():
@@ -139,18 +133,18 @@ def _single_segment_wrapper(obj: dict, sid: str) -> str | None:
             value = nested.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
+    # If the request had exactly one target and the model returned exactly one
+    # scalar translation under a fabricated/positional key, the mapping is still
+    # unambiguous. This is never used for multi-target requests.
+    if len(obj) == 1:
+        only = next(iter(obj.values()))
+        if isinstance(only, str) and only.strip():
+            return only.strip()
     return None
 
 
 def _unwrap_exact_id_envelope(obj: dict, expected_set: set[str]) -> dict:
-    """Safely unwrap provider/model envelopes only when the nested ids are exact.
-
-    Some OpenAI-compatible routes occasionally return JSON shaped like
-    {"type": "...", "data": {"s000001": "..."}} even when the prompt asks for
-    the id map directly. We may strip such transport wrappers only if doing so
-    reveals EXACTLY the requested ids. This preserves the no-silent-corruption
-    contract for both single- and multi-segment batches.
-    """
+    """Safely unwrap provider/model envelopes only when the nested ids are exact."""
     current = obj
     wrapper_keys = {"type", "data", "result", "output", "json", "response", "content"}
     for _ in range(3):
@@ -184,8 +178,6 @@ def assert_exact_ids(segments: list[Segment], obj: object, role: str) -> dict[st
     obj = _unwrap_exact_id_envelope(obj, expected_set)
     actual_set = {str(k) for k in obj}
 
-    # A single target is unambiguous even if Flash wrapped it in
-    # {"translation":"..."}. Never do this for 2+ targets.
     if len(expected) == 1 and expected[0] not in actual_set:
         recovered = _single_segment_wrapper(obj, expected[0])
         if recovered is not None:
