@@ -50,6 +50,41 @@ def test_single_segment_wrapper_is_recovered_but_multi_segment_wrapper_is_reject
         assert_exact_ids(many, {"type": "translation", "translation": "Он ушёл."}, "editor")
 
 
+def test_exact_id_transport_envelope_is_safely_unwrapped():
+    one = [Segment("s000008", "He left.", "/p")]
+    assert assert_exact_ids(
+        one,
+        {"type": "json_object", "data": {"s000008": "Он ушёл."}},
+        "literary polisher",
+    ) == {"s000008": "Он ушёл."}
+
+    many = [
+        Segment("s000010", "He left.", "/p"),
+        Segment("s000012", "She stayed.", "/p"),
+    ]
+    assert assert_exact_ids(
+        many,
+        {
+            "type": "json_object",
+            "data": {"s000010": "Он ушёл.", "s000012": "Она осталась."},
+        },
+        "literary polisher",
+    ) == {"s000010": "Он ушёл.", "s000012": "Она осталась."}
+
+
+def test_transport_envelope_stays_strict_on_wrong_nested_ids():
+    segments = [
+        Segment("s000010", "He left.", "/p"),
+        Segment("s000012", "She stayed.", "/p"),
+    ]
+    with pytest.raises(ValueError, match="id contract"):
+        assert_exact_ids(
+            segments,
+            {"type": "json_object", "data": {"s000010": "Он ушёл.", "wrong": "Ошибка"}},
+            "literary polisher",
+        )
+
+
 def test_env_cannot_raise_model_above_flash(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-only-key")
     monkeypatch.setenv("BOOKAI_MAX_MODEL", "deepseek/deepseek-v4-pro-0813")

@@ -142,12 +142,46 @@ def _single_segment_wrapper(obj: dict, sid: str) -> str | None:
     return None
 
 
+def _unwrap_exact_id_envelope(obj: dict, expected_set: set[str]) -> dict:
+    """Safely unwrap provider/model envelopes only when the nested ids are exact.
+
+    Some OpenAI-compatible routes occasionally return JSON shaped like
+    {"type": "...", "data": {"s000001": "..."}} even when the prompt asks for
+    the id map directly. We may strip such transport wrappers only if doing so
+    reveals EXACTLY the requested ids. This preserves the no-silent-corruption
+    contract for both single- and multi-segment batches.
+    """
+    current = obj
+    wrapper_keys = {"type", "data", "result", "output", "json", "response", "content"}
+    for _ in range(3):
+        actual = {str(k) for k in current}
+        if actual == expected_set:
+            return current
+        advanced = False
+        for key in ("data", "result", "output", "json", "response", "content"):
+            nested = current.get(key)
+            if not isinstance(nested, dict):
+                continue
+            if not actual.issubset(wrapper_keys):
+                continue
+            nested_keys = {str(k) for k in nested}
+            if nested_keys == expected_set or nested_keys.issubset(wrapper_keys):
+                current = nested
+                advanced = True
+                break
+        if not advanced:
+            break
+    return obj
+
+
 def assert_exact_ids(segments: list[Segment], obj: object, role: str) -> dict[str, str]:
     """Validate structured LLM output without any source/draft fallback."""
     if not isinstance(obj, dict):
         raise ValueError(f"{role} returned non-object JSON")
     expected = [s.id for s in segments]
     expected_set = set(expected)
+
+    obj = _unwrap_exact_id_envelope(obj, expected_set)
     actual_set = {str(k) for k in obj}
 
     # A single target is unambiguous even if Flash wrapped it in
