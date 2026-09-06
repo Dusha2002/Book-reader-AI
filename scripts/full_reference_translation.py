@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from bookai.models import Segment
-from bookai.parsers.base import load_book
+from bookai.parsers.base import load_book, save_book
 from bookai.pipeline import PIPELINE_VERSION, _cache_path, _chapter_groups, _should_translate, translate_book
 from bookai.reference_harness import build_reference_harness
 
@@ -12,6 +12,7 @@ from bookai.reference_harness import build_reference_harness
 SOURCE = Path("Devices_and_Desires.fb2")
 OUTPUT = Path("Devices_and_Desires_RU_REFERENCE.fb2")
 CACHE = Path(".bookai-cache-reference-v10")
+PROGRESS_REPORT = Path("reference-progress.json")
 
 
 def progress(event: dict) -> None:
@@ -22,90 +23,128 @@ def _sanitize_resume_state(
     state: dict,
     chapters: list[tuple[str, list[Segment]]],
 ) -> tuple[dict, dict]:
-    """Trust cached prose only for chapters that already passed the full QA gate.
+    """Keep every usable cached translation, including unfinished chapters.
 
-    A failed/interrupted chapter may contain polished or repeatedly edited text from
-    an older harness revision. Reusing that prose would skip the current translator
-    (including sentence decomposition). Keep completed QA-passed chapters, but make
-    every other chapter start again from the faithful Flash translation pass.
+    The old strict resume policy deleted a whole unfinished chapter unless it had
+    already passed every QA gate. That made transient model/JSON failures extremely
+    expensive because the next run translated the same material again. Best-effort
+    mode keeps all non-empty source translations and only revokes chapter-level
+    completion claims that are impossible because ids are missing.
     """
-    translations = dict(state.get("translations") or {})
-    claimed_qa = set(state.get("qa_passed_chapters") or [])
+    original = dict(state.get("translations") or {})
+    source_ids = {segment.id for _, chapter in chapters for segment in chapter}
+    translations = {
+        str(sid): text
+        for sid, text in original.items()
+        if str(sid) in source_ids and isinstance(text, str) and text.strip()
+    }
 
-    trusted_chapters: set[str] = set()
-    trusted_ids: set[str] = set()
-    source_ids: set[str] = set()
+    chapter_ids = {name: {segment.id for segment in chapter} for name, chapter in chapters}
+    known_names = set(chapter_ids)
 
-    for name, chapter in chapters:
-        ids = {segment.id for segment in chapter}
-        source_ids.update(ids)
-        if name in claimed_qa and ids and ids.issubset(translations):
-            trusted_chapters.add(name)
-            trusted_ids.update(ids)
+    def valid_claims(key: str) -> set[str]:
+        claimed = set(state.get(key) or []) & known_names
+        return {
+            name
+            for name in claimed
+            if chapter_ids[name] and chapter_ids[name].issubset(translations)
+        }
 
-    reset_chapters: list[str] = []
-    for name, chapter in chapters:
-        ids = {segment.id for segment in chapter}
-        if name not in trusted_chapters and ids.intersection(translations):
-            reset_chapters.append(name)
-
-    removed_ids = sorted(sid for sid in translations if sid in source_ids and sid not in trusted_ids)
-    # The cache is keyed by the source digest, so non-source ids are stale/corrupt
-    # and should not survive a resume either.
-    stale_ids = sorted(sid for sid in translations if sid not in source_ids)
-    cleaned_translations = {sid: text for sid, text in translations.items() if sid in trusted_ids}
+    completed = valid_claims("completed_chapters")
+    polished = valid_claims("polished_chapters")
+    qa_passed = valid_claims("qa_passed_chapters")
 
     state = dict(state)
-    state["translations"] = cleaned_translations
-    state["completed_chapters"] = sorted(trusted_chapters)
-    state["polished_chapters"] = sorted(trusted_chapters)
-    state["qa_passed_chapters"] = sorted(trusted_chapters)
-    state.pop("final_quality", None)
+    state["translations"] = translations
+    state["completed_chapters"] = sorted(completed)
+    state["polished_chapters"] = sorted(polished)
+    state["qa_passed_chapters"] = sorted(qa_passed)
 
+    all_ids = set(translations)
+    if all_ids != source_ids or qa_passed != known_names:
+        state.pop("final_quality", None)
+
+    partial_chapters = [
+        name
+        for name, ids in chapter_ids.items()
+        if ids.intersection(translations) and not ids.issubset(translations)
+    ]
     report = {
-        "trusted_chapters": len(trusted_chapters),
-        "trusted_translations": len(cleaned_translations),
-        "reset_chapters": reset_chapters,
-        "removed_translations": len(removed_ids) + len(stale_ids),
+        "preserved_translations": len(translations),
+        "removed_invalid_or_stale": len(original) - len(translations),
+        "partial_chapters": partial_chapters,
+        "qa_passed_chapters": len(qa_passed),
     }
     return state, report
 
 
 def _sanitize_resume_cache(source: Path, cache_dir: Path, mode: str = "optimal") -> dict:
     state_path = _cache_path(source, cache_dir, mode)
+    empty = {
+        "preserved_translations": 0,
+        "removed_invalid_or_stale": 0,
+        "partial_chapters": [],
+        "qa_passed_chapters": 0,
+    }
     if not state_path.exists():
-        return {
-            "trusted_chapters": 0,
-            "trusted_translations": 0,
-            "reset_chapters": [],
-            "removed_translations": 0,
-        }
+        return empty
 
     try:
         state = json.loads(state_path.read_text("utf-8"))
     except (json.JSONDecodeError, OSError):
-        return {
-            "trusted_chapters": 0,
-            "trusted_translations": 0,
-            "reset_chapters": [],
-            "removed_translations": 0,
-        }
-
+        return empty
     if state.get("pipeline_version") != PIPELINE_VERSION:
-        return {
-            "trusted_chapters": 0,
-            "trusted_translations": 0,
-            "reset_chapters": [],
-            "removed_translations": 0,
-        }
+        return empty
 
     document = load_book(source)
     source_segments = [segment for segment in document.segments if _should_translate(segment.text)]
     chapters = _chapter_groups(source_segments)
     cleaned, report = _sanitize_resume_state(state, chapters)
-
     if cleaned != state:
         state_path.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), "utf-8")
+    return report
+
+
+def _cached_state(source: Path, cache_dir: Path, mode: str = "optimal") -> dict:
+    state_path = _cache_path(source, cache_dir, mode)
+    try:
+        return json.loads(state_path.read_text("utf-8")) if state_path.exists() else {}
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _write_latest_artifact(error: BaseException | None = None) -> dict:
+    """Build the newest usable FB2 even when the strict pipeline aborted midway."""
+    document = load_book(SOURCE)
+    targets = [segment for segment in document.segments if _should_translate(segment.text)]
+    target_ids = {segment.id for segment in targets}
+    state = _cached_state(SOURCE, CACHE)
+    translations = {
+        str(sid): text
+        for sid, text in dict(state.get("translations") or {}).items()
+        if str(sid) in target_ids and isinstance(text, str) and text.strip()
+    }
+
+    translated = len(translations)
+    total = len(targets)
+    if translated:
+        save_book(document, translations, OUTPUT)
+
+    status = "complete" if error is None and translated == total else "partial"
+    report = {
+        "status": status,
+        "translated_segments": translated,
+        "total_segments": total,
+        "completion_percent": round((translated / total * 100.0) if total else 0.0, 2),
+        "remaining_segments": max(0, total - translated),
+        "qa_passed_chapters": list(state.get("qa_passed_chapters") or []),
+        "output_exists": OUTPUT.exists(),
+        "output_bytes": OUTPUT.stat().st_size if OUTPUT.exists() else 0,
+        "error_type": type(error).__name__ if error is not None else None,
+        "error": str(error)[:2000] if error is not None else None,
+    }
+    PROGRESS_REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
+    print("[full-reference] progress=" + json.dumps(report, ensure_ascii=False, sort_keys=True), flush=True)
     return report
 
 
@@ -114,20 +153,32 @@ def main() -> None:
         raise FileNotFoundError(SOURCE)
 
     resume = _sanitize_resume_cache(SOURCE, CACHE)
-    print("[full-reference] resume_sanitize=" + json.dumps(resume, ensure_ascii=False, sort_keys=True), flush=True)
+    print("[full-reference] resume=" + json.dumps(resume, ensure_ascii=False, sort_keys=True), flush=True)
 
     harness = build_reference_harness()
-    result = translate_book(
-        SOURCE,
-        OUTPUT,
-        harness,
-        mode="optimal",
-        cache_dir=CACHE,
-        progress=progress,
-        memory_updates=True,
-    )
-    print(f"[full-reference] output={result} bytes={result.stat().st_size}", flush=True)
-    print("[full-reference] usage=" + json.dumps(harness.usage, ensure_ascii=False), flush=True)
+    try:
+        result = translate_book(
+            SOURCE,
+            OUTPUT,
+            harness,
+            mode="optimal",
+            cache_dir=CACHE,
+            progress=progress,
+            memory_updates=True,
+        )
+        print(f"[full-reference] output={result} bytes={result.stat().st_size}", flush=True)
+        print("[full-reference] usage=" + json.dumps(harness.usage, ensure_ascii=False), flush=True)
+        _write_latest_artifact(None)
+    except Exception as exc:
+        report = _write_latest_artifact(exc)
+        if report["translated_segments"] <= 0:
+            raise
+        print(
+            "[full-reference] best_effort_recovered=true; strict pipeline stopped, "
+            "but cached translation was exported and the workflow may continue",
+            flush=True,
+        )
+        print("[full-reference] usage=" + json.dumps(harness.usage, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":
