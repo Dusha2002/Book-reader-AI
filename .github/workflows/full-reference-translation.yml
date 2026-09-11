@@ -15,7 +15,7 @@ permissions:
 jobs:
   translate:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 40
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       BOOKAI_BASE_URL: https://openrouter.ai/api/v1
@@ -40,7 +40,7 @@ jobs:
       - name: Validate harness imports
         shell: bash
         run: |
-          python -m compileall -q src scripts/reference_quality_gate.py scripts/reference_quality_gate_v2.py scripts/full_reference_translation.py
+          python -m compileall -q src scripts/reference_quality_gate_v2.py scripts/full_reference_translation.py scripts/rapid_reference_translation.py
           python - <<'PY'
           from bookai.reference_harness import FLASH_MODEL, PRO_MODEL
           assert FLASH_MODEL == 'deepseek/deepseek-v4.1-flash'
@@ -69,7 +69,7 @@ jobs:
           print('[bookai] openrouter_smoke=ok model=deepseek/deepseek-v4.1-flash')
           PY
 
-      - name: Translate complete book — balanced-fast V4.1 Flash
+      - name: Translate complete book — rapid parallel V4.1 Flash
         continue-on-error: true
         shell: bash
         run: |
@@ -79,46 +79,49 @@ jobs:
           export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4.1-flash'
           export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4.1-flash'
           export BOOKAI_HARD_MODEL='deepseek/deepseek-v4.1-flash'
-
-          # Keep generation moving. Semantic/literary critics remain advisory
-          # outside generation; deterministic invariants still protect the cache.
           export BOOKAI_LLM_GATE='false'
           export BOOKAI_REASONING='none'
 
-          # V4.1 Flash can safely handle larger context windows. Larger batches
-          # sharply reduce request count while keeping the separate polish pass.
-          export BOOKAI_BATCH_CHARS='16000'
-          export BOOKAI_POLISH_BATCH_CHARS='10000'
-          export BOOKAI_GATE_BATCH_CHARS='12000'
-          export BOOKAI_EDIT_BATCH_CHARS='8000'
-          export BOOKAI_ANALYSIS_CHARS='90000'
-          export BOOKAI_CHAPTER_BRIEF_CHARS='26000'
-          export BOOKAI_QUALITY_REPAIR_ROUNDS='1'
+          # Target: complete the whole book in roughly <=30 minutes.
+          # Six independent batches run concurrently; successful batches are
+          # checkpointed immediately. A bad JSON response only retries/splits
+          # its own batch instead of replaying a whole chapter.
+          export BOOKAI_RAPID_WORKERS='6'
+          export BOOKAI_RAPID_BATCH_CHARS='24000'
+          export BOOKAI_ANALYSIS_CHARS='70000'
 
-          # Decompose only genuinely difficult prose. Previously any 4-sentence
-          # paragraph — even ~100 chars — became 4+ sequential model calls.
-          # Batch up to four sentence obligations in each micro-call.
-          export BOOKAI_V10_DECOMPOSE_CHARS='1600'
-          export BOOKAI_V10_DECOMPOSE_SENTENCES='10'
-          export BOOKAI_V10_ISOLATE_SENTENCE_CHARS='1000'
+          # Sentence decomposition is reserved for genuinely hard prose only.
+          export BOOKAI_V10_DECOMPOSE_CHARS='2200'
+          export BOOKAI_V10_DECOMPOSE_SENTENCES='14'
+          export BOOKAI_V10_ISOLATE_SENTENCE_CHARS='1400'
           export BOOKAI_V10_SENTENCE_BATCH='4'
 
           export BOOKAI_RETRY_ATTEMPTS='2'
-          export BOOKAI_REQUEST_TIMEOUT='240'
+          export BOOKAI_REQUEST_TIMEOUT='180'
           export BOOKAI_ANALYZER_RETRY_ATTEMPTS='2'
           export BOOKAI_ANALYZER_REQUEST_TIMEOUT='90'
-          export BOOKAI_GATE_RETRY_ATTEMPTS='1'
-          export BOOKAI_GATE_REQUEST_TIMEOUT='120'
-          export BOOKAI_MEMORY_RETRY_ATTEMPTS='2'
-          export BOOKAI_MEMORY_REQUEST_TIMEOUT='90'
           export BOOKAI_ANALYZER_MAX_TOKENS='4096'
           export BOOKAI_GATE_MAX_TOKENS='8192'
           export BOOKAI_MEMORY_MAX_TOKENS='4096'
 
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-}"
-          echo '[full-reference] mode=balanced-fast v4.1-flash; larger batches + selective decomposition + advisory LLM QA'
-          python scripts/full_reference_translation.py 2>&1 | tee translation.log
+          echo '[full-reference] mode=rapid-parallel-v1 workers=6 batch_chars=24000 hard_limit=30m'
+
+          set +e
+          timeout --signal=TERM --kill-after=30s 30m \
+            python scripts/rapid_reference_translation.py 2>&1 | tee translation.log
+          RAPID_EXIT=${PIPESTATUS[0]}
+          set -e
+          echo "[full-reference] rapid_exit=${RAPID_EXIT}"
+
+          # Always materialize the newest cache into a readable FB2/progress
+          # report, including when the 30-minute safety limit stopped the process.
+          python - <<'PY'
+          from scripts.full_reference_translation import _write_latest_artifact
+          report = _write_latest_artifact(None)
+          print('[full-reference] checkpoint_materialized=' + str(report))
+          PY
 
       - name: Set Russian FB2 metadata when artifact exists
         if: always()
@@ -206,7 +209,7 @@ jobs:
           export BOOKAI_REFERENCE_JUDGE_MODEL='deepseek/deepseek-v4-pro-0813'
           export BOOKAI_REASONING='none'
           export BOOKAI_RETRY_ATTEMPTS='2'
-          export BOOKAI_REQUEST_TIMEOUT='240'
+          export BOOKAI_REQUEST_TIMEOUT='180'
           python scripts/reference_quality_gate_v2.py \
             --candidate Devices_and_Desires_RU_REFERENCE.fb2 \
             --output reference-quality-postflight.json 2>&1 | tee reference-postflight.log
