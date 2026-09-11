@@ -1,0 +1,95 @@
+name: mt-bakeoff
+
+on:
+  push:
+    branches: [mt-bakeoff-v1]
+    paths:
+      - 'scripts/mt_bakeoff.py'
+      - '.github/workflows/mt-bakeoff.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bakeoff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BOOKAI_OPUS_MODEL_DIR: .bookai-opus/opus-mt-en-ru-ctranslate2-int8
+      BOOKAI_BAKEOFF_SEGMENTS: '32'
+      TOKENIZERS_PARALLELISM: 'false'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore tiny OPUS-MT cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .bookai-opus
+          key: opus-mt-en-ru-ct2-int8-v1
+
+      - name: Install benchmark runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install -e '.[mt]'
+          pip install 'transformers>=4.50,<5' huggingface_hub sacremoses
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m compileall -q scripts/mt_bakeoff.py src
+
+      - name: Prepare OPUS-MT INT8
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$BOOKAI_OPUS_MODEL_DIR/model.bin" ]; then
+            rm -rf .bookai-opus/download .bookai-opus/model.zip
+            mkdir -p .bookai-opus/download "$BOOKAI_OPUS_MODEL_DIR"
+            curl -L --fail --retry 3 \
+              'https://huggingface.co/ordois/opus-mt-en-ru-ctranslate2-int8/resolve/main/opus-mt-en-ru-ctranslate2-int8.zip?download=true' \
+              -o .bookai-opus/model.zip
+            unzip -q .bookai-opus/model.zip -d .bookai-opus/download
+            MODEL_BIN="$(find .bookai-opus/download -type f -name model.bin -print -quit)"
+            test -n "$MODEL_BIN"
+            MODEL_SRC="$(dirname "$MODEL_BIN")"
+            cp -a "$MODEL_SRC"/. "$BOOKAI_OPUS_MODEL_DIR"/
+            rm -rf .bookai-opus/download .bookai-opus/model.zip
+          fi
+          test -f "$BOOKAI_OPUS_MODEL_DIR/model.bin"
+
+      - name: Run four-model bakeoff
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '[mt-bakeoff] DeepSeek/OpenRouter disabled for this benchmark'
+          timeout --signal=TERM --kill-after=30s 38m python scripts/mt_bakeoff.py 2>&1 | tee mt-bakeoff.log
+
+      - name: Print ranking
+        if: always()
+        shell: bash
+        run: |
+          if [ -f mt-bakeoff.json ]; then
+            python - <<'PY'
+          import json
+          data=json.load(open('mt-bakeoff.json', encoding='utf-8'))
+          print('ranking=', data.get('ranking'))
+          for row in data.get('results', []):
+              print(row.get('model'), 'qa=', row.get('qa_pass_rate'), 'cps=', row.get('source_chars_per_second'), 'eta_min=', row.get('estimated_full_minutes'), 'rss_mb=', row.get('peak_rss_mb'), 'fatal=', row.get('fatal_error'))
+          PY
+          fi
+
+      - name: Upload bakeoff diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mt-bakeoff-results
+          path: |
+            mt-bakeoff.json
+            mt-bakeoff-samples.json
+            mt-bakeoff.log
+          if-no-files-found: ignore
+          retention-days: 7
