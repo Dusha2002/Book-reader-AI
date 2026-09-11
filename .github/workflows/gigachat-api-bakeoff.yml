@@ -1,0 +1,69 @@
+name: gigachat-api-bakeoff
+
+on:
+  push:
+    branches: [mt-bakeoff-v1]
+    paths:
+      - 'scripts/gigachat_api_bakeoff.py'
+      - '.github/workflows/gigachat-api-bakeoff.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gigachat-api-bakeoff-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GIGACHAT_AUTH_KEY: ${{ secrets.GIGACHAT_AUTH_KEY }}
+      GIGACHAT_SCOPE: GIGACHAT_API_PERS
+      GIGACHAT_BASE_URL: https://api.giga.chat/v1
+      BOOKAI_BAKEOFF_SEGMENTS: '32'
+      BOOKAI_GIGACHAT_WORKERS: '6'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install project and official GigaChat SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install -e . gigachat
+          python -m compileall -q scripts/gigachat_api_bakeoff.py src
+
+      - name: Verify secret exists without exposing it
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${GIGACHAT_AUTH_KEY:-}" ]; then
+            echo 'GIGACHAT_AUTH_KEY is not configured' >&2
+            exit 1
+          fi
+          echo '[gigachat-api] secret_present=1'
+
+      - name: GigaChat API → same 32 Parker segments
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=20s 15m \
+            python scripts/gigachat_api_bakeoff.py 2>&1 | tee gigachat-api-bakeoff.log
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gigachat-api-bakeoff-results
+          path: |
+            gigachat-api-bakeoff.json
+            gigachat-api-bakeoff-samples.json
+            gigachat-api-bakeoff.log
+          if-no-files-found: ignore
+          retention-days: 7
