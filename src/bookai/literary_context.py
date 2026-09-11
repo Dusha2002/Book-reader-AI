@@ -303,7 +303,8 @@ def locked_glossary_violations(
         candidate = str(translations.get(segment.id) or "")
         missing: list[str] = []
         for source_term, target_term in locked.items():
-            if source_term.casefold() in source and not _target_present(target_term, candidate):
+            pattern = r"(?<![A-Za-z])" + re.escape(source_term.casefold()) + r"(?![A-Za-z])"
+            if re.search(pattern, source) and not _target_present(target_term, candidate):
                 missing.append(source_term)
         if missing:
             out[segment.id] = missing
