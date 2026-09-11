@@ -5,7 +5,8 @@ import math
 import os
 from pathlib import Path
 
-from bookai.bulk_mt import BulkMTClient, HybridStats, benchmark_bulk_mt
+from bookai.bulk_mt import HybridStats
+from bookai.gigachat_mt import GigaChatLightningBackend, benchmark_gigachat
 from bookai.hybrid_mt import choose_probe_segments, decide_route, dumps_report, routing_summary
 from bookai.literary_context import SourceContextIndex, atomic_persist, locked_glossary_violations
 from bookai.models import BookMemory, Segment
@@ -54,7 +55,7 @@ def _candidate_bad(segment: Segment, candidate: str, memory: BookMemory) -> bool
 
 def _translate_hybrid_batch(
     harness,
-    bulk: BulkMTClient,
+    bulk: GigaChatLightningBackend,
     source_segments: list[Segment],
     batch: list[Segment],
     memory: BookMemory,
@@ -72,8 +73,8 @@ def _translate_hybrid_batch(
     max_errors = max(2, math.ceil(len(bulk_targets) * 0.15)) if bulk_targets else 0
     if len(bulk_errors) > max_errors:
         raise RuntimeError(
-            f"Bulk MT unhealthy: {len(bulk_errors)}/{len(bulk_targets)} requests failed; "
-            "refusing paid full-book fallback"
+            f"GigaChat bulk translation unhealthy: {len(bulk_errors)}/{len(bulk_targets)} segments failed; "
+            "refusing silent whole-book DeepSeek fallback"
         )
 
     qa_bad_ids = {
@@ -105,7 +106,7 @@ def _translate_hybrid_batch(
     if cap and projected > cap:
         raise RuntimeError(
             f"DeepSeek segment cap would be exceeded: projected={projected} cap={cap}; "
-            "refusing paid bulk fallback"
+            "refusing silent whole-book paid fallback"
         )
 
     result = dict(accepted_bulk)
@@ -133,7 +134,7 @@ def _translate_hybrid_batch(
 
 
 def _run_cost_safe_sample(
-    bulk: BulkMTClient,
+    bulk: GigaChatLightningBackend,
     targets: list[Segment],
     memory: BookMemory,
     probe: dict,
@@ -180,13 +181,17 @@ def _run_cost_safe_sample(
 
 def _run_full(
     harness,
-    bulk: BulkMTClient,
+    bulk: GigaChatLightningBackend,
     document,
     targets: list[Segment],
     chapters,
     state: dict,
 ) -> dict:
     state_path = _cache_path(SOURCE, CACHE, "optimal")
+
+    # DeepSeek V4.1 Flash is deliberately used for book-level reasoning before
+    # GigaChat sees the bulk prose: analysis, abstract style card, chapter digests,
+    # compact synopsis, glossary/context preparation and later selective refinement.
     memory = _load_or_build_memory(harness, state, chapters)
     memory, chapter_digests, book_synopsis = _prepare_literary_context(
         harness,
@@ -214,7 +219,7 @@ def _run_full(
             "total": len(targets),
             "batches": len(batches),
             "bulk_backend": bulk.backend_name,
-            "strategy": "Azure/OPUS→deterministic-QA→DeepSeek-hard-or-failed-only",
+            "strategy": "GigaChat-3-Lightning→deterministic-QA→DeepSeek-V4.1-Flash-hard-or-failed-only",
         }
     )
 
@@ -237,6 +242,7 @@ def _run_full(
         translated.update(accepted)
         state["hybrid_stats"] = stats.as_dict()
         state["bulk_backend"] = bulk.backend_name
+        state["gigachat_usage"] = bulk.usage.as_dict()
         atomic_persist(state_path, state, translated, memory)
         completed = sum(segment.id in translated for segment in targets)
         progress(
@@ -245,6 +251,8 @@ def _run_full(
                 "completed": completed,
                 "total": len(targets),
                 "progress": round(completed / max(1, len(targets)) * 100, 2),
+                "gigachat_api_calls": bulk.usage.api_calls,
+                "gigachat_tokens": bulk.usage.total_tokens,
                 **stats.as_dict(),
             }
         )
@@ -282,10 +290,12 @@ def _run_full(
     state["final_quality"] = {
         "hard_issues": 0,
         "segments": len(targets),
-        "strategy": "hybrid-azure-opus-deepseek-v2",
+        "strategy": "gigachat-lightning-deepseek-v41-hybrid-v1",
         "primary_mt": bulk.backend_name,
-        "deepseek_role": "analysis+hard-routing+qa-escalation+bounded-literary-refinement",
+        "deepseek_role": "book-analysis+style-card+synopsis+chapter-digests+hard-routing+qa-escalation+bounded-literary-refinement",
+        "gigachat_role": "primary-literary-draft",
         "hybrid_stats": stats.as_dict(),
+        "gigachat_usage": bulk.usage.as_dict(),
     }
     atomic_persist(state_path, state, translated, memory)
     _write_latest_artifact(None)
@@ -296,6 +306,8 @@ def _run_full(
             "completed": len(targets),
             "total": len(targets),
             "bulk_backend": bulk.backend_name,
+            "gigachat_api_calls": bulk.usage.api_calls,
+            "gigachat_tokens": bulk.usage.total_tokens,
             **stats.as_dict(),
         }
     )
@@ -317,16 +329,16 @@ def main() -> None:
     ROUTING_REPORT.write_text(dumps_report(routing), "utf-8")
     progress({"phase": "routing_ready", **routing})
 
-    bulk = BulkMTClient()
+    bulk = GigaChatLightningBackend()
     if not bulk.available():
-        raise RuntimeError("No free/local bulk MT backend is available; refusing paid full-book fallback")
+        raise RuntimeError("GIGACHAT_AUTH_KEY is missing; refusing whole-book DeepSeek fallback")
 
     base_memory = _base_memory()
     probe_segments = choose_probe_segments(
         targets,
         count=max(4, int(os.getenv("BOOKAI_BULK_PROBE_SEGMENTS") or "12")),
     )
-    probe = benchmark_bulk_mt(
+    probe = benchmark_gigachat(
         bulk,
         probe_segments,
         base_memory,
@@ -343,11 +355,12 @@ def main() -> None:
     probe["qa_bad"] = len(qa_bad)
     probe["qa_bad_ids"] = qa_bad
     probe["qa_errors"] = qa_errors
+    probe["token_usage_after_qa_probe"] = bulk.usage.as_dict()
     PROBE_REPORT.write_text(dumps_report(probe), "utf-8")
     progress({"phase": "bulk_probe_done", **{k: v for k, v in probe.items() if k not in {"probe_errors", "qa_errors", "qa_bad_ids"}}})
 
     estimate = probe.get("estimated_full_seconds")
-    max_seconds = float(os.getenv("BOOKAI_BULK_MAX_ESTIMATE_SECONDS") or "1500")
+    max_seconds = float(os.getenv("BOOKAI_BULK_MAX_ESTIMATE_SECONDS") or "9000")
     successes = int(probe.get("probe_success") or 0)
     min_success = max(2, len(probe_segments) - 1)
     max_qa_bad = max(1, math.floor(len(probe_segments) * 0.25))
@@ -360,14 +373,13 @@ def main() -> None:
 
     if not full_allowed:
         print(
-            "[bookai-hybrid] bulk MT failed speed/quality gate; running zero-DeepSeek diagnostic only. "
-            f"backend={bulk.backend_name} estimate={estimate!r}s qa_bad={len(qa_bad)} limit={max_qa_bad}",
+            "[bookai-hybrid] GigaChat Lightning failed health/quality gate; running zero-DeepSeek diagnostic only. "
+            f"estimate={estimate!r}s qa_bad={len(qa_bad)} limit={max_qa_bad}",
             flush=True,
         )
         _run_cost_safe_sample(bulk, targets, base_memory, probe)
         return
 
-    # Paid model is instantiated only after the free/local bulk path has proved healthy.
     harness = build_reference_harness()
     resume = _sanitize_resume_cache(SOURCE, CACHE)
     print("[full-reference] resume=" + json.dumps(resume, ensure_ascii=False, sort_keys=True), flush=True)
@@ -384,6 +396,13 @@ def main() -> None:
     state["hybrid_probe"] = probe
     state["routing_summary"] = routing
     state["bulk_backend"] = bulk.backend_name
+    state["architecture"] = {
+        "primary_translation": "GigaChat-3-Lightning",
+        "reasoning_analysis": "deepseek/deepseek-v4.1-flash",
+        "hard_translation": "deepseek/deepseek-v4.1-flash",
+        "literary_refinement": "deepseek/deepseek-v4.1-flash",
+        "full_paid_fallback": False,
+    }
     _run_full(harness, bulk, document, targets, chapters, state)
 
 
