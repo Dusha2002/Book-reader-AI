@@ -40,6 +40,7 @@ jobs:
           set -euo pipefail
           pip install -e '.[mt]'
           pip install 'transformers>=4.50,<5' huggingface_hub sacremoses
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m compileall -q scripts/t5_mt_probe.py src
 
       - name: Convert specialized T5 to CTranslate2 INT8
