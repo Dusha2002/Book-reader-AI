@@ -12,9 +12,9 @@ v9 = v9d.v9
 
 # v9e keeps v9d's semantic/format improvements but makes discourse QA sparse.
 # Document-level dependencies are sparse: do not audit every dialogue paragraph.
-# Trigger on explicit referent risk OR very short quoted utterances where English
-# ellipsis/idiomatic pragmatics is most likely. Then confidence-gate and cap the
-# micro findings before they can consume repair/candidate budget.
+# Trigger on explicit ambiguity markers OR very short quoted utterances where
+# English ellipsis/idiomatic pragmatics is most likely. Then confidence-gate and
+# cap the micro findings before they can consume repair/candidate budget.
 
 # Do not mistake apostrophes in man's / Valens' / didn't for dialogue delimiters.
 _QUOTED_SPAN_RE = re.compile(
@@ -22,6 +22,17 @@ _QUOTED_SPAN_RE = re.compile(
 )
 _WORD_RE = re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)?")
 _BASE_PARALLEL_MICRO = v9c._parallel_micro_audit
+
+# Broad pronoun spotting was too expensive and produced many false positives.
+# These are compact lexical constructions whose interpretation genuinely depends
+# on discourse context and that have already caused observed translation errors.
+_EXPLICIT_REFERENT_RE = re.compile(
+    r"\b(?:either|neither|both)\b"
+    r"|\b(?:one|each|any|none)\s+of\s+(?:them|us|you)\b"
+    r"|\b(?:the|that|this)\s+other\b"
+    r"|\b(?:the\s+)?other\s+one\b",
+    re.I,
+)
 
 
 def _quoted_body(match: re.Match) -> str:
@@ -37,11 +48,13 @@ def _short_utterance_risk(text: str) -> bool:
     return False
 
 
+def _explicit_referent_risk(text: str) -> bool:
+    return bool(_EXPLICIT_REFERENT_RE.search(str(text or "")))
+
+
 def _risk_segment_v9e(segment) -> bool:
     text = str(segment.text or "")
-    if v9._extract_invariants(text).get("referent_risk"):
-        return True
-    return _short_utterance_risk(text)
+    return _explicit_referent_risk(text) or _short_utterance_risk(text)
 
 
 def _parallel_micro_v9e(harness, targets, translations, selected=None):
@@ -50,15 +63,27 @@ def _parallel_micro_v9e(harness, targets, translations, selected=None):
     cap = max(1, int(os.getenv("BOOKAI_V9E_MICRO_FINDINGS_MAX") or "12"))
     accepted = [row for row in rows if float(row.get("confidence") or 0.0) >= threshold]
     priority = {"critical": 0, "major": 1}
-    accepted.sort(key=lambda row: (priority.get(str(row.get("severity") or "major"), 2), -float(row.get("confidence") or 0.0)))
+    accepted.sort(
+        key=lambda row: (
+            priority.get(str(row.get("severity") or "major"), 2),
+            -float(row.get("confidence") or 0.0),
+        )
+    )
     kept = accepted[:cap]
-    print("[v9e-sparse-discourse] " + json.dumps({
-        "raw_findings": len(rows),
-        "high_confidence": len(accepted),
-        "kept": len(kept),
-        "threshold": threshold,
-        "cap": cap,
-    }, ensure_ascii=False), flush=True)
+    print(
+        "[v9e-sparse-discourse] "
+        + json.dumps(
+            {
+                "raw_findings": len(rows),
+                "high_confidence": len(accepted),
+                "kept": len(kept),
+                "threshold": threshold,
+                "cap": cap,
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
     return kept
 
 
@@ -78,7 +103,7 @@ def _annotate_v9e() -> None:
     data["architecture"] = {
         **dict(data.get("architecture") or {}),
         "version": "quality-v9e-sparse-discourse",
-        "discourse_audit": "explicit referent risk + very-short utterances only",
+        "discourse_audit": "explicit ambiguity markers + very-short utterances only",
         "micro_findings": "confidence-gated and capped before repair routing",
         "gold_reference_available_to_pipeline": False,
     }
