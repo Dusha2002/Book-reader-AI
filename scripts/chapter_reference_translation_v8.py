@@ -10,7 +10,7 @@ import chapter_reference_translation_v3 as v3
 import chapter_reference_translation_v6 as v6
 import chapter_reference_translation_v7 as v7
 import hybrid_reference_translation as hybrid
-from bookai.models import BookMemory, QualityIssueV3, Segment
+from bookai.models import BookMemory, Segment
 from bookai.quality_v3 import enhanced_candidate_issues
 
 
@@ -36,7 +36,6 @@ def _provider(harness):
 
 def _complete_json(provider, system: str, payload: dict) -> dict:
     from bookai.llm import extract_json
-
     raw = provider.complete(system, json.dumps(payload, ensure_ascii=False), temperature=0.0)
     obj = extract_json(raw)
     return obj if isinstance(obj, dict) else {}
@@ -60,7 +59,6 @@ def _edit_distance(a: str, b: str) -> int:
 
 
 def _inflected_last_forms(word: str) -> set[str]:
-    """Small conservative proper-name inflection set, not a general morphology engine."""
     value = word.strip()
     if not value:
         return set()
@@ -71,7 +69,7 @@ def _inflected_last_forms(word: str) -> set[str]:
     if low.endswith("ий"):
         stem = low[:-2]
         forms |= {stem + ending for ending in ("ия", "ию", "ием", "ии")}
-    elif low.endswith("ый") or low.endswith("ой"):
+    elif low.endswith(("ый", "ой")):
         stem = low[:-2]
         forms |= {stem + ending for ending in ("ого", "ому", "ым", "ом")}
     elif low.endswith("й"):
@@ -96,21 +94,17 @@ def _phrase_forms(target: str) -> set[str]:
     if not words:
         return set()
     prefix = " ".join(words[:-1]).casefold()
-    forms = _inflected_last_forms(words[-1])
-    return {(prefix + " " + form).strip() for form in forms}
+    return {(prefix + " " + form).strip() for form in _inflected_last_forms(words[-1])}
 
 
 def _entity_map(memory: BookMemory) -> dict[str, str]:
     out: dict[str, str] = {}
-    # Character entries are the safest canonical names.
     for source, desc in memory.characters.items():
         match = re.search(r"\bru=([^;]+)", str(desc), flags=re.I)
         if match:
             target = match.group(1).strip()
             if source and target:
                 out[str(source).strip()] = target
-    # Keep true named entities/institutions, but do not hard-lock demonyms or ordinary
-    # capitalized vocabulary such as Mezentine -> мезентиец.
     for source, target in memory.glossary.items():
         source = str(source or "").strip()
         target = str(target or "").strip()
@@ -139,17 +133,14 @@ def _fix_near_entity_typos(segment: Segment, candidate: str, memory: BookMemory)
     for source, target in _entity_map(memory).items():
         if not _source_mentions(segment.text, source) or _entity_present(value, target):
             continue
-        target_words = target.split()
-        if not target_words:
+        words = target.split()
+        if not words:
             continue
-        canonical_last = target_words[-1]
+        canonical_last = words[-1]
         allowed = _inflected_last_forms(canonical_last)
-        matches = list(_CYR_WORD_RE.finditer(value))
         best = None
-        for match in matches:
+        for match in _CYR_WORD_RE.finditer(value):
             token = match.group(0)
-            # Avoid correcting short generic words. Named-entity typos we care about
-            # (Зиани/Меланктон/etc.) are long enough to make distance=1 meaningful.
             if min(len(token), len(canonical_last)) < 5:
                 continue
             options = sorted(((_edit_distance(token, form), form) for form in allowed), key=lambda row: row[0])
@@ -199,11 +190,7 @@ def _quantity_repair(harness, targets, segment: Segment, current: str, memory, r
         "detected_quantitative_error": reason,
         "context_before": [row.text for row in targets[max(0, idx - 2):idx]],
         "context_after": [row.text for row in targets[idx + 1:idx + 3]],
-        "book_bible": {
-            "glossary": memory.glossary,
-            "characters": memory.characters,
-            "style": asdict(memory.style),
-        },
+        "book_bible": {"glossary": memory.glossary, "characters": memory.characters, "style": asdict(memory.style)},
     }
     system = """You are an EN→RU literary fidelity editor. Repair ONLY the detected quantitative/measurement error while
 preserving every other correct fact, clause, joke, relation and stylistic choice. Interpret the English quantity exactly;
@@ -227,10 +214,8 @@ def _obligation_rescue_v8(harness, targets, segment: Segment, memory) -> str:
         "context_before": [row.text for row in targets[max(0, idx - 2):idx]],
         "context_after": [row.text for row in targets[idx + 1:idx + 3]],
         "book_bible": {
-            "style": asdict(memory.style),
-            "glossary": memory.glossary,
-            "characters": memory.characters,
-            "continuity": str(memory.rolling_summary or "")[:3500],
+            "style": asdict(memory.style), "glossary": memory.glossary,
+            "characters": memory.characters, "continuity": str(memory.rolling_summary or "")[:3500],
         },
     }
     system = """The previous EN→RU literary translation catastrophically omitted content. Reconstruct the paragraph from
@@ -258,12 +243,8 @@ def _candidate_vector(segment: Segment, candidate: str, memory, targets) -> tupl
         return (1, 1, 999, 999)
     catastrophic = int(v7._catastrophic(segment, candidate))
     quantity = int(v7._quantity_risk(segment, candidate) is not None)
-    hard = sum(
-        issue.severity == "hard"
-        for issue in enhanced_candidate_issues(segment, candidate, memory, source_segments=targets)
-    )
-    english = _raw_english_count(candidate)
-    return catastrophic, quantity, int(hard), english
+    hard = sum(issue.severity == "hard" for issue in enhanced_candidate_issues(segment, candidate, memory, source_segments=targets))
+    return catastrophic, quantity, int(hard), _raw_english_count(candidate)
 
 
 def _judge_candidates(harness, segment: Segment, candidates: dict[str, str], memory) -> str:
@@ -273,11 +254,7 @@ def _judge_candidates(harness, segment: Segment, candidates: dict[str, str], mem
     labels = list(valid)
     payload = {
         "source": segment.text,
-        "book_bible": {
-            "glossary": memory.glossary,
-            "characters": memory.characters,
-            "style": asdict(memory.style),
-        },
+        "book_bible": {"glossary": memory.glossary, "characters": memory.characters, "style": asdict(memory.style)},
         "candidates": {chr(65 + i): valid[name] for i, name in enumerate(labels)},
     }
     system = """Choose the best EN→RU literary translation candidate; do not rewrite. Fidelity dominates style. Reject
@@ -294,25 +271,19 @@ and broken Russian. Then prefer natural prose preserving voice and irony. Return
     return labels[0]
 
 
-def _select_candidate(harness, segment, candidates, memory, targets) -> tuple[str, str, dict[str, tuple[int, int, int, int]]]:
+def _select_candidate(harness, segment, candidates, memory, targets):
     valid = {name: text for name, text in candidates.items() if str(text).strip()}
     vectors = {name: _candidate_vector(segment, text, memory, targets) for name, text in valid.items()}
     if not valid:
         return "", "", vectors
-
-    # First remove catastrophically/quantitatively broken candidates when a clean
-    # alternative exists. This is the crucial v7 fix: an entity false-positive can
-    # no longer preserve a 25%-complete paragraph or known wrong measurement.
     best_fatal = min((vec[0], vec[1]) for vec in vectors.values())
     pool = {name: valid[name] for name, vec in vectors.items() if (vec[0], vec[1]) == best_fatal}
     if len(pool) == 1:
         name = next(iter(pool))
         return name, pool[name], vectors
-
     judged = _judge_candidates(harness, segment, pool, memory)
     if judged in pool:
         return judged, pool[judged], vectors
-    # Deterministic fallback: fewer hard defects, then less English residue.
     name = min(pool, key=lambda key: (vectors[key][2], vectors[key][3]))
     return name, pool[name], vectors
 
@@ -320,19 +291,13 @@ def _select_candidate(harness, segment, candidates, memory, targets) -> tuple[st
 def _normalize_dialogue_v8(segment: Segment, text: str) -> tuple[str, int]:
     value = v6._normalize_typography(segment, text)
     before = value
-    # Normalize smart English outer quotes to straight markers first. This pass is
-    # only enabled when the English source itself contains dialogue quotation.
     source_dialogue = bool(re.search(r"(^|[.!?]\s+)[\"'‘“]", segment.text))
     if source_dialogue and re.search(r"[А-Яа-яЁё]", value):
         value = value.replace("‘", "'").replace("’", "'").replace("“", '"').replace("”", '"')
         value = re.sub(r"^\s*['\"]\s*", "— ", value)
-        # Closing quote immediately before an attribution dash.
         value = re.sub(r"([,!?…\.])['\"]\s*(—|-)", r"\1 \2", value)
-        # New quoted utterance after a completed sentence.
         value = re.sub(r"([.!?…])\s*['\"]\s*(?=[А-ЯЁ])", r"\1 — ", value)
-        # Trailing outer dialogue quote.
         value = re.sub(r"['\"]\s*$", "", value)
-        # Remaining balanced short quotes are inner quotations, render them Russian.
         value = re.sub(r"['\"]([^'\"\n]{1,160})['\"]", r"«\1»", value)
         value = re.sub(r"\s{2,}", " ", value).strip()
     return value, int(value != before)
@@ -340,11 +305,8 @@ def _normalize_dialogue_v8(segment: Segment, text: str) -> tuple[str, int]:
 
 def _v8_semantic_qe_repair(harness, targets, translated, memory) -> dict:
     global _V8_STATS
-
-    # Run the proven unified QE/edit layer, but with v8's inflection-aware entity gate.
     base_stats = v6._semantic_qe_repair(harness, targets, translated, memory)
     by_id = {segment.id: segment for segment in targets}
-
     quantity: dict[str, str] = {}
     catastrophic: list[str] = []
     for segment in targets:
@@ -359,14 +321,9 @@ def _v8_semantic_qe_repair(harness, targets, translated, memory) -> dict:
     for sid in catastrophic + list(quantity) + sorted(v6._V6_REMAINING_HARD):
         if sid in by_id and sid not in candidate_ids:
             candidate_ids.append(sid)
-    cap = max(4, int(os.getenv("BOOKAI_V8_COUNCIL_MAX") or "12"))
-    candidate_ids = candidate_ids[:cap]
+    candidate_ids = candidate_ids[: max(4, int(os.getenv("BOOKAI_V8_COUNCIL_MAX") or "12"))]
 
-    council_attempted = 0
-    council_changed = 0
-    quantity_repairs = 0
-    rescue_attempted = 0
-    rescue_accepted = 0
+    council_attempted = council_changed = quantity_repairs = rescue_attempted = rescue_accepted = 0
     for sid in candidate_ids:
         segment = by_id[sid]
         original = str(translated.get(sid) or "")
@@ -382,14 +339,8 @@ def _v8_semantic_qe_repair(harness, targets, translated, memory) -> dict:
             if rescued:
                 candidates["rescue"] = rescued
                 rescue_attempted += 1
-
-        # Keep A/B/C selection bounded. Prefer the purpose-built candidate over a
-        # redundant fresh candidate when four variants exist.
         if len(candidates) > 3:
-            if sid in catastrophic:
-                candidates.pop("fresh", None)
-            else:
-                candidates.pop("fresh", None)
+            candidates.pop("fresh", None)
         chosen_name, chosen, vectors = _select_candidate(harness, segment, candidates, memory, targets)
         council_attempted += 1
         if chosen and chosen.strip() != original.strip():
@@ -397,16 +348,9 @@ def _v8_semantic_qe_repair(harness, targets, translated, memory) -> dict:
             council_changed += 1
             if sid in catastrophic and chosen_name == "rescue":
                 rescue_accepted += 1
-            print(
-                "[v8-council] "
-                + json.dumps({"id": sid, "choice": chosen_name, "vectors": vectors}, ensure_ascii=False),
-                flush=True,
-            )
+            print("[v8-council] " + json.dumps({"id": sid, "choice": chosen_name, "vectors": vectors}, ensure_ascii=False), flush=True)
 
-    # Deterministic entity typo cleanup and Russian dialogue typography happen after
-    # all LLM edits so later model calls cannot reintroduce the same surface defects.
-    entity_fixes = 0
-    dialogue_normalized = 0
+    entity_fixes = dialogue_normalized = 0
     for segment in targets:
         current = str(translated.get(segment.id) or "")
         fixed, count = _fix_near_entity_typos(segment, current, memory)
@@ -448,9 +392,8 @@ _ORIGINAL_V6_HARD = v6._source_only_hard
 def _configure_v8() -> None:
     v7._configure_v7()
     slug = v3.CHAPTER_SLUG
-    shared_cache = os.getenv("BOOKAI_V8_SHARED_CACHE") or ".bookai-cache-first3-v8-shared"
     v3.OUTPUT = Path(f"Devices_and_Desires_RU_{slug}_EVAL_V8.fb2")
-    v3.CACHE = Path(shared_cache)
+    v3.CACHE = Path(os.getenv("BOOKAI_V8_SHARED_CACHE") or ".bookai-cache-first3-v8-shared")
     v3.PROGRESS = Path(f"chapter-v8-{slug}-progress.json")
     v3.PROBE = Path(f"chapter-v8-{slug}-probe.json")
     v3.ROUTING = Path(f"chapter-v8-{slug}-routing.json")
@@ -460,8 +403,6 @@ def _configure_v8() -> None:
     v3.MAP_JSON = Path(f"chapter-v8-{slug}-translation-map.json")
     v3.GigaChatLightningV3Backend = GigaChatLightningV8Backend
     v3._semantic_short_repair = _v8_semantic_qe_repair
-    # v6 semantic repair/finalization call this global; replace the over-literal
-    # glossary hard gate with v8's inflection-aware entity checker for this process.
     v6._source_only_hard = _v8_source_only_hard
 
 
