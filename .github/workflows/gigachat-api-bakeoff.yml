@@ -24,7 +24,7 @@ jobs:
       GIGACHAT_SCOPE: GIGACHAT_API_PERS
       GIGACHAT_BASE_URL: https://api.giga.chat/v1
       BOOKAI_BAKEOFF_SEGMENTS: '32'
-      BOOKAI_GIGACHAT_WORKERS: '6'
+      BOOKAI_GIGACHAT_WORKERS: '2'
     steps:
       - uses: actions/checkout@v4
 
