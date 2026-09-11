@@ -5,20 +5,9 @@ import math
 import os
 from pathlib import Path
 
-from bookai.hybrid_mt import (
-    HYMTClient,
-    HybridStats,
-    benchmark_hymt,
-    choose_probe_segments,
-    decide_route,
-    dumps_report,
-    routing_summary,
-)
-from bookai.literary_context import (
-    SourceContextIndex,
-    atomic_persist,
-    locked_glossary_violations,
-)
+from bookai.bulk_mt import BulkMTClient, HybridStats, benchmark_bulk_mt
+from bookai.hybrid_mt import choose_probe_segments, decide_route, dumps_report, routing_summary
+from bookai.literary_context import SourceContextIndex, atomic_persist, locked_glossary_violations
 from bookai.models import BookMemory, Segment
 from bookai.parsers.base import load_book, save_book
 from bookai.pipeline import PIPELINE_VERSION, _batches, _cache_path, _chapter_groups, _context_for, _should_translate
@@ -52,20 +41,8 @@ def _base_memory() -> BookMemory:
     return apply_reference_profile(BookMemory(glossary=dict(REFERENCE_GLOSSARY_SEED)))
 
 
-def _representative_sample(targets: list[Segment], hymt_count: int = 24, deep_count: int = 6) -> list[Segment]:
-    hymt = [segment for segment in targets if decide_route(segment).route == "hymt"]
-    deep = [segment for segment in targets if decide_route(segment).route == "deepseek"]
-
-    def spread(rows: list[Segment], count: int) -> list[Segment]:
-        if len(rows) <= count:
-            return rows
-        step = (len(rows) - 1) / max(1, count - 1)
-        return [rows[round(i * step)] for i in range(count)]
-
-    selected = spread(hymt, hymt_count) + spread(deep, deep_count)
-    positions = {segment.id: index for index, segment in enumerate(targets)}
-    selected.sort(key=lambda segment: positions.get(segment.id, 0))
-    return selected
+def _is_bulk(segment: Segment) -> bool:
+    return decide_route(segment).route != "deepseek"
 
 
 def _candidate_bad(segment: Segment, candidate: str, memory: BookMemory) -> bool:
@@ -77,54 +54,61 @@ def _candidate_bad(segment: Segment, candidate: str, memory: BookMemory) -> bool
 
 def _translate_hybrid_batch(
     harness,
-    hymt: HYMTClient,
+    bulk: BulkMTClient,
     source_segments: list[Segment],
     batch: list[Segment],
     memory: BookMemory,
     stats: HybridStats,
 ) -> dict[str, str]:
     decisions = {segment.id: decide_route(segment) for segment in batch}
-    hymt_targets = [segment for segment in batch if decisions[segment.id].route == "hymt"]
+    bulk_targets = [segment for segment in batch if decisions[segment.id].route != "deepseek"]
     direct_deep = [segment for segment in batch if decisions[segment.id].route == "deepseek"]
 
-    hymt_map, hymt_errors = hymt.translate_many(
-        hymt_targets,
+    bulk_map, bulk_errors = bulk.translate_many(
+        bulk_targets,
         memory,
         source_segments=source_segments,
     )
-    max_errors = max(2, math.ceil(len(hymt_targets) * 0.15)) if hymt_targets else 0
-    if len(hymt_errors) > max_errors:
-        # Cost-safe failure mode: a broken local MT backend must never silently
-        # turn the whole book back into a paid DeepSeek translation.
+    max_errors = max(2, math.ceil(len(bulk_targets) * 0.15)) if bulk_targets else 0
+    if len(bulk_errors) > max_errors:
         raise RuntimeError(
-            f"HY-MT unhealthy: {len(hymt_errors)}/{len(hymt_targets)} local requests failed"
+            f"Bulk MT unhealthy: {len(bulk_errors)}/{len(bulk_targets)} requests failed; "
+            "refusing paid full-book fallback"
         )
 
     qa_bad_ids = {
         segment.id
-        for segment in hymt_targets
-        if segment.id in hymt_map and _candidate_bad(segment, hymt_map[segment.id], memory)
+        for segment in bulk_targets
+        if segment.id in bulk_map and _candidate_bad(segment, bulk_map[segment.id], memory)
     }
-    error_ids = set(hymt_errors)
+    error_ids = set(bulk_errors)
     escalated_ids = qa_bad_ids | error_ids
-    accepted_hymt = {
-        segment.id: hymt_map[segment.id]
-        for segment in hymt_targets
-        if segment.id in hymt_map and segment.id not in escalated_ids
+    accepted_bulk = {
+        segment.id: bulk_map[segment.id]
+        for segment in bulk_targets
+        if segment.id in bulk_map and segment.id not in escalated_ids
     }
 
     stats.add(
-        hymt_accepted=len(accepted_hymt),
-        hymt_qa_escalated=len(qa_bad_ids),
-        hymt_errors=len(error_ids),
-        source_chars_hymt=sum(len(segment.text) for segment in hymt_targets),
+        bulk_accepted=len(accepted_bulk),
+        bulk_qa_escalated=len(qa_bad_ids),
+        bulk_errors=len(error_ids),
+        source_chars_bulk=sum(len(segment.text) for segment in bulk_targets),
         deep_direct=len(direct_deep),
     )
 
     deep_targets = direct_deep + [
-        segment for segment in hymt_targets if segment.id in escalated_ids
+        segment for segment in bulk_targets if segment.id in escalated_ids
     ]
-    result = dict(accepted_hymt)
+    cap = max(0, int(os.getenv("BOOKAI_DEEPSEEK_SEGMENT_CAP") or "300"))
+    projected = stats.deep_direct + stats.deep_escalated + max(0, len(deep_targets) - len(direct_deep))
+    if cap and projected > cap:
+        raise RuntimeError(
+            f"DeepSeek segment cap would be exceeded: projected={projected} cap={cap}; "
+            "refusing paid bulk fallback"
+        )
+
+    result = dict(accepted_bulk)
     if deep_targets:
         before, after = _context_for(source_segments, batch, radius=3)
         deep_map = harness.translate(
@@ -148,45 +132,55 @@ def _translate_hybrid_batch(
     return result
 
 
-def _run_sample(
-    harness,
-    hymt: HYMTClient,
+def _run_cost_safe_sample(
+    bulk: BulkMTClient,
     targets: list[Segment],
     memory: BookMemory,
     probe: dict,
 ) -> dict:
-    sample = _representative_sample(targets)
-    stats = HybridStats()
-    translated: dict[str, str] = {}
-    for batch in _batches(sample, 9000):
-        translated.update(_translate_hybrid_batch(harness, hymt, targets, batch, memory, stats))
-    rows = []
-    for segment in sample:
-        decision = decide_route(segment)
-        rows.append({
-            "id": segment.id,
-            "chapter": segment.chapter,
-            "route": decision.route,
-            "score": decision.score,
-            "reasons": decision.reasons,
-            "source_chars": len(segment.text),
-            "translated": segment.id in translated,
-        })
+    """Diagnostic fallback with zero DeepSeek calls."""
+    candidates = [segment for segment in targets if _is_bulk(segment)]
+    count = min(30, len(candidates))
+    if count <= 0:
+        report = {"mode": "bulk-only-diagnostic", "backend": bulk.backend_name, "segments": 0}
+        SAMPLE_REPORT.write_text(dumps_report(report), "utf-8")
+        return report
+    step = (len(candidates) - 1) / max(1, count - 1)
+    sample = [candidates[round(i * step)] for i in range(count)]
+    translated, errors = bulk.translate_many(sample, memory, source_segments=targets)
+    bad = [
+        segment.id
+        for segment in sample
+        if segment.id in translated and _candidate_bad(segment, translated[segment.id], memory)
+    ]
     report = {
-        "mode": "cost-safe-sample",
+        "mode": "bulk-only-diagnostic",
+        "backend": bulk.backend_name,
         "probe": probe,
-        "stats": stats.as_dict(),
-        "sample_segments": len(sample),
-        "rows": rows,
+        "segments": len(sample),
+        "translated": len(translated),
+        "errors": errors,
+        "qa_bad_count": len(bad),
+        "qa_bad_ids": bad,
+        "deepseek_calls": 0,
     }
     SAMPLE_REPORT.write_text(dumps_report(report), "utf-8")
-    progress({"phase": "hybrid_sample_done", "segments": len(sample), **stats.as_dict()})
+    progress(
+        {
+            "phase": "bulk_diagnostic_done",
+            "segments": len(sample),
+            "translated": len(translated),
+            "qa_bad": len(bad),
+            "deepseek_calls": 0,
+            "backend": bulk.backend_name,
+        }
+    )
     return report
 
 
 def _run_full(
     harness,
-    hymt: HYMTClient,
+    bulk: BulkMTClient,
     document,
     targets: list[Segment],
     chapters,
@@ -213,13 +207,16 @@ def _run_full(
         for batch in _batches(targets, batch_chars)
     ]
     batches = [batch for batch in batches if batch]
-    progress({
-        "phase": "hybrid_translate",
-        "completed": sum(segment.id in translated for segment in targets),
-        "total": len(targets),
-        "batches": len(batches),
-        "strategy": "HY-MT-local→deterministic-QA→DeepSeek-hard-or-failed-only",
-    })
+    progress(
+        {
+            "phase": "hybrid_translate",
+            "completed": sum(segment.id in translated for segment in targets),
+            "total": len(targets),
+            "batches": len(batches),
+            "bulk_backend": bulk.backend_name,
+            "strategy": "Azure/OPUS→deterministic-QA→DeepSeek-hard-or-failed-only",
+        }
+    )
 
     for batch in batches:
         batch_memory = _batch_memory(
@@ -231,7 +228,7 @@ def _run_full(
         )
         accepted = _translate_hybrid_batch(
             harness,
-            hymt,
+            bulk,
             targets,
             batch,
             batch_memory,
@@ -239,15 +236,18 @@ def _run_full(
         )
         translated.update(accepted)
         state["hybrid_stats"] = stats.as_dict()
+        state["bulk_backend"] = bulk.backend_name
         atomic_persist(state_path, state, translated, memory)
         completed = sum(segment.id in translated for segment in targets)
-        progress({
-            "phase": "hybrid_batch_done",
-            "completed": completed,
-            "total": len(targets),
-            "progress": round(completed / max(1, len(targets)) * 100, 2),
-            **stats.as_dict(),
-        })
+        progress(
+            {
+                "phase": "hybrid_batch_done",
+                "completed": completed,
+                "total": len(targets),
+                "progress": round(completed / max(1, len(targets)) * 100, 2),
+                **stats.as_dict(),
+            }
+        )
 
     missing = [segment.id for segment in targets if segment.id not in translated]
     if missing:
@@ -282,14 +282,23 @@ def _run_full(
     state["final_quality"] = {
         "hard_issues": 0,
         "segments": len(targets),
-        "strategy": "hybrid-hymt2bit-deepseek-v1",
-        "primary_mt": os.getenv("BOOKAI_HYMT_REPO") or "tencent/Hy-MT1.5-1.8B-2bit-GGUF",
-        "deepseek_role": "analysis+hard-routing+qa-escalation+selective-literary-refinement",
+        "strategy": "hybrid-azure-opus-deepseek-v2",
+        "primary_mt": bulk.backend_name,
+        "deepseek_role": "analysis+hard-routing+qa-escalation+bounded-literary-refinement",
         "hybrid_stats": stats.as_dict(),
     }
     atomic_persist(state_path, state, translated, memory)
     _write_latest_artifact(None)
-    progress({"phase": "done", "progress": 100, "completed": len(targets), "total": len(targets), **stats.as_dict()})
+    progress(
+        {
+            "phase": "done",
+            "progress": 100,
+            "completed": len(targets),
+            "total": len(targets),
+            "bulk_backend": bulk.backend_name,
+            **stats.as_dict(),
+        }
+    )
     return {"mode": "full", "stats": stats.as_dict(), "output": str(OUTPUT)}
 
 
@@ -301,48 +310,65 @@ def main() -> None:
     targets = [segment for segment in document.segments if _should_translate(segment.text)]
     chapters = _chapter_groups(targets)
     total_chars = sum(len(segment.text) for segment in targets)
+
     routing = routing_summary(targets)
+    if "hymt" in routing:
+        routing["bulk"] = routing.pop("hymt")
     ROUTING_REPORT.write_text(dumps_report(routing), "utf-8")
     progress({"phase": "routing_ready", **routing})
 
-    hymt = HYMTClient()
-    if not hymt.healthy():
-        raise RuntimeError("HY-MT local server is unavailable; refusing paid full-book fallback")
+    bulk = BulkMTClient()
+    if not bulk.available():
+        raise RuntimeError("No free/local bulk MT backend is available; refusing paid full-book fallback")
 
     base_memory = _base_memory()
     probe_segments = choose_probe_segments(
         targets,
-        count=max(4, int(os.getenv("BOOKAI_HYMT_PROBE_SEGMENTS") or "10")),
+        count=max(4, int(os.getenv("BOOKAI_BULK_PROBE_SEGMENTS") or "12")),
     )
-    probe = benchmark_hymt(
-        hymt,
+    probe = benchmark_bulk_mt(
+        bulk,
         probe_segments,
         base_memory,
         source_segments=targets,
         total_source_chars=total_chars,
     )
+
+    qa_translated, qa_errors = bulk.translate_many(probe_segments, base_memory, source_segments=targets)
+    qa_bad = [
+        segment.id
+        for segment in probe_segments
+        if segment.id in qa_translated and _candidate_bad(segment, qa_translated[segment.id], base_memory)
+    ]
+    probe["qa_bad"] = len(qa_bad)
+    probe["qa_bad_ids"] = qa_bad
+    probe["qa_errors"] = qa_errors
     PROBE_REPORT.write_text(dumps_report(probe), "utf-8")
-    progress({"phase": "hymt_probe_done", **{k: v for k, v in probe.items() if k != "probe_errors"}})
+    progress({"phase": "bulk_probe_done", **{k: v for k, v in probe.items() if k not in {"probe_errors", "qa_errors", "qa_bad_ids"}}})
 
     estimate = probe.get("estimated_full_seconds")
-    max_seconds = float(os.getenv("BOOKAI_HYMT_MAX_ESTIMATE_SECONDS") or "1500")
-    force_full = os.getenv("BOOKAI_HYMT_FORCE_FULL", "false").lower() in {"1", "true", "yes"}
-    full_allowed = force_full or (
+    max_seconds = float(os.getenv("BOOKAI_BULK_MAX_ESTIMATE_SECONDS") or "1500")
+    successes = int(probe.get("probe_success") or 0)
+    min_success = max(2, len(probe_segments) - 1)
+    max_qa_bad = max(1, math.floor(len(probe_segments) * 0.25))
+    full_allowed = (
         isinstance(estimate, (int, float))
-        and probe.get("probe_success", 0) >= max(2, len(probe_segments) - 1)
         and float(estimate) <= max_seconds
+        and successes >= min_success
+        and len(qa_bad) <= max_qa_bad
     )
 
-    harness = build_reference_harness()
     if not full_allowed:
         print(
-            "[bookai-hybrid] CPU/GPU probe predicts a slow full run; executing cost-safe sample only. "
-            f"estimate={estimate!r}s limit={max_seconds}s",
+            "[bookai-hybrid] bulk MT failed speed/quality gate; running zero-DeepSeek diagnostic only. "
+            f"backend={bulk.backend_name} estimate={estimate!r}s qa_bad={len(qa_bad)} limit={max_qa_bad}",
             flush=True,
         )
-        _run_sample(harness, hymt, targets, base_memory, probe)
+        _run_cost_safe_sample(bulk, targets, base_memory, probe)
         return
 
+    # Paid model is instantiated only after the free/local bulk path has proved healthy.
+    harness = build_reference_harness()
     resume = _sanitize_resume_cache(SOURCE, CACHE)
     print("[full-reference] resume=" + json.dumps(resume, ensure_ascii=False, sort_keys=True), flush=True)
     state = _cached_state(SOURCE, CACHE)
@@ -357,7 +383,8 @@ def main() -> None:
         }
     state["hybrid_probe"] = probe
     state["routing_summary"] = routing
-    _run_full(harness, hymt, document, targets, chapters, state)
+    state["bulk_backend"] = bulk.backend_name
+    _run_full(harness, bulk, document, targets, chapters, state)
 
 
 if __name__ == "__main__":
