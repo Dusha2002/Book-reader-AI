@@ -15,10 +15,12 @@ permissions:
 jobs:
   translate:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 45
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       BOOKAI_BASE_URL: https://openrouter.ai/api/v1
+      BOOKAI_HYMT_REPO: tencent/Hy-MT1.5-1.8B-2bit-GGUF
+      BOOKAI_HYMT_BASE_URL: http://127.0.0.1:8080/v1
     steps:
       - uses: actions/checkout@v4
 
@@ -26,7 +28,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore resumable reference cache
+      - name: Restore resumable book cache
         uses: actions/cache/restore@v4
         with:
           path: .bookai-cache-reference-v10
@@ -34,96 +36,93 @@ jobs:
           restore-keys: |
             bookai-reference-v10-
 
-      - name: Install project
-        run: pip install -e .
+      - name: Restore HY-MT model cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/llama.cpp
+          key: hymt15-18b-2bit-gguf-v1
 
-      - name: Validate harness imports
+      - name: Install project and run tests
         shell: bash
         run: |
-          python -m compileall -q src scripts/reference_quality_gate_v2.py scripts/full_reference_translation.py scripts/rapid_reference_translation.py
-          python - <<'PY'
-          from bookai.reference_harness import FLASH_MODEL, PRO_MODEL
-          assert FLASH_MODEL == 'deepseek/deepseek-v4.1-flash'
-          assert PRO_MODEL == 'deepseek/deepseek-v4-pro-0813'
-          print('[bookai] import_sanity=ok model=' + FLASH_MODEL)
-          PY
-          mkdir -p .bookai-cache-reference-v10
+          set -euo pipefail
+          pip install -e '.[dev]'
+          python -m compileall -q src scripts/hybrid_reference_translation.py scripts/rapid_reference_translation.py
+          pytest -q
 
-      - name: OpenRouter V4.1 Flash smoke test
+      - name: Install llama.cpp runtime
         shell: bash
         run: |
+          set -euo pipefail
+          curl -LsSf https://llama.app/install.sh | sh
+          export PATH="$HOME/.local/bin:$HOME/.llama/bin:$PATH"
+          LLAMA_BIN="$(command -v llama || true)"
+          if [ -z "$LLAMA_BIN" ]; then
+            LLAMA_BIN="$(find "$HOME" -type f -name llama -perm -111 2>/dev/null | head -n 1 || true)"
+          fi
+          if [ -z "$LLAMA_BIN" ]; then
+            echo 'llama.cpp installer did not expose the llama executable' >&2
+            exit 1
+          fi
+          echo "LLAMA_BIN=$LLAMA_BIN" >> "$GITHUB_ENV"
+          echo "[hy-mt] llama_bin=$LLAMA_BIN"
+
+      - name: Start local HY-MT 2-bit server
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "[hy-mt] starting ${BOOKAI_HYMT_REPO}"
+          nohup "$LLAMA_BIN" serve -hf "$BOOKAI_HYMT_REPO" > hymt-server.log 2>&1 &
+          echo $! > hymt-server.pid
+          for i in $(seq 1 180); do
+            if curl -fsS http://127.0.0.1:8080/v1/models > hymt-models.json 2>/dev/null; then
+              echo '[hy-mt] local server ready'
+              cat hymt-models.json
+              exit 0
+            fi
+            if ! kill -0 "$(cat hymt-server.pid)" 2>/dev/null; then
+              echo '[hy-mt] server exited during startup' >&2
+              tail -n 120 hymt-server.log || true
+              exit 1
+            fi
+            sleep 2
+          done
+          echo '[hy-mt] server startup timed out' >&2
+          tail -n 120 hymt-server.log || true
+          exit 1
+
+      - name: Hybrid HY-MT → DeepSeek literary translation
+        shell: bash
+        env:
+          BOOKAI_TRANSLATOR_MODEL: deepseek/deepseek-v4.1-flash
+          BOOKAI_ANALYZER_MODEL: deepseek/deepseek-v4.1-flash
+          BOOKAI_GATE_MODEL: deepseek/deepseek-v4.1-flash
+          BOOKAI_MEMORY_MODEL: deepseek/deepseek-v4.1-flash
+          BOOKAI_EDITOR_MODEL: deepseek/deepseek-v4.1-flash
+          BOOKAI_HARD_MODEL: deepseek/deepseek-v4.1-flash
+          BOOKAI_LLM_GATE: 'false'
+          BOOKAI_REASONING: none
+          BOOKAI_HYMT_WORKERS: '2'
+          BOOKAI_HYMT_PROBE_SEGMENTS: '8'
+          BOOKAI_HYMT_MAX_ESTIMATE_SECONDS: '1500'
+          BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
+          BOOKAI_HYBRID_BATCH_CHARS: '16000'
+          BOOKAI_RAPID_REFINE_WORKERS: '4'
+          BOOKAI_RAPID_REFINE_BATCH_CHARS: '8000'
+          BOOKAI_RETRY_ATTEMPTS: '2'
+          BOOKAI_REQUEST_TIMEOUT: '180'
+          BOOKAI_ANALYZER_REQUEST_TIMEOUT: '90'
+        run: |
+          set -euo pipefail
           test -n "${OPENROUTER_API_KEY:-}"
-          export BOOKAI_REASONING='none'
-          export BOOKAI_RETRY_ATTEMPTS='2'
-          export BOOKAI_REQUEST_TIMEOUT='90'
-          python - <<'PY'
-          from bookai.llm import OpenAICompatibleProvider, extract_json
-          provider = OpenAICompatibleProvider(model='deepseek/deepseek-v4.1-flash', role='smoke')
-          obj = extract_json(provider.complete(
-              'Return only valid JSON. No prose.',
-              'Return exactly {"ok":true,"model":"v4.1-flash"}.',
-              temperature=0.0,
-          ))
-          if not isinstance(obj, dict) or obj.get('ok') is not True:
-              raise SystemExit(f'Unexpected smoke response: {obj!r}')
-          print('[bookai] openrouter_smoke=ok model=deepseek/deepseek-v4.1-flash')
-          PY
-
-      - name: Translate complete book — rapid parallel V4.1 Flash
-        continue-on-error: true
-        shell: bash
-        run: |
-          export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4.1-flash'
-          export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4.1-flash'
-          export BOOKAI_GATE_MODEL='deepseek/deepseek-v4.1-flash'
-          export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4.1-flash'
-          export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4.1-flash'
-          export BOOKAI_HARD_MODEL='deepseek/deepseek-v4.1-flash'
-          export BOOKAI_LLM_GATE='false'
-          export BOOKAI_REASONING='none'
-
-          # Target: complete the whole book in roughly <=30 minutes.
-          # Six independent batches run concurrently; successful batches are
-          # checkpointed immediately. A bad JSON response only retries/splits
-          # its own batch instead of replaying a whole chapter.
-          export BOOKAI_RAPID_WORKERS='6'
-          export BOOKAI_RAPID_BATCH_CHARS='24000'
-          export BOOKAI_ANALYSIS_CHARS='70000'
-
-          # Sentence decomposition is reserved for genuinely hard prose only.
-          export BOOKAI_V10_DECOMPOSE_CHARS='2200'
-          export BOOKAI_V10_DECOMPOSE_SENTENCES='14'
-          export BOOKAI_V10_ISOLATE_SENTENCE_CHARS='1400'
-          export BOOKAI_V10_SENTENCE_BATCH='4'
-
-          export BOOKAI_RETRY_ATTEMPTS='2'
-          export BOOKAI_REQUEST_TIMEOUT='180'
-          export BOOKAI_ANALYZER_RETRY_ATTEMPTS='2'
-          export BOOKAI_ANALYZER_REQUEST_TIMEOUT='90'
-          export BOOKAI_ANALYZER_MAX_TOKENS='4096'
-          export BOOKAI_GATE_MAX_TOKENS='8192'
-          export BOOKAI_MEMORY_MAX_TOKENS='4096'
-
           test -f Devices_and_Desires.fb2
-          test -n "${OPENROUTER_API_KEY:-}"
-          echo '[full-reference] mode=rapid-parallel-v1 workers=6 batch_chars=24000 hard_limit=30m'
+          echo '[bookai] mode=hybrid-hymt2bit-deepseek-v1 cost_policy=fail-closed'
+          timeout --signal=TERM --kill-after=30s 32m \
+            python scripts/hybrid_reference_translation.py 2>&1 | tee hybrid-translation.log
 
-          set +e
-          timeout --signal=TERM --kill-after=30s 30m \
-            python scripts/rapid_reference_translation.py 2>&1 | tee translation.log
-          RAPID_EXIT=${PIPESTATUS[0]}
-          set -e
-          echo "[full-reference] rapid_exit=${RAPID_EXIT}"
-
-          # Always materialize the newest cache into a readable FB2/progress
-          # report, including when the 30-minute safety limit stopped the process.
-          python - <<'PY'
-          from scripts.full_reference_translation import _write_latest_artifact
-          report = _write_latest_artifact(None)
-          print('[full-reference] checkpoint_materialized=' + str(report))
-          PY
-
-      - name: Set Russian FB2 metadata when artifact exists
+      - name: Set Russian FB2 metadata when full artifact exists
         if: always()
         shell: bash
         run: |
@@ -132,7 +131,7 @@ jobs:
           from lxml import etree
           path = Path('Devices_and_Desires_RU_REFERENCE.fb2')
           if not path.exists():
-              print('[metadata] no FB2 yet; skipping')
+              print('[metadata] no full FB2 produced in this run')
               raise SystemExit(0)
           tree = etree.parse(str(path))
           titles = tree.xpath("//*[local-name()='description']/*[local-name()='title-info']/*[local-name()='book-title']")
@@ -142,59 +141,17 @@ jobs:
           if langs:
               langs[0].text = 'ru'
           tree.write(str(path), encoding='utf-8', xml_declaration=True, pretty_print=False)
-          print('[metadata] updated')
           PY
 
-      - name: Validate latest FB2 — advisory report
-        if: always()
-        shell: bash
-        run: |
-          python - <<'PY'
-          import json, re
-          from pathlib import Path
-          from bookai.parsers.base import load_book
-          from bookai.pipeline import _should_translate
-
-          src = Path('Devices_and_Desires.fb2')
-          out = Path('Devices_and_Desires_RU_REFERENCE.fb2')
-          report = {'output_exists': out.exists()}
-          try:
-              if not out.exists():
-                  raise FileNotFoundError(out)
-              source_doc = load_book(src)
-              output_doc = load_book(out)
-              targets = [s for s in source_doc.segments if _should_translate(s.text)]
-              out_by_id = {s.id: s.text for s in output_doc.segments}
-              suspicious, unchanged = [], []
-              cyr = lat = 0
-              for s in targets:
-                  text = out_by_id.get(s.id, '')
-                  l = len(re.findall(r'[A-Za-z]', text))
-                  c = len(re.findall(r'[А-Яа-яЁё]', text))
-                  lat += l; cyr += c
-                  if l >= 20 and c < max(4, l // 4): suspicious.append(s.id)
-                  if text.strip() == s.text.strip(): unchanged.append(s.id)
-              report.update({
-                  'output_bytes': out.stat().st_size,
-                  'source_segments': len(source_doc.segments),
-                  'output_segments': len(output_doc.segments),
-                  'targets': len(targets),
-                  'cyrillic_share': round(cyr / max(cyr + lat, 1), 5),
-                  'suspicious_english': len(suspicious),
-                  'unchanged_or_not_yet_translated': len(unchanged),
-                  'sample_unfinished_ids': unchanged[:30],
-              })
-          except Exception as exc:
-              report['validation_error'] = f'{type(exc).__name__}: {exc}'
-          Path('reference-validation.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), 'utf-8')
-          print('[full-reference] validation=' + json.dumps(report, ensure_ascii=False, sort_keys=True))
-          PY
-
-      - name: Reference postflight — advisory when full translation exists
+      - name: Independent V4 Pro benchmark only for a complete book
         if: always()
         continue-on-error: true
         shell: bash
         run: |
+          if [ ! -f reference-progress.json ]; then
+            echo '[postflight] no complete-book progress report; benchmark deferred'
+            exit 0
+          fi
           if ! python - <<'PY'
           import json
           from pathlib import Path
@@ -203,59 +160,45 @@ jobs:
           raise SystemExit(0 if ok else 1)
           PY
           then
-            echo '[reference-postflight] partial translation: benchmark deferred'
+            echo '[postflight] partial/sample run; benchmark deferred'
             exit 0
           fi
           export BOOKAI_REFERENCE_JUDGE_MODEL='deepseek/deepseek-v4-pro-0813'
           export BOOKAI_REASONING='none'
-          export BOOKAI_RETRY_ATTEMPTS='2'
-          export BOOKAI_REQUEST_TIMEOUT='180'
           python scripts/reference_quality_gate_v2.py \
             --candidate Devices_and_Desires_RU_REFERENCE.fb2 \
             --output reference-quality-postflight.json 2>&1 | tee reference-postflight.log
 
-      - name: Upload latest usable translated book
+      - name: Upload hybrid diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Devices_and_Desires_RU_REFERENCE_LATEST
+          name: hybrid-translation-diagnostics
           path: |
-            Devices_and_Desires_RU_REFERENCE.fb2
+            hybrid-probe.json
+            hybrid-routing.json
+            hybrid-sample.json
+            hybrid-translation.log
+            hymt-server.log
+            hymt-models.json
             reference-progress.json
-            reference-validation.json
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Upload reference reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: reference-quality-reports
-          path: |
-            reference-quality-preflight.json
             reference-quality-postflight.json
-            reference-preflight.log
-            reference-postflight.log
+            Devices_and_Desires_RU_REFERENCE.fb2
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Save resumable translation cache
+      - name: Save resumable book cache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .bookai-cache-reference-v10
           key: bookai-reference-v10-${{ github.run_id }}
 
-      - name: Upload resumable state and logs
+      - name: Save HY-MT model cache
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/cache/save@v4
         with:
-          name: full-reference-diagnostics
           path: |
-            translation.log
-            reference-progress.json
-            reference-validation.json
-            .bookai-cache-reference-v10/**
-          if-no-files-found: ignore
-          include-hidden-files: true
-          retention-days: 5
+            ~/.cache/huggingface
+            ~/.cache/llama.cpp
+          key: hymt15-18b-2bit-gguf-v1
