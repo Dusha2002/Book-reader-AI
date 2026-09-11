@@ -37,8 +37,6 @@ def _publish_segment_delta(job_id: str, delta: dict[str, str], output: Path) -> 
         revision = int(state.get("revision") or 0) + 1
         events = state.setdefault("segment_events", [])
         events.append({"revision": revision, "segments": dict(delta)})
-        # A long job can revise a segment during literary refinement. ready_segments
-        # counts unique translated ids, not event entries.
         latest = state.setdefault("translated_segments", {})
         latest.update(delta)
         state.update(
@@ -86,15 +84,10 @@ def _run(job_id: str, source: Path, output: Path, mode: str) -> None:
             if not delta:
                 return
             seen.update(delta)
-            # FB2/EPUB/TXT/DOCX serializers already replace only ids present in
-            # translations, so untranslated tail remains readable in the source language.
             save_book(progressive_document, translations, output)
             _publish_segment_delta(job_id, delta, output)
 
         def progress(event: dict) -> None:
-            # translate_book persists accepted translations before its progress
-            # callback. Reading that cache here makes every accepted batch visible
-            # to the reader immediately instead of waiting for the whole book.
             sync_progressive_output()
             _set_job(job_id, **event)
 
@@ -110,7 +103,6 @@ def _run(job_id: str, source: Path, output: Path, mode: str) -> None:
             partial_ready=True,
         )
     except Exception as exc:
-        # Keep already translated/serialized fragments readable after a later error.
         _set_job(job_id, status="error", phase="error", error=str(exc))
 
 
@@ -144,6 +136,8 @@ def upload_book(file: UploadFile = File(...), mode: str = Form("optimal")):
         progress=0,
         filename=file.filename or source.name,
         mode=mode,
+        source=str(source),
+        output=str(output),
         revision=0,
         ready_segments=0,
         partial_ready=False,
@@ -160,19 +154,33 @@ def job(job_id: str):
         state = JOBS.get(job_id)
         if state is None:
             raise HTTPException(404, "Unknown job")
-        # Do not send the growing translation/event dictionaries with every status poll.
-        public = {k: v for k, v in state.items() if k not in {"translated_segments", "segment_events"}}
+        public = {k: v for k, v in state.items() if k not in {"translated_segments", "segment_events", "source"}}
         return public
+
+
+@app.get("/jobs/{job_id}/reader")
+def reader_source(job_id: str):
+    """Return ordered source segments once; live translation deltas replace them by id."""
+    with LOCK:
+        state = dict(JOBS.get(job_id) or {})
+    if not state:
+        raise HTTPException(404, "Unknown job")
+    source = Path(str(state.get("source") or ""))
+    if not source.is_file():
+        raise HTTPException(409, "Source book is not available")
+    document = load_book(source)
+    return {
+        "job_id": job_id,
+        "segments": [
+            {"id": segment.id, "text": segment.text, "chapter": segment.chapter}
+            for segment in document.segments
+        ],
+    }
 
 
 @app.get("/jobs/{job_id}/segments")
 def translated_segments(job_id: str, after: int = Query(0, ge=0)):
-    """Return translation deltas newer than `after` for a live reader.
-
-    The client keeps the returned revision and asks again with ?after=<revision>.
-    Revisions can contain replacements of already translated ids after refinement;
-    the reader should simply replace its current text for those ids.
-    """
+    """Return translation deltas newer than `after` for a live reader."""
     with LOCK:
         state = JOBS.get(job_id)
         if state is None:
@@ -196,7 +204,6 @@ def translated_segments(job_id: str, after: int = Query(0, ge=0)):
 
 @app.get("/jobs/{job_id}/partial-download")
 def partial_download(job_id: str):
-    """Download the latest mixed-language snapshot while translation is running."""
     with LOCK:
         state = dict(JOBS.get(job_id) or {})
     if not state:
