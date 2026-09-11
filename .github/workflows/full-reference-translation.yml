@@ -15,12 +15,15 @@ permissions:
 jobs:
   translate:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 40
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       BOOKAI_BASE_URL: https://openrouter.ai/api/v1
-      BOOKAI_HYMT_REPO: tencent/HY-MT1.5-1.8B-GGUF:Q4_K_M
-      BOOKAI_HYMT_BASE_URL: http://127.0.0.1:8080/v1
+      AZURE_TRANSLATOR_KEY: ${{ secrets.AZURE_TRANSLATOR_KEY }}
+      AZURE_TRANSLATOR_REGION: ${{ secrets.AZURE_TRANSLATOR_REGION }}
+      AZURE_TRANSLATOR_ENDPOINT: https://api.cognitive.microsofttranslator.com
+      BOOKAI_OPUS_MODEL_DIR: .bookai-opus/opus-mt-en-ru-ctranslate2-int8
+
     steps:
       - uses: actions/checkout@v4
 
@@ -36,64 +39,51 @@ jobs:
           restore-keys: |
             bookai-reference-v10-
 
-      - name: Restore HY-MT model cache
+      - name: Restore tiny OPUS-MT cache
         uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.cache/huggingface
-            ~/.cache/llama.cpp
-          key: hymt15-18b-q4km-gguf-v1
+          path: .bookai-opus
+          key: opus-mt-en-ru-ct2-int8-v1
 
       - name: Install project and run tests
         shell: bash
         run: |
           set -euo pipefail
-          pip install -e '.[dev]'
+          pip install -e '.[dev,mt]'
           python -m compileall -q src scripts/hybrid_reference_translation.py scripts/rapid_reference_translation.py
           pytest -q
 
-      - name: Install llama.cpp runtime
+      - name: Prepare tiny OPUS-MT INT8 fallback
         shell: bash
         run: |
           set -euo pipefail
-          curl -LsSf https://llama.app/install.sh | sh
-          export PATH="$HOME/.local/bin:$HOME/.llama/bin:$PATH"
-          LLAMA_BIN="$(command -v llama || true)"
-          if [ -z "$LLAMA_BIN" ]; then
-            LLAMA_BIN="$(find "$HOME" -type f -name llama -perm -111 2>/dev/null | head -n 1 || true)"
-          fi
-          if [ -z "$LLAMA_BIN" ]; then
-            echo 'llama.cpp installer did not expose the llama executable' >&2
-            exit 1
-          fi
-          echo "LLAMA_BIN=$LLAMA_BIN" >> "$GITHUB_ENV"
-          echo "[hy-mt] llama_bin=$LLAMA_BIN"
-
-      - name: Start local HY-MT Q4_K_M server
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "[hy-mt] starting ${BOOKAI_HYMT_REPO}"
-          nohup "$LLAMA_BIN" serve -hf "$BOOKAI_HYMT_REPO" > hymt-server.log 2>&1 &
-          echo $! > hymt-server.pid
-          for i in $(seq 1 240); do
-            if curl -fsS http://127.0.0.1:8080/v1/models > hymt-models.json 2>/dev/null; then
-              echo '[hy-mt] local server ready'
-              cat hymt-models.json
-              exit 0
-            fi
-            if ! kill -0 "$(cat hymt-server.pid)" 2>/dev/null; then
-              echo '[hy-mt] server exited during startup' >&2
-              tail -n 120 hymt-server.log || true
+          if [ ! -f "$BOOKAI_OPUS_MODEL_DIR/model.bin" ]; then
+            rm -rf .bookai-opus/download .bookai-opus/model.zip
+            mkdir -p .bookai-opus/download "$BOOKAI_OPUS_MODEL_DIR"
+            curl -L --fail --retry 3 \
+              'https://huggingface.co/ordois/opus-mt-en-ru-ctranslate2-int8/resolve/main/opus-mt-en-ru-ctranslate2-int8.zip?download=true' \
+              -o .bookai-opus/model.zip
+            unzip -q .bookai-opus/model.zip -d .bookai-opus/download
+            MODEL_BIN="$(find .bookai-opus/download -type f -name model.bin -print -quit)"
+            if [ -z "$MODEL_BIN" ]; then
+              echo 'OPUS-MT archive does not contain model.bin' >&2
               exit 1
             fi
-            sleep 2
-          done
-          echo '[hy-mt] server startup timed out' >&2
-          tail -n 120 hymt-server.log || true
-          exit 1
+            MODEL_SRC="$(dirname "$MODEL_BIN")"
+            cp -a "$MODEL_SRC"/. "$BOOKAI_OPUS_MODEL_DIR"/
+            rm -rf .bookai-opus/download .bookai-opus/model.zip
+          fi
+          test -f "$BOOKAI_OPUS_MODEL_DIR/model.bin"
+          test -f "$BOOKAI_OPUS_MODEL_DIR/source.spm"
+          test -f "$BOOKAI_OPUS_MODEL_DIR/target.spm"
+          python - <<'PY'
+          from bookai.bulk_mt import OPUSMTBackend
+          backend = OPUSMTBackend()
+          assert backend.available(), backend.model_dir
+          print('[bulk-mt] opus_ready=' + str(backend.model_dir))
+          PY
 
-      - name: Hybrid HY-MT → DeepSeek literary translation
+      - name: Azure / OPUS → DeepSeek literary translation
         shell: bash
         env:
           BOOKAI_TRANSLATOR_MODEL: deepseek/deepseek-v4.1-flash
@@ -104,11 +94,23 @@ jobs:
           BOOKAI_HARD_MODEL: deepseek/deepseek-v4.1-flash
           BOOKAI_LLM_GATE: 'false'
           BOOKAI_REASONING: none
-          BOOKAI_HYMT_WORKERS: '2'
-          BOOKAI_HYMT_PROBE_SEGMENTS: '8'
-          BOOKAI_HYMT_MAX_ESTIMATE_SECONDS: '1500'
+
+          # Free/cheap bulk path. Azure is preferred when its optional secret is configured;
+          # otherwise the ~80 MB OPUS-MT INT8 model runs locally on CPU.
+          BOOKAI_BULK_PROBE_SEGMENTS: '12'
+          BOOKAI_BULK_MAX_ESTIMATE_SECONDS: '1500'
+          BOOKAI_BULK_HARD_THRESHOLD: '4.8'
           BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
+          BOOKAI_AZURE_WORKERS: '2'
+          BOOKAI_AZURE_REQUEST_CHARS: '45000'
+          BOOKAI_AZURE_REQUEST_ITEMS: '500'
+          BOOKAI_OPUS_BEAM_SIZE: '1'
+          BOOKAI_OPUS_MAX_BATCH: '256'
+
+          # Paid path is bounded and cannot become a silent whole-book fallback.
+          BOOKAI_DEEPSEEK_SEGMENT_CAP: '300'
           BOOKAI_HYBRID_BATCH_CHARS: '16000'
+          BOOKAI_RAPID_REFINE_MAX: '80'
           BOOKAI_RAPID_REFINE_WORKERS: '4'
           BOOKAI_RAPID_REFINE_BATCH_CHARS: '8000'
           BOOKAI_RETRY_ATTEMPTS: '2'
@@ -116,9 +118,13 @@ jobs:
           BOOKAI_ANALYZER_REQUEST_TIMEOUT: '90'
         run: |
           set -euo pipefail
-          test -n "${OPENROUTER_API_KEY:-}"
           test -f Devices_and_Desires.fb2
-          echo '[bookai] mode=hybrid-hymt-q4km-deepseek-v1 cost_policy=fail-closed'
+          if [ -n "${AZURE_TRANSLATOR_KEY:-}" ]; then
+            echo '[bulk-mt] primary=azure-translator-v3 fallback=opus-int8'
+          else
+            echo '[bulk-mt] primary=opus-int8 azure=not-configured'
+          fi
+          echo '[bookai] cost_policy=fail-closed deepseek_segment_cap=300 refine_max=80'
           timeout --signal=TERM --kill-after=30s 32m \
             python scripts/hybrid_reference_translation.py 2>&1 | tee hybrid-translation.log
 
@@ -141,6 +147,7 @@ jobs:
           if langs:
               langs[0].text = 'ru'
           tree.write(str(path), encoding='utf-8', xml_declaration=True, pretty_print=False)
+          print('[metadata] updated')
           PY
 
       - name: Independent V4 Pro benchmark only for a complete book
@@ -160,9 +167,10 @@ jobs:
           raise SystemExit(0 if ok else 1)
           PY
           then
-            echo '[postflight] partial/sample run; benchmark deferred'
+            echo '[postflight] partial/diagnostic run; benchmark deferred'
             exit 0
           fi
+          test -n "${OPENROUTER_API_KEY:-}"
           export BOOKAI_REFERENCE_JUDGE_MODEL='deepseek/deepseek-v4-pro-0813'
           export BOOKAI_REASONING='none'
           python scripts/reference_quality_gate_v2.py \
@@ -173,14 +181,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: hybrid-translation-diagnostics
+          name: azure-opus-hybrid-diagnostics
           path: |
             hybrid-probe.json
             hybrid-routing.json
             hybrid-sample.json
             hybrid-translation.log
-            hymt-server.log
-            hymt-models.json
             reference-progress.json
             reference-quality-postflight.json
             Devices_and_Desires_RU_REFERENCE.fb2
@@ -194,11 +200,9 @@ jobs:
           path: .bookai-cache-reference-v10
           key: bookai-reference-v10-${{ github.run_id }}
 
-      - name: Save HY-MT model cache
+      - name: Save tiny OPUS-MT cache
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: |
-            ~/.cache/huggingface
-            ~/.cache/llama.cpp
-          key: hymt15-18b-q4km-gguf-v1
+          path: .bookai-opus
+          key: opus-mt-en-ru-ct2-int8-v1
