@@ -23,6 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<10", "pytest-asyncio>=0.24,<2"]
 local = ["transformers>=4.50,<6", "torch>=2.5,<3", "sentencepiece>=0.2,<1", "accelerate>=1,<2"]
+mt = ["ctranslate2>=4.6,<5", "sentencepiece>=0.2,<1"]
 
 [project.scripts]
 bookai = "bookai.cli:app"
