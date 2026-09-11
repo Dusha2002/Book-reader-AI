@@ -22,6 +22,7 @@ MODEL_OVERRIDE = (os.getenv("BOOKAI_GIGACHAT_MODEL") or "").strip()
 CREDENTIALS = (os.getenv("GIGACHAT_AUTH_KEY") or "").strip()
 MAX_BATCH_SEGMENTS = max(1, int(os.getenv("BOOKAI_GIGACHAT_BATCH_SEGMENTS") or "8"))
 MAX_BATCH_CHARS = max(1000, int(os.getenv("BOOKAI_GIGACHAT_BATCH_CHARS") or "12000"))
+MAX_SPLIT_DEPTH = max(1, int(os.getenv("BOOKAI_GIGACHAT_SPLIT_DEPTH") or "4"))
 
 
 def memory() -> BookMemory:
@@ -84,9 +85,7 @@ def choose_model(names: list[str]) -> str:
         "GigaChat-3-Pro",
         "GigaChat-3-Lightning",
         "GigaChat-2-Max",
-        "GigaChat-Max",
         "GigaChat-2-Pro",
-        "GigaChat-Pro",
         "GigaChat-2",
         "GigaChat",
     ):
@@ -150,20 +149,21 @@ def parse_json_object(text: str) -> dict[str, str]:
 
 
 def translate_batch(client, batch: list[Segment], model: str) -> tuple[dict[str, str], dict]:
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "Ты литературный переводчик с английского на русский. Приоритеты: точность смысла, полнота, естественная русская проза и сохранение авторского тона. Строго соблюдай требуемый JSON-формат.",
-            },
-            {"role": "user", "content": prompt_for(batch)},
-        ],
-        "temperature": 0.1,
-        "top_p": 0.9,
-        "max_tokens": 7000,
-    }
-    response = client.chat(payload)
+    response = client.chat(
+        {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Ты литературный переводчик с английского на русский. Приоритеты: точность смысла, полнота, естественная русская проза и сохранение авторского тона. Строго соблюдай требуемый JSON-формат.",
+                },
+                {"role": "user", "content": prompt_for(batch)},
+            ],
+            "temperature": 0.1,
+            "top_p": 0.9,
+            "max_tokens": 7000,
+        }
+    )
     parsed = parse_json_object(str(response.choices[0].message.content or ""))
     expected = {s.id for s in batch}
     translated = {sid: text for sid, text in parsed.items() if sid in expected and text}
@@ -174,6 +174,43 @@ def translate_batch(client, batch: list[Segment], model: str) -> tuple[dict[str,
         "total_tokens": int(getattr(usage_obj, "total_tokens", 0) or 0),
     }
     return translated, usage
+
+
+def merge_usage(total: dict, add: dict) -> None:
+    for key in total:
+        total[key] += int(add.get(key) or 0)
+
+
+def translate_resilient(client, batch: list[Segment], model: str, depth: int = 0):
+    calls = 1
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    try:
+        rows, current_usage = translate_batch(client, batch, model)
+        merge_usage(usage, current_usage)
+    except Exception as exc:
+        if len(batch) > 1 and depth < MAX_SPLIT_DEPTH:
+            mid = max(1, len(batch) // 2)
+            left = translate_resilient(client, batch[:mid], model, depth + 1)
+            right = translate_resilient(client, batch[mid:], model, depth + 1)
+            rows = {**left[0], **right[0]}
+            errors = {**left[1], **right[1]}
+            merge_usage(usage, left[2])
+            merge_usage(usage, right[2])
+            return rows, errors, usage, calls + left[3] + right[3]
+        return {}, {s.id: f"{type(exc).__name__}: {exc}" for s in batch}, usage, calls
+
+    missing = [s for s in batch if s.id not in rows]
+    errors: dict[str, str] = {}
+    if missing and depth < MAX_SPLIT_DEPTH:
+        retry_rows, retry_errors, retry_usage, retry_calls = translate_resilient(client, missing, model, depth + 1)
+        rows.update(retry_rows)
+        errors.update(retry_errors)
+        merge_usage(usage, retry_usage)
+        calls += retry_calls
+    else:
+        for segment in missing:
+            errors[segment.id] = "missing from GigaChat batch response"
+    return rows, errors, usage, calls
 
 
 def qa(sample: list[Segment], translated: dict[str, str], mem: BookMemory) -> dict:
@@ -238,20 +275,15 @@ def main() -> None:
     translated: dict[str, str] = {}
     errors: dict[str, str] = {}
     token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    api_calls = 0
     for index, batch in enumerate(batches, start=1):
-        try:
-            rows, usage = translate_batch(client, batch, selected)
-            translated.update(rows)
-            for key in token_usage:
-                token_usage[key] += int(usage.get(key) or 0)
-            for segment in batch:
-                if segment.id not in rows:
-                    errors[segment.id] = "missing from GigaChat batch response"
-        except Exception as exc:
-            for segment in batch:
-                errors[segment.id] = f"{type(exc).__name__}: {exc}"
+        rows, current_errors, usage, calls = translate_resilient(client, batch, selected)
+        translated.update(rows)
+        errors.update(current_errors)
+        merge_usage(token_usage, usage)
+        api_calls += calls
         print(
-            f"[gigachat-api] batch={index}/{len(batches)} segments={len(batch)} translated={len(translated)}/{len(sample)}",
+            f"[gigachat-api] batch={index}/{len(batches)} segments={len(batch)} translated={len(translated)}/{len(sample)} calls={api_calls}",
             flush=True,
         )
 
@@ -270,7 +302,8 @@ def main() -> None:
         "single_stream": True,
         "batch_segments": MAX_BATCH_SEGMENTS,
         "batch_chars": MAX_BATCH_CHARS,
-        "api_calls": len(batches),
+        "initial_batches": len(batches),
+        "api_calls": api_calls,
         "sample_chars": sample_chars,
         "elapsed_seconds": round(elapsed, 3),
         "source_chars_per_second": round(cps, 2),
