@@ -13,15 +13,31 @@ permissions:
   contents: read
 
 jobs:
-  translate:
+  literary-sample:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 25
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       BOOKAI_BASE_URL: https://openrouter.ai/api/v1
       GIGACHAT_AUTH_KEY: ${{ secrets.GIGACHAT_AUTH_KEY }}
       GIGACHAT_SCOPE: GIGACHAT_API_PERS
       GIGACHAT_BASE_URL: https://api.giga.chat/v1
+      BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
+      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '1'
+      BOOKAI_GIGACHAT_BATCH_CHARS: '5000'
+      BOOKAI_GIGACHAT_SPLIT_DEPTH: '3'
+      BOOKAI_GIGACHAT_MAX_TOKENS: '3500'
+      BOOKAI_ANALYZER_MODEL: deepseek/deepseek-v4.1-flash
+      BOOKAI_TRANSLATOR_MODEL: deepseek/deepseek-v4.1-flash
+      BOOKAI_GATE_MODEL: deepseek/deepseek-v4.1-flash
+      BOOKAI_MEMORY_MODEL: deepseek/deepseek-v4.1-flash
+      BOOKAI_EDITOR_MODEL: deepseek/deepseek-v4.1-flash
+      BOOKAI_HARD_MODEL: deepseek/deepseek-v4.1-flash
+      BOOKAI_MAX_MODEL: deepseek/deepseek-v4.1-flash
+      BOOKAI_REASONING: none
+      BOOKAI_RETRY_ATTEMPTS: '2'
+      BOOKAI_REQUEST_TIMEOUT: '120'
+      BOOKAI_ANALYZER_REQUEST_TIMEOUT: '120'
 
     steps:
       - uses: actions/checkout@v4
@@ -30,20 +46,12 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore GigaChat-v11 resumable book cache
-        uses: actions/cache/restore@v4
-        with:
-          path: .bookai-cache-reference-v11-gigachat
-          key: bookai-reference-v11-gigachat-${{ github.run_id }}
-          restore-keys: |
-            bookai-reference-v11-gigachat-
-
-      - name: Install project, GigaChat SDK and run tests
+      - name: Install project and GigaChat SDK
         shell: bash
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src scripts/hybrid_reference_translation.py scripts/rapid_reference_translation.py
+          python -m compileall -q src scripts/literary_sample_eval.py
           pytest -q
 
       - name: Verify API secrets without exposing them
@@ -52,100 +60,23 @@ jobs:
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
           test -n "${OPENROUTER_API_KEY:-}" || { echo 'OPENROUTER_API_KEY is not configured' >&2; exit 1; }
-          echo '[bookai] gigachat_secret_present=1 openrouter_secret_present=1'
+          echo '[bookai] sample_only=1 cases=5 gigachat=GigaChat-3-Lightning deepseek=V4.1-Flash pro=disabled'
 
-      - name: Progressive GigaChat Lightning → DeepSeek V4.1 Flash translation
+      - name: Translate and compare five literary fragments
         shell: bash
-        env:
-          # DeepSeek V4.1 Flash is the only reasoning/editorial model.
-          BOOKAI_TRANSLATOR_MODEL: deepseek/deepseek-v4.1-flash
-          BOOKAI_ANALYZER_MODEL: deepseek/deepseek-v4.1-flash
-          BOOKAI_GATE_MODEL: deepseek/deepseek-v4.1-flash
-          BOOKAI_MEMORY_MODEL: deepseek/deepseek-v4.1-flash
-          BOOKAI_EDITOR_MODEL: deepseek/deepseek-v4.1-flash
-          BOOKAI_HARD_MODEL: deepseek/deepseek-v4.1-flash
-          BOOKAI_LLM_GATE: 'false'
-          BOOKAI_REASONING: none
-
-          # Primary first pass: every segment goes through Lightning so readable
-          # Russian appears in book order without waiting for DeepSeek reasoning.
-          BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
-          BOOKAI_GIGACHAT_BATCH_SEGMENTS: '8'
-          BOOKAI_GIGACHAT_BATCH_CHARS: '12000'
-          BOOKAI_GIGACHAT_SPLIT_DEPTH: '6'
-          BOOKAI_GIGACHAT_MAX_TOKENS: '7000'
-          BOOKAI_GIGACHAT_RECOVERY_ROUNDS: '3'
-
-          BOOKAI_BULK_PROBE_SEGMENTS: '12'
-          BOOKAI_BULK_MAX_ESTIMATE_SECONDS: '9000'
-          # Effectively disable pre-routing to DeepSeek during the first pass.
-          # Complex prose is translated by Lightning immediately, then the risk
-          # selector can replace selected drafts with DeepSeek-refined versions.
-          BOOKAI_HYMT_HARD_THRESHOLD: '999'
-
-          # DeepSeek is bounded: analysis/style/context + QA/recovery/refinement.
-          # There is no V4 Pro and no whole-book DeepSeek fallback.
-          BOOKAI_DEEPSEEK_SEGMENT_CAP: '300'
-          BOOKAI_HYBRID_BATCH_CHARS: '9000'
-          BOOKAI_RAPID_REFINE_MAX: '80'
-          BOOKAI_RAPID_REFINE_WORKERS: '4'
-          BOOKAI_RAPID_REFINE_BATCH_CHARS: '8000'
-          BOOKAI_RETRY_ATTEMPTS: '2'
-          BOOKAI_REQUEST_TIMEOUT: '180'
-          BOOKAI_ANALYZER_REQUEST_TIMEOUT: '90'
-          BOOKAI_ANALYSIS_CHARS: '70000'
-          BOOKAI_STYLE_SAMPLE_CHARS: '12000'
-          BOOKAI_CONTEXT_WORKERS: '6'
         run: |
           set -euo pipefail
-          test -f Devices_and_Desires.fb2
-          echo '[bookai] first_pass=GigaChat-3-Lightning-all-segments'
-          echo '[bookai] reasoning_analysis_refinement=DeepSeek-V4.1-Flash'
-          echo '[bookai] external_pro_judge=disabled'
-          echo '[bookai] mode=progressive partial_fb2_after_each_batch=1'
-          timeout --signal=TERM --kill-after=30s 165m \
-            python scripts/hybrid_reference_translation.py 2>&1 | tee hybrid-translation.log
+          timeout --signal=TERM --kill-after=20s 18m \
+            python scripts/literary_sample_eval.py 2>&1 | tee literary-sample-eval.log
 
-      - name: Set Russian FB2 metadata when any partial/full artifact exists
-        if: always()
-        shell: bash
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          from lxml import etree
-          path = Path('Devices_and_Desires_RU_REFERENCE.fb2')
-          if not path.exists():
-              print('[metadata] no FB2 snapshot produced in this run')
-              raise SystemExit(0)
-          tree = etree.parse(str(path))
-          titles = tree.xpath("//*[local-name()='description']/*[local-name()='title-info']/*[local-name()='book-title']")
-          if titles:
-              titles[0].text = 'Замыслы и желания'
-          langs = tree.xpath("//*[local-name()='description']/*[local-name()='title-info']/*[local-name()='lang']")
-          if langs:
-              langs[0].text = 'ru'
-          tree.write(str(path), encoding='utf-8', xml_declaration=True, pretty_print=False)
-          print('[metadata] updated partial/full snapshot')
-          PY
-
-      - name: Upload progressive translation snapshot and diagnostics
+      - name: Upload literary comparison
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gigachat-lightning-progressive-translation
+          name: literary-sample-evaluation
           path: |
-            hybrid-probe.json
-            hybrid-routing.json
-            hybrid-sample.json
-            hybrid-translation.log
-            reference-progress.json
-            Devices_and_Desires_RU_REFERENCE.fb2
+            literary-sample-eval.json
+            literary-sample-eval.md
+            literary-sample-eval.log
           if-no-files-found: ignore
           retention-days: 7
-
-      - name: Save GigaChat-v11 resumable book cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: .bookai-cache-reference-v11-gigachat
-          key: bookai-reference-v11-gigachat-${{ github.run_id }}
