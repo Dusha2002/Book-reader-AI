@@ -16,15 +16,22 @@ v9 = v9d.v9
 # ellipsis/idiomatic pragmatics is most likely. Then confidence-gate and cap the
 # micro findings before they can consume repair/candidate budget.
 
-_QUOTED_SPAN_RE = re.compile(r"[\"'“‘]([^\"'”’\n]{1,180})[\"'”’]")
+# Do not mistake apostrophes in man's / Valens' / didn't for dialogue delimiters.
+_QUOTED_SPAN_RE = re.compile(
+    r"(?<![A-Za-z])(?:'([^'\n]{1,180})'|\"([^\"\n]{1,180})\"|“([^”\n]{1,180})”|‘([^’\n]{1,180})’)(?![A-Za-z])"
+)
 _WORD_RE = re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)?")
 _BASE_PARALLEL_MICRO = v9c._parallel_micro_audit
 
 
+def _quoted_body(match: re.Match) -> str:
+    return next((part for part in match.groups() if part is not None), "")
+
+
 def _short_utterance_risk(text: str) -> bool:
-    max_words = max(3, int(os.getenv("BOOKAI_V9E_SHORT_UTTERANCE_WORDS") or "8"))
+    max_words = max(3, int(os.getenv("BOOKAI_V9E_SHORT_UTTERANCE_WORDS") or "6"))
     for match in _QUOTED_SPAN_RE.finditer(str(text or "")):
-        words = _WORD_RE.findall(match.group(1))
+        words = _WORD_RE.findall(_quoted_body(match))
         if words and len(words) <= max_words:
             return True
     return False
