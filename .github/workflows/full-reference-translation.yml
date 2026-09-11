@@ -23,7 +23,8 @@ jobs:
       GIGACHAT_SCOPE: GIGACHAT_API_PERS
       GIGACHAT_BASE_URL: https://api.giga.chat/v1
 
-      BOOKAI_CHAPTER_NAME: Chapter Twelve
+      # v5 deliberately tests the largest chapter rather than tuning on Chapter Twelve.
+      BOOKAI_CHAPTER_NAME: '__largest__'
       BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
       BOOKAI_GIGACHAT_BATCH_SEGMENTS: '12'
       BOOKAI_GIGACHAT_BATCH_CHARS: '10000'
@@ -41,23 +42,24 @@ jobs:
       BOOKAI_LLM_GATE: 'false'
       BOOKAI_REASONING: none
 
-      # v4b: keep GigaChat bulk fast; strict QE happens only after rich context is ready.
+      # v5: free/cheap bulk hot path, then one QE pass and bounded targeted correction.
       BOOKAI_HYMT_HARD_THRESHOLD: '999'
       BOOKAI_DEEPSEEK_SEGMENT_CAP: '80'
-      BOOKAI_SEMANTIC_QE_BATCH_CHARS: '9000'
-      BOOKAI_SEMANTIC_QE_WORKERS: '4'
+      BOOKAI_DRAFT_RECOVERY_MAX: '6'
+      BOOKAI_SEMANTIC_QE_BATCH_CHARS: '11000'
+      BOOKAI_SEMANTIC_QE_WORKERS: '5'
       BOOKAI_TARGETED_EDIT_WORKERS: '4'
       BOOKAI_SEMANTIC_REPAIR_ROUNDS: '2'
-      BOOKAI_RAPID_REFINE_MAX: '20'
-      BOOKAI_DIALOGUE_QE_MAX: '24'
+      BOOKAI_FRESH_RETRANSLATE_MAX: '8'
+      BOOKAI_RAPID_REFINE_MAX: '16'
+      BOOKAI_DIALOGUE_QE_MAX: '20'
       BOOKAI_LITERARY_QE_WORKERS: '4'
-      BOOKAI_HYBRID_BATCH_CHARS: '9000'
+      BOOKAI_HYBRID_BATCH_CHARS: '10000'
       BOOKAI_BULK_PROBE_SEGMENTS: '8'
       BOOKAI_RETRY_ATTEMPTS: '2'
       BOOKAI_REQUEST_TIMEOUT: '150'
       BOOKAI_ANALYZER_REQUEST_TIMEOUT: '120'
       BOOKAI_ANALYSIS_CHARS: '45000'
-      BOOKAI_STYLE_SAMPLE_CHARS: '10000'
       BOOKAI_CONTEXT_WORKERS: '4'
 
     steps:
@@ -67,13 +69,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore Chapter Twelve v4b cache
+      - name: Restore largest-chapter v5 cache
         uses: actions/cache/restore@v4
         with:
-          path: .bookai-cache-chapter-eval-v4b-chapter-twelve
-          key: bookai-ch12-quality-v4b-${{ github.run_id }}
+          path: .bookai-cache-chapter-eval-v5-largest
+          key: bookai-largest-quality-v5-${{ github.run_id }}
           restore-keys: |
-            bookai-ch12-quality-v4b-
+            bookai-largest-quality-v5-
 
       - name: Install project and run tests
         env:
@@ -82,7 +84,7 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/hybrid_reference_translation.py
+          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/hybrid_reference_translation.py
           pytest -q
 
       - name: Verify API secrets without exposing them
@@ -91,37 +93,37 @@ jobs:
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
           test -n "${OPENROUTER_API_KEY:-}" || { echo 'OPENROUTER_API_KEY is not configured' >&2; exit 1; }
-          echo '[bookai] chapter=Chapter Twelve architecture=v4b primary=GigaChat-Lightning semantic_qe=all-segment targeted_edit=diagnose-then-repair literary_qe=bounded pro=disabled'
+          echo '[bookai] chapter=largest architecture=v5 primary=GigaChat-Lightning deepseek_bulk=0 semantic_qe=all-segment targeted_edit=bounded fresh_candidate_max=8 pro=disabled'
 
-      - name: Translate Chapter Twelve with quality-v4b pipeline
+      - name: Translate largest chapter with quality-v5 pipeline
         shell: bash
         run: |
           set -euo pipefail
           test -f Devices_and_Desires.fb2
           timeout --signal=TERM --kill-after=30s 34m \
-            python scripts/chapter_reference_translation_v4b.py 2>&1 | tee chapter-v4b.log
+            python scripts/chapter_reference_translation_v5.py 2>&1 | tee chapter-v5.log
 
-      - name: Upload Chapter Twelve v4b evaluation
+      - name: Upload largest-chapter v5 evaluation
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chapter-twelve-quality-v4b-evaluation
+          name: largest-chapter-quality-v5-evaluation
           path: |
-            Devices_and_Desires_RU_CHAPTER_EVAL_V4B.fb2
-            chapter-v4b-source.txt
-            chapter-v4b-translated.txt
-            chapter-v4b-translation-map.json
-            chapter-v4b.json
-            chapter-v4b-progress.json
-            chapter-v4b-probe.json
-            chapter-v4b-routing.json
-            chapter-v4b.log
+            Devices_and_Desires_RU_CHAPTER_EVAL_V5.fb2
+            chapter-v5-source.txt
+            chapter-v5-translated.txt
+            chapter-v5-translation-map.json
+            chapter-v5.json
+            chapter-v5-progress.json
+            chapter-v5-probe.json
+            chapter-v5-routing.json
+            chapter-v5.log
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Save Chapter Twelve v4b resumable cache
+      - name: Save largest-chapter v5 resumable cache
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: .bookai-cache-chapter-eval-v4b-chapter-twelve
-          key: bookai-ch12-quality-v4b-${{ github.run_id }}
+          path: .bookai-cache-chapter-eval-v5-largest
+          key: bookai-largest-quality-v5-${{ github.run_id }}
