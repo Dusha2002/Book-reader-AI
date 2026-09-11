@@ -18,13 +18,14 @@ from bookai.reference_profile import REFERENCE_GLOSSARY_SEED, apply_reference_pr
 SOURCE = Path(os.getenv("BOOKAI_SOURCE") or "Devices_and_Desires.fb2")
 REPORT = Path(os.getenv("BOOKAI_GIGACHAT_REPORT") or "gigachat-api-bakeoff.json")
 SAMPLES = Path(os.getenv("BOOKAI_GIGACHAT_SAMPLES") or "gigachat-api-bakeoff-samples.json")
-WORKERS = max(1, int(os.getenv("BOOKAI_GIGACHAT_WORKERS") or "6"))
+WORKERS = max(1, int(os.getenv("BOOKAI_GIGACHAT_WORKERS") or "2"))
 SCOPE = os.getenv("GIGACHAT_SCOPE") or "GIGACHAT_API_PERS"
 BASE_URL = os.getenv("GIGACHAT_BASE_URL") or "https://api.giga.chat/v1"
 MODEL_OVERRIDE = (os.getenv("BOOKAI_GIGACHAT_MODEL") or "").strip()
 CREDENTIALS = (os.getenv("GIGACHAT_AUTH_KEY") or "").strip()
 
 _thread_local = threading.local()
+_access_token = ""
 
 
 def memory() -> BookMemory:
@@ -53,25 +54,41 @@ def choose_sample(targets: list[Segment], count: int = 32) -> list[Segment]:
     return sorted(unique.values(), key=lambda s: order[s.id])[:count]
 
 
-def client():
+def auth_client():
+    from gigachat import GigaChat
+
+    return GigaChat(
+        credentials=CREDENTIALS,
+        scope=SCOPE,
+        base_url=BASE_URL,
+        verify_ssl_certs=False,
+        timeout=180,
+        max_retries=6,
+        retry_backoff_factor=1.2,
+    )
+
+
+def worker_client():
     from gigachat import GigaChat
 
     value = getattr(_thread_local, "gigachat", None)
     if value is None:
+        if not _access_token:
+            raise RuntimeError("GigaChat access token was not initialized")
         value = GigaChat(
-            credentials=CREDENTIALS,
-            scope=SCOPE,
+            access_token=_access_token,
             base_url=BASE_URL,
             verify_ssl_certs=False,
             timeout=180,
+            max_retries=6,
+            retry_backoff_factor=1.2,
         )
         _thread_local.gigachat = value
     return value
 
 
-def available_models() -> list[str]:
-    with_client = client()
-    response = with_client.get_models()
+def model_names(client) -> list[str]:
+    response = client.get_models()
     names: list[str] = []
     for row in getattr(response, "data", []) or []:
         name = getattr(row, "id_", None) or getattr(row, "id", None) or getattr(row, "name", None)
@@ -87,6 +104,8 @@ def choose_model(names: list[str]) -> str:
         return MODEL_OVERRIDE
     preferences = [
         "GigaChat-3-Ultra",
+        "GigaChat-3-Pro",
+        "GigaChat-3-Lightning",
         "GigaChat-2-Max",
         "GigaChat-Max",
         "GigaChat-2-Pro",
@@ -143,7 +162,7 @@ def translate_one(segment: Segment, model: str) -> tuple[str, str, dict]:
         "top_p": 0.9,
         "max_tokens": 2200,
     }
-    response = client().chat(payload)
+    response = worker_client().chat(payload)
     text = strip_wrapper(str(response.choices[0].message.content or ""))
     usage_obj = getattr(response, "usage", None)
     usage = {
@@ -192,12 +211,20 @@ def qa(sample: list[Segment], translated: dict[str, str], mem: BookMemory) -> di
 
 
 def main() -> None:
+    global _access_token
+
     if not CREDENTIALS:
         raise SystemExit("GIGACHAT_AUTH_KEY secret is missing")
 
-    models = available_models()
+    auth = auth_client()
+    token = auth.get_token()
+    _access_token = str(getattr(token, "access_token", "") or "")
+    if not _access_token:
+        raise RuntimeError("GigaChat OAuth succeeded but access_token is empty")
+
+    models = model_names(auth)
     selected = choose_model(models)
-    print("[gigachat-api] auth=ok scope=" + SCOPE, flush=True)
+    print("[gigachat-api] auth=ok scope=" + SCOPE + " token_reused=1", flush=True)
     print("[gigachat-api] available_models=" + json.dumps(models, ensure_ascii=False), flush=True)
     print("[gigachat-api] selected_model=" + selected, flush=True)
 
