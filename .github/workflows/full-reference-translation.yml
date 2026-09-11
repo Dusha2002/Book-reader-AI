@@ -67,8 +67,8 @@ jobs:
           BOOKAI_LLM_GATE: 'false'
           BOOKAI_REASONING: none
 
-          # Primary book translation: one PERS stream, small enough batches to make
-          # early pages readable quickly and recursive JSON recovery for failures.
+          # Primary first pass: every segment goes through Lightning so readable
+          # Russian appears in book order without waiting for DeepSeek reasoning.
           BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
           BOOKAI_GIGACHAT_BATCH_SEGMENTS: '8'
           BOOKAI_GIGACHAT_BATCH_CHARS: '12000'
@@ -78,10 +78,13 @@ jobs:
 
           BOOKAI_BULK_PROBE_SEGMENTS: '12'
           BOOKAI_BULK_MAX_ESTIMATE_SECONDS: '9000'
-          BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
+          # Effectively disable pre-routing to DeepSeek during the first pass.
+          # Complex prose is translated by Lightning immediately, then the risk
+          # selector can replace selected drafts with DeepSeek-refined versions.
+          BOOKAI_HYMT_HARD_THRESHOLD: '999'
 
-          # DeepSeek is bounded: analysis/style/context + genuinely hard prose +
-          # QA/recovery/refinement. There is no V4 Pro and no whole-book fallback.
+          # DeepSeek is bounded: analysis/style/context + QA/recovery/refinement.
+          # There is no V4 Pro and no whole-book DeepSeek fallback.
           BOOKAI_DEEPSEEK_SEGMENT_CAP: '300'
           BOOKAI_HYBRID_BATCH_CHARS: '9000'
           BOOKAI_RAPID_REFINE_MAX: '80'
@@ -96,8 +99,8 @@ jobs:
         run: |
           set -euo pipefail
           test -f Devices_and_Desires.fb2
-          echo '[bookai] primary_translation=GigaChat-3-Lightning'
-          echo '[bookai] reasoning_analysis=DeepSeek-V4.1-Flash'
+          echo '[bookai] first_pass=GigaChat-3-Lightning-all-segments'
+          echo '[bookai] reasoning_analysis_refinement=DeepSeek-V4.1-Flash'
           echo '[bookai] external_pro_judge=disabled'
           echo '[bookai] mode=progressive partial_fb2_after_each_batch=1'
           timeout --signal=TERM --kill-after=30s 165m \
