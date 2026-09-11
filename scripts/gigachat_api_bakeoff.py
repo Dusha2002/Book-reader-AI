@@ -3,9 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from bookai.literary_context import locked_glossary_violations
@@ -18,14 +16,12 @@ from bookai.reference_profile import REFERENCE_GLOSSARY_SEED, apply_reference_pr
 SOURCE = Path(os.getenv("BOOKAI_SOURCE") or "Devices_and_Desires.fb2")
 REPORT = Path(os.getenv("BOOKAI_GIGACHAT_REPORT") or "gigachat-api-bakeoff.json")
 SAMPLES = Path(os.getenv("BOOKAI_GIGACHAT_SAMPLES") or "gigachat-api-bakeoff-samples.json")
-WORKERS = max(1, int(os.getenv("BOOKAI_GIGACHAT_WORKERS") or "2"))
 SCOPE = os.getenv("GIGACHAT_SCOPE") or "GIGACHAT_API_PERS"
 BASE_URL = os.getenv("GIGACHAT_BASE_URL") or "https://api.giga.chat/v1"
 MODEL_OVERRIDE = (os.getenv("BOOKAI_GIGACHAT_MODEL") or "").strip()
 CREDENTIALS = (os.getenv("GIGACHAT_AUTH_KEY") or "").strip()
-
-_thread_local = threading.local()
-_access_token = ""
+MAX_BATCH_SEGMENTS = max(1, int(os.getenv("BOOKAI_GIGACHAT_BATCH_SEGMENTS") or "8"))
+MAX_BATCH_CHARS = max(1000, int(os.getenv("BOOKAI_GIGACHAT_BATCH_CHARS") or "12000"))
 
 
 def memory() -> BookMemory:
@@ -54,7 +50,7 @@ def choose_sample(targets: list[Segment], count: int = 32) -> list[Segment]:
     return sorted(unique.values(), key=lambda s: order[s.id])[:count]
 
 
-def auth_client():
+def make_client():
     from gigachat import GigaChat
 
     return GigaChat(
@@ -63,28 +59,9 @@ def auth_client():
         base_url=BASE_URL,
         verify_ssl_certs=False,
         timeout=180,
-        max_retries=6,
-        retry_backoff_factor=1.2,
+        max_retries=7,
+        retry_backoff_factor=1.4,
     )
-
-
-def worker_client():
-    from gigachat import GigaChat
-
-    value = getattr(_thread_local, "gigachat", None)
-    if value is None:
-        if not _access_token:
-            raise RuntimeError("GigaChat access token was not initialized")
-        value = GigaChat(
-            access_token=_access_token,
-            base_url=BASE_URL,
-            verify_ssl_certs=False,
-            timeout=180,
-            max_retries=6,
-            retry_backoff_factor=1.2,
-        )
-        _thread_local.gigachat = value
-    return value
 
 
 def model_names(client) -> list[str]:
@@ -102,7 +79,7 @@ def choose_model(names: list[str]) -> str:
         if MODEL_OVERRIDE not in names:
             raise RuntimeError(f"Requested model {MODEL_OVERRIDE!r} is not available; available={names}")
         return MODEL_OVERRIDE
-    preferences = [
+    for candidate in (
         "GigaChat-3-Ultra",
         "GigaChat-3-Pro",
         "GigaChat-3-Lightning",
@@ -112,8 +89,7 @@ def choose_model(names: list[str]) -> str:
         "GigaChat-Pro",
         "GigaChat-2",
         "GigaChat",
-    ]
-    for candidate in preferences:
+    ):
         if candidate in names:
             return candidate
     if not names:
@@ -121,58 +97,83 @@ def choose_model(names: list[str]) -> str:
     return names[0]
 
 
-def prompt_for(text: str) -> str:
-    return f"""Переведи художественный фрагмент с английского на русский.
+def make_batches(segments: list[Segment]) -> list[list[Segment]]:
+    batches: list[list[Segment]] = []
+    current: list[Segment] = []
+    chars = 0
+    for segment in segments:
+        size = len(segment.text)
+        if current and (len(current) >= MAX_BATCH_SEGMENTS or chars + size > MAX_BATCH_CHARS):
+            batches.append(current)
+            current = []
+            chars = 0
+        current.append(segment)
+        chars += size
+    if current:
+        batches.append(current)
+    return batches
+
+
+def prompt_for(batch: list[Segment]) -> str:
+    source = "\n\n".join(f"[{s.id}]\n{s.text}" for s in batch)
+    ids = ", ".join(s.id for s in batch)
+    return f"""Переведи художественные фрагменты с английского на русский.
 
 Требования:
-- сохрани весь смысл без пропусков, сокращений и добавлений;
+- сохрани весь смысл каждого фрагмента без пропусков, сокращений и добавлений;
 - русский должен звучать как естественная опубликованная проза, а не машинный перевод;
 - стиль сдержанный, точный, сухо-ироничный; не усиливай эмоции;
 - сохраняй устройство длинных предложений, если оно естественно по-русски;
 - диалоги делай живыми, без канцелярита;
-- имена и термины: Valens=Валенс, Orsea=Орсеа, Melancton=Меланктон, Syracoelus=Сиракоэл, Eremia=Эремия, Eremians=эремийцы, Perpetual Republic=Вечная Республика;
-- верни ТОЛЬКО перевод, без комментария, кавычек и предисловия.
+- имена и термины: Valens=Валенс, Orsea=Орсеа, Melancton=Меланктон, Syracoelus=Сиракоэл, Eremia=Эремия, Eremians=эремийцы, Perpetual Republic=Вечная Республика.
+
+Верни ТОЛЬКО валидный JSON-объект без Markdown. Ключами должны быть ровно ID фрагментов ({ids}), значениями — полные русские переводы. Не объединяй фрагменты.
 
 SOURCE:
-{text}"""
+{source}"""
 
 
-def strip_wrapper(text: str) -> str:
-    text = text.strip()
-    text = re.sub(r"^```(?:text|russian|ru)?\s*", "", text, flags=re.I)
-    text = re.sub(r"\s*```$", "", text)
-    for prefix in ("Перевод:", "Перевод", "Russian translation:", "Translation:"):
-        if text.lower().startswith(prefix.lower()):
-            text = text[len(prefix):].lstrip(" \n:-")
-            break
-    return text.strip()
+def parse_json_object(text: str) -> dict[str, str]:
+    raw = text.strip()
+    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.I)
+    raw = re.sub(r"\s*```$", "", raw)
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        start, end = raw.find("{"), raw.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        value = json.loads(raw[start : end + 1])
+    if not isinstance(value, dict):
+        raise ValueError("GigaChat response is not a JSON object")
+    return {str(k): str(v).strip() for k, v in value.items() if str(v).strip()}
 
 
-def translate_one(segment: Segment, model: str) -> tuple[str, str, dict]:
+def translate_batch(client, batch: list[Segment], model: str) -> tuple[dict[str, str], dict]:
     payload = {
         "model": model,
         "messages": [
             {
                 "role": "system",
-                "content": "Ты литературный переводчик с английского на русский. Приоритеты: точность смысла, полнота, естественная русская проза и сохранение авторского тона.",
+                "content": "Ты литературный переводчик с английского на русский. Приоритеты: точность смысла, полнота, естественная русская проза и сохранение авторского тона. Строго соблюдай требуемый JSON-формат.",
             },
-            {"role": "user", "content": prompt_for(segment.text)},
+            {"role": "user", "content": prompt_for(batch)},
         ],
-        "temperature": 0.15,
+        "temperature": 0.1,
         "top_p": 0.9,
-        "max_tokens": 2200,
+        "max_tokens": 7000,
     }
-    response = worker_client().chat(payload)
-    text = strip_wrapper(str(response.choices[0].message.content or ""))
+    response = client.chat(payload)
+    parsed = parse_json_object(str(response.choices[0].message.content or ""))
+    expected = {s.id for s in batch}
+    translated = {sid: text for sid, text in parsed.items() if sid in expected and text}
     usage_obj = getattr(response, "usage", None)
     usage = {
         "prompt_tokens": int(getattr(usage_obj, "prompt_tokens", 0) or 0),
         "completion_tokens": int(getattr(usage_obj, "completion_tokens", 0) or 0),
         "total_tokens": int(getattr(usage_obj, "total_tokens", 0) or 0),
     }
-    if not text:
-        raise RuntimeError("empty GigaChat translation")
-    return segment.id, text, usage
+    return translated, usage
 
 
 def qa(sample: list[Segment], translated: dict[str, str], mem: BookMemory) -> dict:
@@ -211,20 +212,16 @@ def qa(sample: list[Segment], translated: dict[str, str], mem: BookMemory) -> di
 
 
 def main() -> None:
-    global _access_token
-
     if not CREDENTIALS:
         raise SystemExit("GIGACHAT_AUTH_KEY secret is missing")
 
-    auth = auth_client()
-    token = auth.get_token()
-    _access_token = str(getattr(token, "access_token", "") or "")
-    if not _access_token:
+    client = make_client()
+    token = client.get_token()
+    if not str(getattr(token, "access_token", "") or ""):
         raise RuntimeError("GigaChat OAuth succeeded but access_token is empty")
-
-    models = model_names(auth)
+    models = model_names(client)
     selected = choose_model(models)
-    print("[gigachat-api] auth=ok scope=" + SCOPE + " token_reused=1", flush=True)
+    print("[gigachat-api] auth=ok scope=" + SCOPE + " single_stream=1", flush=True)
     print("[gigachat-api] available_models=" + json.dumps(models, ensure_ascii=False), flush=True)
     print("[gigachat-api] selected_model=" + selected, flush=True)
 
@@ -232,6 +229,7 @@ def main() -> None:
     targets = [s for s in doc.segments if _should_translate(s.text)]
     count = max(8, int(os.getenv("BOOKAI_BAKEOFF_SEGMENTS") or "32"))
     sample = choose_sample(targets, count)
+    batches = make_batches(sample)
     total_chars = sum(len(s.text) for s in targets)
     sample_chars = sum(len(s.text) for s in sample)
     mem = memory()
@@ -240,20 +238,22 @@ def main() -> None:
     translated: dict[str, str] = {}
     errors: dict[str, str] = {}
     token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futures = {pool.submit(translate_one, segment, selected): segment for segment in sample}
-        done = 0
-        for future in as_completed(futures):
-            segment = futures[future]
-            try:
-                sid, text, usage = future.result()
-                translated[sid] = text
-                for key in token_usage:
-                    token_usage[key] += int(usage.get(key) or 0)
-            except Exception as exc:
+    for index, batch in enumerate(batches, start=1):
+        try:
+            rows, usage = translate_batch(client, batch, selected)
+            translated.update(rows)
+            for key in token_usage:
+                token_usage[key] += int(usage.get(key) or 0)
+            for segment in batch:
+                if segment.id not in rows:
+                    errors[segment.id] = "missing from GigaChat batch response"
+        except Exception as exc:
+            for segment in batch:
                 errors[segment.id] = f"{type(exc).__name__}: {exc}"
-            done += 1
-            print(f"[gigachat-api] done={done}/{len(sample)} id={segment.id}", flush=True)
+        print(
+            f"[gigachat-api] batch={index}/{len(batches)} segments={len(batch)} translated={len(translated)}/{len(sample)}",
+            flush=True,
+        )
 
     elapsed = max(0.001, time.perf_counter() - started)
     cps = sample_chars / elapsed
@@ -267,7 +267,10 @@ def main() -> None:
         "segments": len(sample),
         "translated": len(translated),
         "errors": errors,
-        "workers": WORKERS,
+        "single_stream": True,
+        "batch_segments": MAX_BATCH_SEGMENTS,
+        "batch_chars": MAX_BATCH_CHARS,
+        "api_calls": len(batches),
         "sample_chars": sample_chars,
         "elapsed_seconds": round(elapsed, 3),
         "source_chars_per_second": round(cps, 2),
