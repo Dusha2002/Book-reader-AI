@@ -59,19 +59,19 @@ jobs:
       BOOKAI_V9C_MICRO_BATCH_CHARS: '9000'
       BOOKAI_V9C_MICRO_WORKERS: '4'
       BOOKAI_V9C_DIALOGUE_MAX_CHARS: '520'
-      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first3-v9c-shared'
+      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first3-v9d-shared'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Restore first-three v9c shared book memory
+      - name: Restore first-three v9d shared book memory
         uses: actions/cache/restore@v4
         with:
-          path: .bookai-cache-first3-v9c-shared
-          key: bookai-first3-quality-v9c-${{ github.run_id }}
+          path: .bookai-cache-first3-v9d-shared
+          key: bookai-first3-quality-v9d-${{ github.run_id }}
           restore-keys: |
-            bookai-first3-quality-v9c-
+            bookai-first3-quality-v9d-
       - name: Install project and run tests
         env:
           BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
@@ -79,7 +79,7 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/hybrid_reference_translation.py
+          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/hybrid_reference_translation.py
           pytest -q
       - name: Verify API secrets without exposing them
         shell: bash
@@ -87,31 +87,31 @@ jobs:
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
           test -n "${OPENROUTER_API_KEY:-}" || { echo 'OPENROUTER_API_KEY is not configured' >&2; exit 1; }
-          echo '[bookai] architecture=v9c source_only=yes discourse=source+self-hypothesis micro-audit=yes independent-candidate=yes qe-rerank=yes'
-      - name: Translate complete Chapter One with v9c
+          echo '[bookai] architecture=v9d source_only=yes discourse=source+self-hypothesis structural-dialogue=yes independent-candidate=yes qe-rerank=yes'
+      - name: Translate complete Chapter One with v9d
         shell: bash
         run: |
           set -euo pipefail
           test -f Devices_and_Desires.fb2
           BOOKAI_CHAPTER_NAME='Chapter One' timeout --signal=TERM --kill-after=30s 11m \
-            python scripts/chapter_reference_translation_v9c.py 2>&1 | tee chapter-v9-chapter-one.log
+            python scripts/chapter_reference_translation_v9d.py 2>&1 | tee chapter-v9-chapter-one.log
       - name: Translate complete Chapter Two with Chapter One trusted memory
         shell: bash
         run: |
           set -euo pipefail
           BOOKAI_CHAPTER_NAME='Chapter Two' timeout --signal=TERM --kill-after=30s 11m \
-            python scripts/chapter_reference_translation_v9c.py 2>&1 | tee chapter-v9-chapter-two.log
+            python scripts/chapter_reference_translation_v9d.py 2>&1 | tee chapter-v9-chapter-two.log
       - name: Translate complete Chapter Three with prior trusted memory
         shell: bash
         run: |
           set -euo pipefail
           BOOKAI_CHAPTER_NAME='Chapter Three' timeout --signal=TERM --kill-after=30s 11m \
-            python scripts/chapter_reference_translation_v9c.py 2>&1 | tee chapter-v9-chapter-three.log
-      - name: Upload first-three v9c evaluation
+            python scripts/chapter_reference_translation_v9d.py 2>&1 | tee chapter-v9-chapter-three.log
+      - name: Upload first-three v9d evaluation
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: first-three-quality-v9c-source-only-evaluation
+          name: first-three-quality-v9d-source-only-evaluation
           path: |
             Devices_and_Desires_RU_*_EVAL_V9.fb2
             chapter-v9-*.txt
@@ -119,9 +119,9 @@ jobs:
             chapter-v9-*.log
           if-no-files-found: ignore
           retention-days: 7
-      - name: Save first-three v9c shared book memory
+      - name: Save first-three v9d shared book memory
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: .bookai-cache-first3-v9c-shared
-          key: bookai-first3-quality-v9c-${{ github.run_id }}
+          path: .bookai-cache-first3-v9d-shared
+          key: bookai-first3-quality-v9d-${{ github.run_id }}
