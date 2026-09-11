@@ -1,5 +1,5 @@
 from bookai.models import Segment
-from bookai.resume import sanitize_resume_state
+from bookai.resume import first_complete_unchecked_chapter, sanitize_resume_state
 
 
 def _segment(sid: str, chapter: str) -> Segment:
@@ -60,3 +60,26 @@ def test_resume_keeps_unfinished_translations_even_without_qa_claims():
     assert cleaned["qa_passed_chapters"] == []
     assert report["partial_chapters"] == ["One"]
     assert report["preserved_translations"] == 1
+
+
+def test_best_effort_only_infers_fully_translated_unchecked_chapter():
+    chapters = [
+        ("One", [_segment("s000001", "One"), _segment("s000002", "One")]),
+        ("Two", [_segment("s000003", "Two"), _segment("s000004", "Two")]),
+    ]
+    state = {
+        "translations": {
+            "s000001": "Один.",
+            "s000002": "Два.",
+            "s000003": "Три.",
+        },
+        "qa_passed_chapters": [],
+    }
+
+    assert first_complete_unchecked_chapter(state, chapters) == "One"
+
+    state["qa_passed_chapters"] = ["One"]
+    assert first_complete_unchecked_chapter(state, chapters) is None
+
+    state["translations"]["s000004"] = "Четыре."
+    assert first_complete_unchecked_chapter(state, chapters) == "Two"

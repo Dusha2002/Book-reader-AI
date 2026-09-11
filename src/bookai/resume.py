@@ -3,23 +3,25 @@ from __future__ import annotations
 from .models import Segment
 
 
+def _usable_translations(state: dict, source_ids: set[str] | None = None) -> dict[str, str]:
+    original = dict(state.get("translations") or {})
+    return {
+        str(sid): text
+        for sid, text in original.items()
+        if (source_ids is None or str(sid) in source_ids)
+        and isinstance(text, str)
+        and text.strip()
+    }
+
+
 def sanitize_resume_state(
     state: dict,
     chapters: list[tuple[str, list[Segment]]],
 ) -> tuple[dict, dict]:
-    """Keep every usable cached translation, including unfinished chapters.
-
-    Invalid/stale ids and empty translations are discarded, but partial chapter
-    progress is preserved. Chapter-level completion claims survive only when all
-    source ids for that chapter have non-empty cached translations.
-    """
+    """Keep every usable cached translation, including unfinished chapters."""
     original = dict(state.get("translations") or {})
     source_ids = {segment.id for _, chapter in chapters for segment in chapter}
-    translations = {
-        str(sid): text
-        for sid, text in original.items()
-        if str(sid) in source_ids and isinstance(text, str) and text.strip()
-    }
+    translations = _usable_translations(state, source_ids)
 
     chapter_ids = {name: {segment.id for segment in chapter} for name, chapter in chapters}
     known_names = set(chapter_ids)
@@ -58,3 +60,22 @@ def sanitize_resume_state(
         "qa_passed_chapters": len(qa_passed),
     }
     return cleaned, report
+
+
+def first_complete_unchecked_chapter(
+    state: dict,
+    chapters: list[tuple[str, list[Segment]]],
+) -> str | None:
+    """Find the earliest chapter safe to waive after an unexpected late-stage error.
+
+    A chapter is safe to waive only when every one of its source ids already has a
+    non-empty cached translation and it has not already been marked QA-passed.
+    Partial chapters are never returned, so real translation gaps remain blockers.
+    """
+    translations = _usable_translations(state)
+    qa_passed = set(state.get("qa_passed_chapters") or [])
+    for name, chapter in chapters:
+        ids = {segment.id for segment in chapter}
+        if name not in qa_passed and ids and ids.issubset(translations):
+            return name
+    return None

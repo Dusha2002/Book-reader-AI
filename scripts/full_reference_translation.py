@@ -7,7 +7,7 @@ from bookai.models import Segment
 from bookai.parsers.base import load_book, save_book
 from bookai.pipeline import PIPELINE_VERSION, _cache_path, _chapter_groups, _should_translate, translate_book
 from bookai.reference_harness import build_reference_harness
-from bookai.resume import sanitize_resume_state
+from bookai.resume import first_complete_unchecked_chapter, sanitize_resume_state
 
 
 SOURCE = Path("Devices_and_Desires.fb2")
@@ -55,10 +55,10 @@ def _cached_state(source: Path, cache_dir: Path, mode: str = "optimal") -> dict:
         return {}
 
 
-def _chapter_lookup() -> dict[str, list[Segment]]:
+def _chapter_items() -> list[tuple[str, list[Segment]]]:
     document = load_book(SOURCE)
     targets = [segment for segment in document.segments if _should_translate(segment.text)]
-    return {name: chapter for name, chapter in _chapter_groups(targets)}
+    return _chapter_groups(targets)
 
 
 def _waivable_failure(error: BaseException) -> tuple[str, str] | None:
@@ -76,18 +76,29 @@ def _waivable_failure(error: BaseException) -> tuple[str, str] | None:
 
 
 def _record_best_effort_waiver(error: BaseException) -> dict | None:
-    """Let a fully translated chapter continue despite polish/QA failure."""
-    classified = _waivable_failure(error)
-    if classified is None:
-        return None
-    stage, chapter_name = classified
+    """Continue past any late-stage error once the whole chapter has usable text.
 
+    Explicit polish/QA errors retain their stage. Other errors are inferred only if
+    the earliest unchecked chapter is already 100% translated. We never waive a
+    partial chapter, so a genuine missing translation remains a real blocker.
+    """
     state_path = _cache_path(SOURCE, CACHE, "optimal")
     state = _cached_state(SOURCE, CACHE)
     if not state or state.get("pipeline_version") != PIPELINE_VERSION:
         return None
 
-    chapter = _chapter_lookup().get(chapter_name)
+    chapters = _chapter_items()
+    chapter_map = {name: chapter for name, chapter in chapters}
+    classified = _waivable_failure(error)
+    if classified is None:
+        chapter_name = first_complete_unchecked_chapter(state, chapters)
+        if chapter_name is None:
+            return None
+        stage = "chapter_exception"
+    else:
+        stage, chapter_name = classified
+
+    chapter = chapter_map.get(chapter_name)
     if not chapter:
         return None
     chapter_ids = {segment.id for segment in chapter}
@@ -104,7 +115,7 @@ def _record_best_effort_waiver(error: BaseException) -> dict | None:
     qa_passed = set(state.get("qa_passed_chapters") or [])
 
     polished.add(chapter_name)
-    if stage == "qa":
+    if stage != "polish":
         completed.add(chapter_name)
         qa_passed.add(chapter_name)
 
