@@ -11,6 +11,12 @@ _CHAPTER = re.compile(r"^\s*Chapter\s+([A-Za-z0-9 -]+)\s*$", re.I)
 _FIRST_PERSON = re.compile(r"\b(?:I|I'm|I've|I'd|I'll|my|me)\b", re.I)
 _LETTER_HEADER = re.compile(r"\b([A-Z][A-Za-z'’-]+)(?:\s+[A-Z][A-Za-z'’-]+){0,2}\s+to\s+([A-Z][A-Za-z'’-]+)", re.I)
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?…])(?:[\"'’”)]*)\s+")
+_CYRILLIC = re.compile(r"[А-Яа-яЁё]")
+_MIXED_SCRIPT_TOKEN = re.compile(
+    r"(?<![\w'’-])(?=[\w'’-]*[A-Za-z])(?=[\w'’-]*[А-Яа-яЁё])[\w'’-]+(?![\w'’-])"
+)
+_LATIN_RESIDUE = re.compile(r"(?<![A-Za-zА-Яа-яЁё])([A-Za-z][A-Za-z'’-]{2,})(?![A-Za-zА-Яа-яЁё])")
+_URL_EMAIL = re.compile(r"(?:https?://\S+|www\.\S+|\b\S+@\S+\.\S+\b)", re.I)
 
 _FEMALE_WRONG = re.compile(
     r"\bя\b[^.!?…]{0,55}\b(?:был|уверен|рад|готов|должен|решил|подумал|понял|сказал|видел|знал|хотел|сделал)\b",
@@ -19,6 +25,12 @@ _FEMALE_WRONG = re.compile(
 _MALE_WRONG = re.compile(
     r"\bя\b[^.!?…]{0,55}\b(?:была|уверена|рада|готова|должна|решила|подумала|поняла|сказала|видела|знала|хотела|сделала)\b",
     re.I,
+)
+
+_RU_SUFFIXES = (
+    "иями", "ями", "ами", "ого", "ему", "ому", "ыми", "ими", "ей", "ой", "ая", "яя",
+    "ий", "ый", "ое", "ее", "ов", "ев", "ам", "ям", "ах", "ях", "ом", "ем", "ы", "и",
+    "а", "я", "у", "ю", "е",
 )
 
 
@@ -37,6 +49,46 @@ def is_chapter_heading_text(segment: Segment) -> bool:
 def _sentence_count(text: str) -> int:
     rows = [row.strip() for row in _SENTENCE_BREAK.split((text or "").strip()) if row.strip()]
     return max(1, len(rows)) if text.strip() else 0
+
+
+def _source_term_present(term: str, text: str) -> bool:
+    term = str(term or "").strip()
+    if not term:
+        return False
+    pattern = r"(?<![A-Za-z])" + re.escape(term) + r"(?![A-Za-z])"
+    return bool(re.search(pattern, text, flags=re.I))
+
+
+def _ru_stem(word: str) -> str:
+    token = word.casefold()
+    for suffix in _RU_SUFFIXES:
+        if len(token) - len(suffix) >= 4 and token.endswith(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+def _target_term_present(target: str, candidate: str) -> bool:
+    target_words = [_ru_stem(x) for x in re.findall(r"[А-Яа-яЁё-]+", str(target or ""))]
+    candidate_words = [_ru_stem(x) for x in re.findall(r"[А-Яа-яЁё-]+", str(candidate or ""))]
+    if not target_words:
+        return str(target or "").casefold() in str(candidate or "").casefold()
+    return all(any(c.startswith(t) or t.startswith(c) for c in candidate_words) for t in target_words)
+
+
+def _named_source_term(term: str) -> bool:
+    words = re.findall(r"[A-Za-z][A-Za-z'’-]*", str(term or ""))
+    return bool(words) and any(word[:1].isupper() for word in words)
+
+
+def _latin_residue_words(candidate: str) -> list[str]:
+    scrubbed = _URL_EMAIL.sub(" ", candidate or "")
+    words: list[str] = []
+    for word in _LATIN_RESIDUE.findall(scrubbed):
+        # Short all-caps abbreviations can be legitimate even in Russian prose.
+        if word.isupper() and len(word) <= 8:
+            continue
+        words.append(word)
+    return words
 
 
 def infer_active_speaker(
@@ -117,6 +169,19 @@ def enhanced_candidate_issues(
         if re.search(r"\b(?:One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|Eleven|Twelve|Thirteen)\b", translated, flags=re.I):
             add("hard", "chapter_heading_english_number", "English chapter number leaked into Russian heading")
 
+    mixed = _MIXED_SCRIPT_TOKEN.findall(translated)
+    if mixed:
+        add("hard", "mixed_script_token", "mixed Latin/Cyrillic token leaked into Russian: " + ", ".join(mixed[:4]))
+
+    latin_residue = _latin_residue_words(translated)
+    if latin_residue and _CYRILLIC.search(translated):
+        add("hard", "latin_residue", "untranslated Latin token(s) remain in Russian prose: " + ", ".join(latin_residue[:6]))
+
+    src_questions = original.count("?")
+    dst_questions = translated.count("?")
+    if src_questions and dst_questions < src_questions:
+        add("hard", "question_loss", f"interrogative structure collapsed {src_questions}→{dst_questions}")
+
     source_len = len(original)
     ratio = len(translated) / max(1, source_len)
     src_sentences = _sentence_count(original)
@@ -129,6 +194,37 @@ def enhanced_candidate_issues(
 
     if source_len >= 100 and src_sentences <= 3 and dst_sentences >= src_sentences + 2 and ratio > 1.02:
         add("hard", "context_leak", f"candidate has unexplained sentence inflation {src_sentences}→{dst_sentences}")
+
+    character_sources: set[str] = set()
+    if memory is not None:
+        for source_name, desc in memory.characters.items():
+            source_name = str(source_name or "").strip()
+            if not source_name or not _source_term_present(source_name, original):
+                continue
+            ru = re.search(r"\bru=([^;]+)", str(desc), flags=re.I)
+            if not ru:
+                continue
+            character_sources.add(source_name.casefold())
+            preferred = ru.group(1).strip()
+            if preferred and not _target_term_present(preferred, translated):
+                add("hard", "character_name", f"canonical character rendering missing: {source_name} → {preferred}")
+
+        # Analyzer-derived named glossary entries form a dynamic entity ledger.
+        # Treat ordinary lexical glossary misses as advisory (base QA), but proper
+        # names/titles must remain stable across a book.
+        for source_term, preferred in memory.glossary.items():
+            source_term = str(source_term or "").strip()
+            preferred = str(preferred or "").strip()
+            if (
+                not source_term
+                or not preferred
+                or source_term.casefold() in character_sources
+                or not _named_source_term(source_term)
+                or not _source_term_present(source_term, original)
+            ):
+                continue
+            if not _target_term_present(preferred, translated):
+                add("hard", "entity_consistency", f"canonical named term missing: {source_term} → {preferred}")
 
     speaker = infer_active_speaker(segment, source_segments, memory)
     if speaker:
