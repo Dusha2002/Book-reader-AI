@@ -38,19 +38,18 @@ jobs:
       BOOKAI_EDITOR_MODEL: deepseek/deepseek-v4.1-flash
       BOOKAI_HARD_MODEL: deepseek/deepseek-v4.1-flash
       BOOKAI_MAX_MODEL: deepseek/deepseek-v4.1-flash
-      # v4 calls semantic/literary QE explicitly and selectively; the generic
-      # harness-wide gate remains off to avoid duplicate judging.
       BOOKAI_LLM_GATE: 'false'
       BOOKAI_REASONING: none
 
-      # GigaChat publishes the fast bulk draft while DeepSeek builds book context.
-      # DeepSeek then audits every segment but edits only verified failures.
+      # v4b: keep GigaChat bulk fast; strict QE happens only after rich context is ready.
       BOOKAI_HYMT_HARD_THRESHOLD: '999'
       BOOKAI_DEEPSEEK_SEGMENT_CAP: '80'
       BOOKAI_SEMANTIC_QE_BATCH_CHARS: '9000'
       BOOKAI_SEMANTIC_QE_WORKERS: '4'
       BOOKAI_TARGETED_EDIT_WORKERS: '4'
+      BOOKAI_SEMANTIC_REPAIR_ROUNDS: '2'
       BOOKAI_RAPID_REFINE_MAX: '20'
+      BOOKAI_DIALOGUE_QE_MAX: '24'
       BOOKAI_LITERARY_QE_WORKERS: '4'
       BOOKAI_HYBRID_BATCH_CHARS: '9000'
       BOOKAI_BULK_PROBE_SEGMENTS: '8'
@@ -68,13 +67,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore Chapter Twelve v4 cache
+      - name: Restore Chapter Twelve v4b cache
         uses: actions/cache/restore@v4
         with:
-          path: .bookai-cache-chapter-eval-v4-chapter-twelve
-          key: bookai-ch12-quality-v4-${{ github.run_id }}
+          path: .bookai-cache-chapter-eval-v4b-chapter-twelve
+          key: bookai-ch12-quality-v4b-${{ github.run_id }}
           restore-keys: |
-            bookai-ch12-quality-v4-
+            bookai-ch12-quality-v4b-
 
       - name: Install project and run tests
         env:
@@ -83,7 +82,7 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/hybrid_reference_translation.py
+          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/hybrid_reference_translation.py
           pytest -q
 
       - name: Verify API secrets without exposing them
@@ -92,37 +91,37 @@ jobs:
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
           test -n "${OPENROUTER_API_KEY:-}" || { echo 'OPENROUTER_API_KEY is not configured' >&2; exit 1; }
-          echo '[bookai] chapter=Chapter Twelve architecture=v4 primary=GigaChat-Lightning semantic_qe=DeepSeek-V4.1-Flash targeted_edit=1 literary_qe=bounded pro=disabled'
+          echo '[bookai] chapter=Chapter Twelve architecture=v4b primary=GigaChat-Lightning semantic_qe=all-segment targeted_edit=diagnose-then-repair literary_qe=bounded pro=disabled'
 
-      - name: Translate Chapter Twelve with quality-v4 pipeline
+      - name: Translate Chapter Twelve with quality-v4b pipeline
         shell: bash
         run: |
           set -euo pipefail
           test -f Devices_and_Desires.fb2
           timeout --signal=TERM --kill-after=30s 34m \
-            python scripts/chapter_reference_translation_v4.py 2>&1 | tee chapter-v4.log
+            python scripts/chapter_reference_translation_v4b.py 2>&1 | tee chapter-v4b.log
 
-      - name: Upload Chapter Twelve v4 evaluation
+      - name: Upload Chapter Twelve v4b evaluation
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chapter-twelve-quality-v4-evaluation
+          name: chapter-twelve-quality-v4b-evaluation
           path: |
-            Devices_and_Desires_RU_CHAPTER_EVAL_V4.fb2
-            chapter-v4-source.txt
-            chapter-v4-translated.txt
-            chapter-v4-translation-map.json
-            chapter-v4.json
-            chapter-v4-progress.json
-            chapter-v4-probe.json
-            chapter-v4-routing.json
-            chapter-v4.log
+            Devices_and_Desires_RU_CHAPTER_EVAL_V4B.fb2
+            chapter-v4b-source.txt
+            chapter-v4b-translated.txt
+            chapter-v4b-translation-map.json
+            chapter-v4b.json
+            chapter-v4b-progress.json
+            chapter-v4b-probe.json
+            chapter-v4b-routing.json
+            chapter-v4b.log
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Save Chapter Twelve v4 resumable cache
+      - name: Save Chapter Twelve v4b resumable cache
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: .bookai-cache-chapter-eval-v4-chapter-twelve
-          key: bookai-ch12-quality-v4-${{ github.run_id }}
+          path: .bookai-cache-chapter-eval-v4b-chapter-twelve
+          key: bookai-ch12-quality-v4b-${{ github.run_id }}
