@@ -127,9 +127,6 @@ class GigaChatLightningBackend:
         if not isinstance(value, dict):
             raise ValueError("GigaChat response is not a JSON object")
 
-        # Lightning occasionally decorates a requested id despite the prompt,
-        # e.g. "[s000010]" or "s000010:". Normalize those harmless variants so
-        # a valid translation is not discarded as a missing segment.
         normalized: dict[str, str] = {}
         for key, val in value.items():
             candidate = str(val).strip()
@@ -140,6 +137,15 @@ class GigaChatLightningBackend:
             normalized_key = match.group(0).lower() if match else raw_key
             normalized[normalized_key] = candidate
         return normalized
+
+    @staticmethod
+    def _usage(response) -> dict[str, int]:
+        usage_obj = getattr(response, "usage", None)
+        return {
+            "prompt_tokens": int(getattr(usage_obj, "prompt_tokens", 0) or 0),
+            "completion_tokens": int(getattr(usage_obj, "completion_tokens", 0) or 0),
+            "total_tokens": int(getattr(usage_obj, "total_tokens", 0) or 0),
+        }
 
     @staticmethod
     def _relevant_glossary(batch: list[Segment], memory: BookMemory) -> str:
@@ -187,6 +193,32 @@ Humor: {style.humor}
 SOURCE:
 {source}"""
 
+    def _single_plain_prompt(self, segment: Segment, memory: BookMemory) -> str:
+        style = memory.style
+        glossary = self._relevant_glossary([segment], memory) or "нет терминов в этом фрагменте"
+        continuity = (memory.rolling_summary or "").strip()
+        if len(continuity) > 5000:
+            continuity = continuity[-5000:]
+        return f"""Переведи один художественный фрагмент с английского на русский.
+Сохрани весь смысл, причинно-следственные связи, технические детали, сухую иронию, ритм и авторский тон. Русский должен звучать как опубликованная проза, без кальки, канцелярита, пояснений и добавлений.
+
+СТИЛЬ:
+Narrative voice: {style.narrative_voice}
+Rhythm: {style.rhythm}
+Dialogue: {style.dialogue}
+Humor: {style.humor}
+
+КОНТЕКСТ:
+{continuity or 'нет дополнительного контекста'}
+
+ТЕРМИНЫ:
+{glossary}
+
+Верни ТОЛЬКО полный русский перевод самого фрагмента, без JSON, Markdown, заголовков и комментариев.
+
+SOURCE:
+{segment.text}"""
+
     def _translate_batch(self, batch: list[Segment], memory: BookMemory) -> tuple[dict[str, str], dict[str, int]]:
         client = self._ensure_client()
         response = client.chat(
@@ -211,18 +243,44 @@ SOURCE:
         parsed = self._parse_json_object(str(response.choices[0].message.content or ""))
         expected = {segment.id for segment in batch}
         translated = {sid: text for sid, text in parsed.items() if sid in expected and text}
-        # For a single requested segment there is no ambiguity: if Lightning
-        # returns exactly one non-empty JSON value under a generic key such as
-        # "translation", map that value to the sole requested id.
         if len(batch) == 1 and not translated and len(parsed) == 1:
             translated = {batch[0].id: next(iter(parsed.values()))}
-        usage_obj = getattr(response, "usage", None)
-        usage = {
-            "prompt_tokens": int(getattr(usage_obj, "prompt_tokens", 0) or 0),
-            "completion_tokens": int(getattr(usage_obj, "completion_tokens", 0) or 0),
-            "total_tokens": int(getattr(usage_obj, "total_tokens", 0) or 0),
-        }
-        return translated, usage
+        return translated, self._usage(response)
+
+    def _translate_single_plain(self, segment: Segment, memory: BookMemory) -> tuple[dict[str, str], dict[str, int]]:
+        client = self._ensure_client()
+        response = client.chat(
+            {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Ты профессиональный литературный переводчик с английского на русский. Отвечай только переводом.",
+                    },
+                    {"role": "user", "content": self._single_plain_prompt(segment, memory)},
+                ],
+                "temperature": 0.1,
+                "top_p": 0.9,
+                "max_tokens": self.max_tokens,
+            }
+        )
+        text = str(response.choices[0].message.content or "").strip()
+        text = re.sub(r"^```(?:text)?\s*", "", text, flags=re.I)
+        text = re.sub(r"\s*```$", "", text).strip()
+        text = re.sub(r"^(?:Перевод|Translation)\s*:\s*", "", text, flags=re.I).strip()
+        if not text:
+            raise ValueError("empty GigaChat plain-text translation")
+        return {segment.id: text}, self._usage(response)
+
+    def _single_plain_recovery(self, segment: Segment, memory: BookMemory, original_error: Exception | None = None) -> tuple[dict[str, str], dict[str, str]]:
+        try:
+            rows, usage = self._translate_single_plain(segment, memory)
+            self.usage.add(usage, calls=1)
+            return rows, {}
+        except Exception as exc:
+            self.usage.add({}, calls=1)
+            prefix = f"{type(original_error).__name__}: {original_error}; " if original_error else ""
+            return {}, {segment.id: prefix + f"plain fallback {type(exc).__name__}: {exc}"}
 
     def _translate_resilient(
         self,
@@ -236,7 +294,9 @@ SOURCE:
             self.usage.add(usage, calls=1)
         except Exception as exc:
             self.usage.add({}, calls=1)
-            if len(batch) > 1 and depth < self.max_split_depth:
+            if len(batch) == 1:
+                return self._single_plain_recovery(batch[0], memory, exc)
+            if depth < self.max_split_depth:
                 mid = max(1, len(batch) // 2)
                 left_rows, left_errors = self._translate_resilient(batch[:mid], memory, depth=depth + 1)
                 right_rows, right_errors = self._translate_resilient(batch[mid:], memory, depth=depth + 1)
@@ -245,7 +305,11 @@ SOURCE:
 
         missing = [segment for segment in batch if segment.id not in rows]
         errors: dict[str, str] = {}
-        if missing and depth < self.max_split_depth:
+        if len(batch) == 1 and missing:
+            recovery_rows, recovery_errors = self._single_plain_recovery(batch[0], memory)
+            rows.update(recovery_rows)
+            errors.update(recovery_errors)
+        elif missing and depth < self.max_split_depth:
             retry_rows, retry_errors = self._translate_resilient(missing, memory, depth=depth + 1)
             rows.update(retry_rows)
             errors.update(retry_errors)
