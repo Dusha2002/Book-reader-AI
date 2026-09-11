@@ -46,7 +46,7 @@ def infer_active_speaker(
     *,
     lookback: int = 18,
 ) -> tuple[str, str, str] | None:
-    """Infer an epistolary first-person speaker from a recent `Name to Name` salutation."""
+    """Infer an epistolary first-person speaker from the sender before `to`."""
     if not source_segments or memory is None or not _FIRST_PERSON.search(segment.text):
         return None
     by_id = {row.id: i for i, row in enumerate(source_segments)}
@@ -58,9 +58,9 @@ def infer_active_speaker(
         match = _LETTER_HEADER.search(row.text)
         if not match:
             continue
-        header = row.text.casefold()
+        sender = match.group(1).casefold()
         for source_name, desc in memory.characters.items():
-            if not source_name or source_name.casefold() not in header:
+            if not source_name or source_name.casefold() != sender:
                 continue
             gender = re.search(r"\bgender=(male|female)\b", str(desc), flags=re.I)
             ru = re.search(r"\bru=([^;]+)", str(desc), flags=re.I)
