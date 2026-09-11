@@ -1,0 +1,115 @@
+name: russian-llm-bakeoff
+
+on:
+  push:
+    branches: [mt-bakeoff-v1]
+    paths:
+      - 'scripts/russian_llm_bakeoff.py'
+      - '.github/workflows/russian-llm-bakeoff.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: qvikhr-1.7b-q4
+            ref: Vikhrmodels/QVikhr-3-1.7B-Instruction-noreasoning-GGUF:Q4_K_M
+          - name: qvikhr-4b-q4
+            ref: Vikhrmodels/QVikhr-3-4B-Instruction-GGUF:Q4_K_M
+          - name: yandexgpt5-lite-8b-q4
+            ref: yandex/YandexGPT-5-Lite-8B-instruct-GGUF:Q4_K_M
+          - name: gigachat3-10b-a1.8b-q4
+            ref: bartowski/ai-sage_GigaChat3-10B-A1.8B-GGUF:Q4_K_M
+
+    env:
+      BOOKAI_BAKEOFF_SEGMENTS: '32'
+      BOOKAI_LOCAL_LLM_WORKERS: '2'
+      BOOKAI_LOCAL_LLM_TIMEOUT: '180'
+      BOOKAI_LOCAL_LLM_URL: http://127.0.0.1:8080/v1
+      BOOKAI_LOCAL_LLM_NAME: ${{ matrix.name }}
+      BOOKAI_RU_LLM_REPORT: russian-llm-bakeoff-${{ matrix.name }}.json
+      BOOKAI_RU_LLM_SAMPLES: russian-llm-bakeoff-${{ matrix.name }}-samples.json
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install project and llama.cpp runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install -e .
+          curl -LsSf https://llama.app/install.sh | SKIP_CUDA=1 SKIP_ROCM=1 SKIP_VULKAN=1 sh
+          ~/.llama-app/llama cli --version
+          python -m compileall -q scripts/russian_llm_bakeoff.py src
+
+      - name: Start ${{ matrix.name }} local server
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '[ru-llm-bakeoff] model_ref=${{ matrix.ref }}'
+          ~/.llama-app/llama serve \
+            -hf '${{ matrix.ref }}' \
+            -a '${{ matrix.name }}' \
+            -c 4096 \
+            -np 2 \
+            -t "$(nproc)" \
+            -ngl 0 \
+            --no-webui \
+            > llama-${{ matrix.name }}.log 2>&1 &
+          echo $! > llama.pid
+
+          for i in $(seq 1 180); do
+            if curl -fsS http://127.0.0.1:8080/v1/models > /tmp/models.json 2>/dev/null; then
+              cat /tmp/models.json
+              echo '[ru-llm-bakeoff] server_ready=1'
+              exit 0
+            fi
+            if ! kill -0 "$(cat llama.pid)" 2>/dev/null; then
+              echo '[ru-llm-bakeoff] server exited early' >&2
+              tail -200 llama-${{ matrix.name }}.log >&2 || true
+              exit 1
+            fi
+            sleep 5
+          done
+          echo '[ru-llm-bakeoff] server startup timeout' >&2
+          tail -200 llama-${{ matrix.name }}.log >&2 || true
+          exit 1
+
+      - name: Translate the same 32 Parker segments
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 25m \
+            python scripts/russian_llm_bakeoff.py 2>&1 | tee russian-llm-${{ matrix.name }}.log
+
+      - name: Show server throughput tail
+        if: always()
+        shell: bash
+        run: |
+          tail -120 llama-${{ matrix.name }}.log || true
+          if [ -f llama.pid ]; then kill "$(cat llama.pid)" 2>/dev/null || true; fi
+
+      - name: Upload ${{ matrix.name }} results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: russian-llm-bakeoff-${{ matrix.name }}
+          path: |
+            russian-llm-bakeoff-${{ matrix.name }}.json
+            russian-llm-bakeoff-${{ matrix.name }}-samples.json
+            russian-llm-${{ matrix.name }}.log
+            llama-${{ matrix.name }}.log
+          if-no-files-found: ignore
+          retention-days: 7
