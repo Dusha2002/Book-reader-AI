@@ -9,13 +9,14 @@ if str(SCRIPTS) not in sys.path:
 
 from bookai.models import BookMemory, Segment
 
-import chapter_reference_translation_v9f as v9f
+import chapter_reference_translation_v9g as v9g
 
+v9f = v9g.v9f
 v9e = v9f.v9e
 v9d = v9e.v9d
 v9c = v9e.v9c
 v9b = v9c.v9b
-v9 = v9f.v9
+v9 = v9g.v9
 
 
 def seg(text: str) -> Segment:
@@ -81,13 +82,6 @@ def test_embedded_dialogue_after_narration_is_detected_and_normalized():
     assert value.endswith('?')
 
 
-def test_v9e_sparse_referent_and_short_utterances_are_risks():
-    assert v9e._risk_segment_v9e(seg("'I won't see either of them again.'"))
-    assert v9e._risk_segment_v9e(seg("'I should do,' the man replied."))
-    assert v9e._risk_segment_v9e(seg("'Cocky with it,' Orsea said."))
-    assert v9e._risk_segment_v9e(seg("The man looked at him. 'You mean that one?'"))
-
-
 def test_possessive_apostrophes_do_not_create_false_dialogue_risk():
     source = "It was typical of Valens' father that he insisted on his son's lessons; the man's patience was endless and didn't help."
     assert not v9e._short_utterance_risk(source)
@@ -99,14 +93,35 @@ def test_v9f_keeps_known_discourse_failures_in_scope():
     assert v9f._risk_segment_v9f(seg("'I won't see either of them again, I don't suppose.'"))
     assert v9f._risk_segment_v9f(seg("'I should do,' the man replied. 'I used to make them.'"))
     assert v9f._risk_segment_v9f(seg("'Cocky with it,' Orsea said. 'So, you're an escaped convict.'"))
-    assert v9f._opaque_short_risk("'I should do,' the man replied.")
-    assert v9f._opaque_short_risk("'Cocky with it,' Orsea said.")
 
 
 def test_v9f_does_not_audit_every_tiny_quote():
     assert not v9f._risk_segment_v9f(seg("'Really?' he asked."))
     assert not v9f._risk_segment_v9f(seg("'Hello,' she said."))
     assert not v9f._risk_segment_v9f(seg("'Fine,' he said."))
+
+
+def test_v9g_forces_only_explicit_referents_without_evidence():
+    targets = [
+        seg("'I won't see either of them again.'"),
+        Segment(id="s2", text="'Cocky with it,' he said.", locator="x", chapter="Chapter Two"),
+        Segment(id="s3", text="'Really?' he asked.", locator="x", chapter="Chapter Two"),
+    ]
+    translations = {"s1": "— Больше их не увижу.", "s2": "— И дерзит, — сказал он.", "s3": "— Правда? — спросил он."}
+    rows = v9g._synthetic_confirmed_rows(targets, translations)
+    assert {(row["id"], row["code"]) for row in rows} == {("s1", "referent")}
+
+
+def test_v9g_routes_observed_literal_should_do():
+    source = seg("'I should do,' the man replied. 'I used to make them.'")
+    assert v9g._literalization_kind(source, "— Я должен, — ответил мужчина. — Раньше я их делал.") == "elliptical_modal"
+    assert not v9g._literalization_kind(source, "— Ещё как знаю, — ответил мужчина. — Я их раньше делал.")
+
+
+def test_v9g_routes_observed_literal_with_it_but_not_good_translation():
+    source = seg("'Cocky with it,' Orsea said. 'So, you're an escaped convict.'")
+    assert v9g._literalization_kind(source, "— Самоуверенный с ним разговор, — сказал Орсеа.") == "preposition_idiom"
+    assert not v9g._literalization_kind(source, "— И ещё дерзит, — сказал Орсеа.")
 
 
 def test_normal_long_dialogue_is_not_sparse_micro_audit_risk():
@@ -134,12 +149,3 @@ def test_v9f_formatter_repairs_mid_sentence_quote_boundary():
     assert "'" not in value
     assert ", — продолжил" in value
     assert ", — вы двое" in value
-
-
-def test_v9f_synthetic_risk_routes_referent_and_opaque_idiom_only():
-    rows = v9f._synthetic_risk_rows([
-        seg("'I won't see either of them again.'"),
-        Segment(id="s2", text="'Cocky with it,' he said.", locator="x", chapter="Chapter Two"),
-        Segment(id="s3", text="'Really?' he asked.", locator="x", chapter="Chapter Two"),
-    ])
-    assert {(row["id"], row["code"]) for row in rows} == {("s1", "referent"), ("s2", "idiom")}
