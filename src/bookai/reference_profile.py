@@ -5,15 +5,15 @@ from dataclasses import replace
 from .models import BookMemory, StyleGuide
 
 
-# Derived from the user-provided GPT-5.6 Sol Russian reference translation.
-# It is intentionally compact: the full reference book is NOT copied into prompts.
+# Derived from the user-provided Russian reference translation.
+# The full reference text is never copied into translation prompts.
 REFERENCE_STYLE_CONTRACT = """Target Russian literary register for this novel:
 - restrained, precise, dryly ironic prose; intelligent but not ornate, archaizing, or self-consciously "beautiful";
 - preserve the author's sardonic timing and understatement: the punch line often lands at the end of a sentence/paragraph;
 - natural Russian syntax is mandatory. Never mirror English grammar when it produces calques, bureaucratese, cognate-literal wording or awkward pronoun chains;
 - preserve long sentence architecture and accumulating lists when they carry rhythm, but rebuild them with idiomatic Russian government and punctuation;
 - prefer concrete, period-neutral literary vocabulary over modern corporate/technical Anglicisms unless the source itself is technical;
-- translate idioms by function and context, never by lexical resemblance (e.g. avoid literal constructions like «ради чёрта» for English idioms);
+- translate idioms by function and context, never by lexical resemblance;
 - action and engineering prose must remain physically precise: actor, motion, direction, mechanism, scale and cause/effect cannot blur;
 - irony must stay dry rather than become louder, slangier or more emotional than the source;
 - internal thought should remain close, concise and unsentimental; do not explain the joke or character psychology;
@@ -26,6 +26,7 @@ REFERENCE_STYLE_CONTRACT = """Target Russian literary register for this novel:
 REFERENCE_GLOSSARY_SEED = {
     "Valens": "Валенс",
     "Orsea": "Орсеа",
+    "Miel": "Миэль",
     "Melancton": "Меланктон",
     "Syracoelus": "Сиракоэл",
     "Eremia": "Эремия",
@@ -33,14 +34,21 @@ REFERENCE_GLOSSARY_SEED = {
     "Perpetual Republic": "Вечная Республика",
 }
 
+# Machine-readable suffixes let deterministic QA catch obvious gender drift while
+# still giving the model a natural-language character note.
+REFERENCE_CHARACTER_SEED = {
+    "Valens": "ru=Валенс; gender=male; мужчина, герцог/наследник; местоимения он/его",
+    "Orsea": "ru=Орсеа; gender=male; мужчина, герцог Эремии; местоимения он/его",
+    "Miel": "ru=Миэль; gender=male; мужчина, Миэль Дукас; местоимения он/его",
+    "Ziani": "ru=Зиани; gender=male; мужчина; местоимения он/его",
+    "Psellus": "ru=Пселл; gender=male; мужчина, комиссар; местоимения он/его",
+    "Veatriz": "ru=Веатрис; gender=female; женщина; местоимения она/её",
+}
+
 
 def apply_reference_profile(memory: BookMemory) -> BookMemory:
     style = StyleGuide(
-        narrative_voice=(
-            memory.style.narrative_voice
-            + "\nREFERENCE TARGET: "
-            + REFERENCE_STYLE_CONTRACT
-        )[-9000:],
+        narrative_voice=(memory.style.narrative_voice + "\nREFERENCE TARGET: " + REFERENCE_STYLE_CONTRACT)[-9000:],
         rhythm=(
             memory.style.rhythm
             + "\nKeep Parker's long accumulative sentences when functional; rebuild them as idiomatic Russian rather than chopping or mirroring English."
@@ -62,8 +70,9 @@ def apply_reference_profile(memory: BookMemory) -> BookMemory:
             "Do not flatten technical or physical relations into generic wording.",
         ])),
     )
-    glossary = dict(REFERENCE_GLOSSARY_SEED)
-    glossary.update(memory.glossary)
-    # Reference spellings win only for the explicit benchmark/major recurring terms above.
+    glossary = dict(memory.glossary)
     glossary.update(REFERENCE_GLOSSARY_SEED)
-    return replace(memory, style=style, glossary=glossary)
+    characters = dict(memory.characters)
+    # Explicit reference facts win over model-inferred character metadata.
+    characters.update(REFERENCE_CHARACTER_SEED)
+    return replace(memory, style=style, glossary=glossary, characters=characters)
