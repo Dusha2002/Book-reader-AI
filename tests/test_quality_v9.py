@@ -9,11 +9,12 @@ if str(SCRIPTS) not in sys.path:
 
 from bookai.models import BookMemory, Segment
 
-import chapter_reference_translation_v9d as v9d
+import chapter_reference_translation_v9e as v9e
 
-v9c = v9d.v9c
+v9d = v9e.v9d
+v9c = v9e.v9c
 v9b = v9c.v9b
-v9 = v9d.v9
+v9 = v9e.v9
 
 
 def seg(text: str) -> Segment:
@@ -79,13 +80,18 @@ def test_embedded_dialogue_after_narration_is_detected_and_normalized():
     assert value.endswith('?')
 
 
-def test_referent_and_short_dialogue_are_micro_audit_risks():
-    assert v9d._risk_segment_v9d(seg("'I won't see either of them again.'"))
-    assert v9d._risk_segment_v9d(seg("'I should do,' the man replied."))
-    assert v9d._risk_segment_v9d(seg("'Cocky with it,' Orsea said."))
-    assert v9d._risk_segment_v9d(seg("The man looked at him. 'You mean that one?'"))
+def test_sparse_referent_and_elliptical_utterances_are_micro_audit_risks():
+    assert v9e._risk_segment_v9e(seg("'I won't see either of them again.'"))
+    assert v9e._risk_segment_v9e(seg("'I should do,' the man replied."))
+    assert v9e._risk_segment_v9e(seg("'Cocky with it,' Orsea said."))
+    assert v9e._risk_segment_v9e(seg("The man looked at him. 'You mean that one?'"))
+
+
+def test_normal_long_dialogue_is_not_sparse_micro_audit_risk():
+    source = "'I walked across the entire valley yesterday because the western bridge had been destroyed by the flood and nobody had repaired it yet,' he said."
+    assert not v9e._risk_segment_v9e(seg(source))
 
 
 def test_long_narration_without_referent_is_not_micro_audit_risk():
     source = "The road crossed the valley and climbed the ridge before disappearing into fog. " * 12
-    assert not v9d._risk_segment_v9d(seg(source))
+    assert not v9e._risk_segment_v9e(seg(source))
