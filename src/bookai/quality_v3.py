@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 
 from .models import BookMemory, Segment
-from .quality import QualityIssue, candidate_issues
+from .quality import candidate_issues
 
 
 _CHAPTER = re.compile(r"^\s*Chapter\s+([A-Za-z0-9 -]+)\s*$", re.I)
@@ -20,6 +20,14 @@ _MALE_WRONG = re.compile(
     r"\bя\b[^.!?…]{0,55}\b(?:была|уверена|рада|готова|должна|решила|подумала|поняла|сказала|видела|знала|хотела|сделала)\b",
     re.I,
 )
+
+
+@dataclass(frozen=True)
+class QualityIssueV3:
+    id: str
+    severity: str
+    code: str
+    reason: str
 
 
 def is_chapter_heading_text(segment: Segment) -> bool:
@@ -86,8 +94,11 @@ def enhanced_candidate_issues(
     memory: BookMemory | None = None,
     *,
     source_segments: list[Segment] | None = None,
-) -> list[QualityIssue]:
-    out = list(candidate_issues(segment, candidate, memory))
+) -> list[QualityIssueV3]:
+    out = [
+        QualityIssueV3(issue.id, issue.severity, issue.code, issue.reason)
+        for issue in candidate_issues(segment, candidate, memory)
+    ]
     original = segment.text.strip()
     translated = (candidate or "").strip()
     if not translated:
@@ -97,7 +108,7 @@ def enhanced_candidate_issues(
 
     def add(severity: str, code: str, reason: str) -> None:
         if (severity, code) not in existing:
-            out.append(QualityIssue(segment.id, severity, code, reason))
+            out.append(QualityIssueV3(segment.id, severity, code, reason))
             existing.add((severity, code))
 
     if is_chapter_heading_text(segment):
@@ -111,16 +122,11 @@ def enhanced_candidate_issues(
     src_sentences = _sentence_count(original)
     dst_sentences = _sentence_count(translated)
 
-    # Russian literary prose is usually somewhat shorter than English. Ratios below
-    # ~0.58 on a substantial paragraph are much more likely to be a dropped clause
-    # than legitimate compression (Chapter Nine exposed exactly this failure mode).
     if source_len >= 140 and ratio < 0.58:
         add("hard", "semantic_omission", f"substantial paragraph shrank to ratio {ratio:.2f}")
     elif source_len >= 180 and src_sentences >= 3 and dst_sentences <= src_sentences - 2 and ratio < 0.70:
         add("hard", "sentence_loss", f"sentence structure collapsed {src_sentences}→{dst_sentences}")
 
-    # Context leakage often appears as one or two extra translated sentences prepended
-    # from the previous paragraph while total character length still looks plausible.
     if source_len >= 100 and src_sentences <= 3 and dst_sentences >= src_sentences + 2 and ratio > 1.02:
         add("hard", "context_leak", f"candidate has unexplained sentence inflation {src_sentences}→{dst_sentences}")
 
@@ -140,12 +146,12 @@ def enhanced_batch_issues(
     memory: BookMemory | None = None,
     *,
     source_segments: list[Segment] | None = None,
-) -> list[QualityIssue]:
-    issues: list[QualityIssue] = []
+) -> list[QualityIssueV3]:
+    issues: list[QualityIssueV3] = []
     for segment in segments:
         candidate = translations.get(segment.id)
         if candidate is None:
-            issues.append(QualityIssue(segment.id, "hard", "missing_id", "model omitted required segment id"))
+            issues.append(QualityIssueV3(segment.id, "hard", "missing_id", "model omitted required segment id"))
             continue
         issues.extend(
             enhanced_candidate_issues(
