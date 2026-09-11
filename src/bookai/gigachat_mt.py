@@ -54,9 +54,10 @@ class GigaChatUsage:
 class GigaChatLightningBackend:
     """Single-stream GigaChat-3-Lightning EN→RU literary translator.
 
-    The PERS API is single-stream, so throughput comes from batching, not parallel
-    calls. Structured output is enforced with GigaChat's strict JSON Schema.
-    Context is explicitly marked as context-only and is never an output target.
+    PERS access is single-stream, so throughput comes from batching. Requests are
+    intentionally fail-fast: one upstream stall must never freeze a whole book job.
+    Strict JSON Schema is preferred; schema incompatibility falls back once to a
+    plain JSON contract, while rate-limit/transport errors remain retryable failures.
     """
 
     name = "gigachat-3-lightning"
@@ -70,7 +71,12 @@ class GigaChatLightningBackend:
         self.max_batch_chars = max(1000, int(os.getenv("BOOKAI_GIGACHAT_BATCH_CHARS") or "10000"))
         self.max_split_depth = max(1, int(os.getenv("BOOKAI_GIGACHAT_SPLIT_DEPTH") or "4"))
         self.max_tokens = max(1200, int(os.getenv("BOOKAI_GIGACHAT_MAX_TOKENS") or "6000"))
+        self.timeout_seconds = max(15, min(90, int(os.getenv("BOOKAI_GIGACHAT_TIMEOUT") or "55")))
+        self.max_retries = max(0, min(3, int(os.getenv("BOOKAI_GIGACHAT_RETRIES") or "1")))
+        self.retry_backoff = max(0.2, min(3.0, float(os.getenv("BOOKAI_GIGACHAT_RETRY_BACKOFF") or "0.8")))
+        self.validate_model = (os.getenv("BOOKAI_GIGACHAT_VALIDATE_MODEL") or "false").lower() in {"1", "true", "yes"}
         self._client = None
+        self._request_seq = 0
         self.usage = GigaChatUsage()
 
     @property
@@ -87,29 +93,37 @@ class GigaChatLightningBackend:
             raise RuntimeError("GIGACHAT_AUTH_KEY is not configured")
         from gigachat import GigaChat
 
+        print(
+            f"[gigachat-client] oauth model={self.model} timeout={self.timeout_seconds}s retries={self.max_retries}",
+            flush=True,
+        )
+        started = time.perf_counter()
         client = GigaChat(
             credentials=self.credentials,
             scope=self.scope,
             base_url=self.base_url,
             verify_ssl_certs=False,
-            timeout=180,
-            max_retries=7,
-            retry_backoff_factor=1.4,
+            timeout=self.timeout_seconds,
+            max_retries=self.max_retries,
+            retry_backoff_factor=self.retry_backoff,
         )
         token = client.get_token()
         if not str(getattr(token, "access_token", "") or ""):
             raise RuntimeError("GigaChat OAuth succeeded but access_token is empty")
-        available = []
-        try:
-            models = client.get_models()
-            for row in getattr(models, "data", []) or []:
-                name = getattr(row, "id_", None) or getattr(row, "id", None) or getattr(row, "name", None)
-                if name:
-                    available.append(str(name))
-        except Exception:
+        print(f"[gigachat-client] oauth_ok elapsed={time.perf_counter()-started:.2f}s", flush=True)
+
+        if self.validate_model:
             available = []
-        if available and self.model not in available:
-            raise RuntimeError(f"Requested GigaChat model {self.model!r} is unavailable; available={available}")
+            try:
+                models = client.get_models()
+                for row in getattr(models, "data", []) or []:
+                    name = getattr(row, "id_", None) or getattr(row, "id", None) or getattr(row, "name", None)
+                    if name:
+                        available.append(str(name))
+            except Exception as exc:
+                print(f"[gigachat-client] model_list_skipped error={type(exc).__name__}: {exc}", flush=True)
+            if available and self.model not in available:
+                raise RuntimeError(f"Requested GigaChat model {self.model!r} is unavailable; available={available}")
         self._client = client
         return client
 
@@ -253,7 +267,6 @@ class GigaChatLightningBackend:
         nearest = self._context_for_batch(batch, source_segments)
         summary = "" if minimal else self._clip(memory.rolling_summary, 1200)
         targets = {segment.id: segment.text for segment in batch}
-
         style_rows = "" if minimal else (
             f"VOICE: {self._clip(style.narrative_voice, 1400)}\n"
             f"RHYTHM: {self._clip(style.rhythm, 700)}\n"
@@ -289,6 +302,39 @@ TARGETS (ПЕРЕВЕСТИ):
 
 Ответ обязан соответствовать переданной JSON Schema."""
 
+    @staticmethod
+    def _schema_incompatibility(exc: Exception) -> bool:
+        text = f"{type(exc).__name__}: {exc}".casefold()
+        return any(token in text for token in ("response_format", "json_schema", "schema", "400", "422", "validation"))
+
+    def _chat(self, payload: dict, batch: list[Segment], *, strict: bool) -> object:
+        client = self._ensure_client()
+        self._request_seq += 1
+        seq = self._request_seq
+        chars = sum(len(s.text) for s in batch)
+        first = batch[0].id if batch else "-"
+        last = batch[-1].id if batch else "-"
+        print(
+            f"[gigachat-request] seq={seq} strict={str(strict).lower()} segments={len(batch)} chars={chars} ids={first}..{last}",
+            flush=True,
+        )
+        started = time.perf_counter()
+        try:
+            response = client.chat(payload)
+        except Exception as exc:
+            elapsed = time.perf_counter() - started
+            print(
+                f"[gigachat-request] seq={seq} error={type(exc).__name__} elapsed={elapsed:.2f}s detail={str(exc)[:240]}",
+                flush=True,
+            )
+            raise
+        usage = self._usage(response)
+        print(
+            f"[gigachat-request] seq={seq} ok elapsed={time.perf_counter()-started:.2f}s tokens={usage.get('total_tokens', 0)}",
+            flush=True,
+        )
+        return response
+
     def _translate_batch(
         self,
         batch: list[Segment],
@@ -297,29 +343,38 @@ TARGETS (ПЕРЕВЕСТИ):
         source_segments: list[Segment] | None = None,
         minimal: bool = False,
     ) -> tuple[dict[str, str], dict[str, int]]:
-        client = self._ensure_client()
-        response = client.chat(
+        messages = [
             {
-                "model": self.model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Ты литературный переводчик EN→RU. Переводи только TARGETS, "
-                            "никогда не переводя CONTEXT_ONLY. Не добавляй ничего от себя."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": self._prompt(batch, memory, source_segments=source_segments, minimal=minimal),
-                    },
-                ],
-                "temperature": 0.05,
-                "top_p": 0.9,
-                "max_tokens": self.max_tokens,
-                "response_format": self._strict_response_format(batch),
-            }
-        )
+                "role": "system",
+                "content": (
+                    "Ты литературный переводчик EN→RU. Переводи только TARGETS, "
+                    "никогда не переводя CONTEXT_ONLY. Не добавляй ничего от себя."
+                ),
+            },
+            {
+                "role": "user",
+                "content": self._prompt(batch, memory, source_segments=source_segments, minimal=minimal),
+            },
+        ]
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.05,
+            "top_p": 0.9,
+            "max_tokens": self.max_tokens,
+            "response_format": self._strict_response_format(batch),
+        }
+        try:
+            response = self._chat(payload, batch, strict=True)
+        except Exception as exc:
+            if not self._schema_incompatibility(exc):
+                raise
+            print("[gigachat-schema] strict format rejected; retrying once with plain JSON contract", flush=True)
+            fallback = dict(payload)
+            fallback.pop("response_format", None)
+            fallback["messages"] = [dict(messages[0]), dict(messages[1])]
+            fallback["messages"][0]["content"] += " Верни только валидный JSON-объект с ровно требуемыми ID."
+            response = self._chat(fallback, batch, strict=False)
         parsed = self._parse_json_object(str(response.choices[0].message.content or ""))
         expected = {segment.id for segment in batch}
         translated = {sid: text for sid, text in parsed.items() if sid in expected and text}
@@ -333,9 +388,7 @@ TARGETS (ПЕРЕВЕСТИ):
         original_error: Exception | None = None,
     ) -> tuple[dict[str, str], dict[str, str]]:
         try:
-            rows, usage = self._translate_batch(
-                [segment], memory, source_segments=source_segments, minimal=True
-            )
+            rows, usage = self._translate_batch([segment], memory, source_segments=source_segments, minimal=True)
             self.usage.add(usage, calls=1)
             if segment.id not in rows:
                 raise ValueError("strict single response omitted target id")
@@ -343,7 +396,7 @@ TARGETS (ПЕРЕВЕСТИ):
         except Exception as exc:
             self.usage.add({}, calls=1)
             prefix = f"{type(original_error).__name__}: {original_error}; " if original_error else ""
-            return {}, {segment.id: prefix + f"strict single recovery {type(exc).__name__}: {exc}"}
+            return {}, {segment.id: prefix + f"single recovery {type(exc).__name__}: {exc}"}
 
     def _translate_resilient(
         self,
@@ -362,12 +415,8 @@ TARGETS (ПЕРЕВЕСТИ):
                 return self._single_strict_recovery(batch[0], memory, source_segments, exc)
             if depth < self.max_split_depth:
                 mid = max(1, len(batch) // 2)
-                left_rows, left_errors = self._translate_resilient(
-                    batch[:mid], memory, source_segments=source_segments, depth=depth + 1
-                )
-                right_rows, right_errors = self._translate_resilient(
-                    batch[mid:], memory, source_segments=source_segments, depth=depth + 1
-                )
+                left_rows, left_errors = self._translate_resilient(batch[:mid], memory, source_segments=source_segments, depth=depth + 1)
+                right_rows, right_errors = self._translate_resilient(batch[mid:], memory, source_segments=source_segments, depth=depth + 1)
                 return {**left_rows, **right_rows}, {**left_errors, **right_errors}
             return {}, {segment.id: f"{type(exc).__name__}: {exc}" for segment in batch}
 
@@ -379,12 +428,10 @@ TARGETS (ПЕРЕВЕСТИ):
             rows.update(retry_rows)
             return rows, retry_errors
         if depth < self.max_split_depth:
-            retry_rows, retry_errors = self._translate_resilient(
-                missing, memory, source_segments=source_segments, depth=depth + 1
-            )
+            retry_rows, retry_errors = self._translate_resilient(missing, memory, source_segments=source_segments, depth=depth + 1)
             rows.update(retry_rows)
             return rows, retry_errors
-        return rows, {segment.id: "missing from strict GigaChat batch response" for segment in missing}
+        return rows, {segment.id: "missing from GigaChat batch response" for segment in missing}
 
     def translate_many(
         self,
@@ -408,12 +455,20 @@ TARGETS (ПЕРЕВЕСТИ):
             else:
                 llm_segments.append(segment)
 
-        for batch in self._batches(llm_segments):
-            batch_rows, batch_errors = self._translate_resilient(
-                batch, memory, source_segments=source_segments
-            )
+        batches = self._batches(llm_segments)
+        print(
+            f"[gigachat-batches] segments={len(llm_segments)} batches={len(batches)} max_segments={self.max_batch_segments} max_chars={self.max_batch_chars}",
+            flush=True,
+        )
+        for index, batch in enumerate(batches, 1):
+            print(f"[gigachat-batch] start={index}/{len(batches)}", flush=True)
+            batch_rows, batch_errors = self._translate_resilient(batch, memory, source_segments=source_segments)
             out.update(batch_rows)
             errors.update(batch_errors)
+            print(
+                f"[gigachat-batch] done={index}/{len(batches)} translated={len(batch_rows)} errors={len(batch_errors)}",
+                flush=True,
+            )
         return out, errors
 
 
@@ -427,12 +482,13 @@ def benchmark_gigachat(
 ) -> dict:
     started = time.perf_counter()
     before_calls = client.usage.api_calls
+    print(f"[gigachat-probe] start segments={len(segments)} chars={sum(len(s.text) for s in segments)}", flush=True)
     translated, errors = client.translate_many(segments, memory, source_segments=source_segments)
     elapsed = max(0.001, time.perf_counter() - started)
     successful_chars = sum(len(segment.text) for segment in segments if segment.id in translated)
     cps = successful_chars / elapsed
     estimate = None if cps <= 0 else total_source_chars / cps * 1.15
-    return {
+    report = {
         "probe_segments": len(segments),
         "probe_success": len(translated),
         "probe_errors": errors,
@@ -444,3 +500,5 @@ def benchmark_gigachat(
         "api_calls": client.usage.api_calls - before_calls,
         "token_usage": client.usage.as_dict(),
     }
+    print("[gigachat-probe] done " + json.dumps(report, ensure_ascii=False, sort_keys=True), flush=True)
+    return report
