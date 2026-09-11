@@ -1,0 +1,84 @@
+name: t5-mt-probe
+
+on:
+  push:
+    branches: [mt-bakeoff-v1]
+    paths:
+      - 'scripts/t5_mt_probe.py'
+      - '.github/workflows/t5-mt-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BOOKAI_T5_MODEL: utrobinmv/t5_translate_en_ru_zh_large_1024_v2
+      BOOKAI_T5_CT2_DIR: .bookai-t5/t5-en-ru-zh-v2-ct2-int8
+      BOOKAI_T5_PROBE_SEGMENTS: '32'
+      TOKENIZERS_PARALLELISM: 'false'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Restore converted T5 cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .bookai-t5
+          key: t5-en-ru-zh-v2-ct2-int8-v1
+
+      - name: Install runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install -e '.[mt]'
+          pip install 'transformers>=4.50,<5' huggingface_hub sacremoses
+          python -m compileall -q scripts/t5_mt_probe.py src
+
+      - name: Convert specialized T5 to CTranslate2 INT8
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$BOOKAI_T5_CT2_DIR/model.bin" ]; then
+            rm -rf "$BOOKAI_T5_CT2_DIR"
+            mkdir -p .bookai-t5
+            ct2-transformers-converter \
+              --model "$BOOKAI_T5_MODEL" \
+              --output_dir "$BOOKAI_T5_CT2_DIR" \
+              --quantization int8 \
+              --copy_files spiece.model tokenizer_config.json special_tokens_map.json added_tokens.json
+          fi
+          test -f "$BOOKAI_T5_CT2_DIR/model.bin"
+          du -sh "$BOOKAI_T5_CT2_DIR"
+
+      - name: Run specialized T5 probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 30m python scripts/t5_mt_probe.py 2>&1 | tee t5-mt-probe.log
+
+      - name: Upload probe
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: t5-mt-probe-results
+          path: |
+            t5-mt-probe.json
+            t5-mt-probe-samples.json
+            t5-mt-probe.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Save converted T5 cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .bookai-t5
+          key: t5-en-ru-zh-v2-ct2-int8-v1
