@@ -62,6 +62,16 @@ def test_locked_glossary_accepts_russian_inflection_and_flags_drift():
     assert set(violations[original[0].id]) == {"Valens", "Orsea"}
 
 
+def test_locked_glossary_uses_whole_source_terms_not_substrings():
+    original = [segment(2, "The Eremians crossed the road.")]
+    translated = {original[0].id: "Эремийцы перешли дорогу."}
+    assert locked_glossary_violations(
+        original,
+        translated,
+        {"Eremia": "Эремия", "Eremians": "эремийцы"},
+    ) == {}
+
+
 def test_refinement_selector_prefers_complex_or_glossary_risk():
     targets = [
         segment(1, "Short sentence."),
