@@ -20,7 +20,7 @@ from .quality import batch_issues
 from .resilience import resilient_findings, resilient_segment_map
 
 
-FLASH_MODEL = "deepseek/deepseek-v4-flash-0731"
+FLASH_MODEL = "deepseek/deepseek-v4.1-flash"
 
 
 class LLMTranslator:
@@ -99,7 +99,7 @@ class TranslationHarness:
         reasoning = os.getenv("BOOKAI_REASONING") or "none"
 
         # This is a HARD ceiling, not a configurable default. The project may use
-        # a weaker/local draft backend, but no API role may exceed V4 Flash.
+        # a weaker/local draft backend, but no API role may exceed V4.1 Flash.
         requested_ceiling = (os.getenv("BOOKAI_MAX_MODEL") or FLASH_MODEL).strip()
         if requested_ceiling != FLASH_MODEL:
             print(
