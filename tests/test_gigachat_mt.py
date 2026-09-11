@@ -29,6 +29,13 @@ def test_parse_json_object_extracts_object_from_wrapper():
     assert parsed == {"s1": "Полный перевод"}
 
 
+def test_parse_json_object_normalizes_decorated_segment_id():
+    parsed = GigaChatLightningBackend._parse_json_object(
+        '{"[s000010]":"Первый перевод","s000011:":"Второй перевод"}'
+    )
+    assert parsed == {"s000010": "Первый перевод", "s000011": "Второй перевод"}
+
+
 def test_batching_respects_segment_count(monkeypatch):
     monkeypatch.setenv("GIGACHAT_AUTH_KEY", "stub")
     monkeypatch.setenv("BOOKAI_GIGACHAT_BATCH_SEGMENTS", "2")
