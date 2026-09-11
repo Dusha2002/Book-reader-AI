@@ -15,14 +15,13 @@ permissions:
 jobs:
   translate:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 180
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       BOOKAI_BASE_URL: https://openrouter.ai/api/v1
-      AZURE_TRANSLATOR_KEY: ${{ secrets.AZURE_TRANSLATOR_KEY }}
-      AZURE_TRANSLATOR_REGION: ${{ secrets.AZURE_TRANSLATOR_REGION }}
-      AZURE_TRANSLATOR_ENDPOINT: https://api.cognitive.microsofttranslator.com
-      BOOKAI_OPUS_MODEL_DIR: .bookai-opus/opus-mt-en-ru-ctranslate2-int8
+      GIGACHAT_AUTH_KEY: ${{ secrets.GIGACHAT_AUTH_KEY }}
+      GIGACHAT_SCOPE: GIGACHAT_API_PERS
+      GIGACHAT_BASE_URL: https://api.giga.chat/v1
 
     steps:
       - uses: actions/checkout@v4
@@ -31,61 +30,34 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Restore resumable book cache
+      - name: Restore GigaChat-v11 resumable book cache
         uses: actions/cache/restore@v4
         with:
-          path: .bookai-cache-reference-v10
-          key: bookai-reference-v10-${{ github.run_id }}
+          path: .bookai-cache-reference-v11-gigachat
+          key: bookai-reference-v11-gigachat-${{ github.run_id }}
           restore-keys: |
-            bookai-reference-v10-
+            bookai-reference-v11-gigachat-
 
-      - name: Restore tiny OPUS-MT cache
-        uses: actions/cache/restore@v4
-        with:
-          path: .bookai-opus
-          key: opus-mt-en-ru-ct2-int8-v1
-
-      - name: Install project and run tests
+      - name: Install project, GigaChat SDK and run tests
         shell: bash
         run: |
           set -euo pipefail
-          pip install -e '.[dev,mt]'
+          pip install -e '.[dev]' gigachat
           python -m compileall -q src scripts/hybrid_reference_translation.py scripts/rapid_reference_translation.py
           pytest -q
 
-      - name: Prepare tiny OPUS-MT INT8 fallback
+      - name: Verify GigaChat secret exists without exposing it
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "$BOOKAI_OPUS_MODEL_DIR/model.bin" ]; then
-            rm -rf .bookai-opus/download .bookai-opus/model.zip
-            mkdir -p .bookai-opus/download "$BOOKAI_OPUS_MODEL_DIR"
-            curl -L --fail --retry 3 \
-              'https://huggingface.co/ordois/opus-mt-en-ru-ctranslate2-int8/resolve/main/opus-mt-en-ru-ctranslate2-int8.zip?download=true' \
-              -o .bookai-opus/model.zip
-            unzip -q .bookai-opus/model.zip -d .bookai-opus/download
-            MODEL_BIN="$(find .bookai-opus/download -type f -name model.bin -print -quit)"
-            if [ -z "$MODEL_BIN" ]; then
-              echo 'OPUS-MT archive does not contain model.bin' >&2
-              exit 1
-            fi
-            MODEL_SRC="$(dirname "$MODEL_BIN")"
-            cp -a "$MODEL_SRC"/. "$BOOKAI_OPUS_MODEL_DIR"/
-            rm -rf .bookai-opus/download .bookai-opus/model.zip
-          fi
-          test -f "$BOOKAI_OPUS_MODEL_DIR/model.bin"
-          test -f "$BOOKAI_OPUS_MODEL_DIR/source.spm"
-          test -f "$BOOKAI_OPUS_MODEL_DIR/target.spm"
-          python - <<'PY'
-          from bookai.bulk_mt import OPUSMTBackend
-          backend = OPUSMTBackend()
-          assert backend.available(), backend.model_dir
-          print('[bulk-mt] opus_ready=' + str(backend.model_dir))
-          PY
+          test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
+          test -n "${OPENROUTER_API_KEY:-}" || { echo 'OPENROUTER_API_KEY is not configured' >&2; exit 1; }
+          echo '[bookai] gigachat_secret_present=1 openrouter_secret_present=1'
 
-      - name: Azure / OPUS → DeepSeek literary translation
+      - name: GigaChat Lightning → DeepSeek V4.1 Flash literary translation
         shell: bash
         env:
+          # DeepSeek is the reasoning/editorial layer, not the bulk translator.
           BOOKAI_TRANSLATOR_MODEL: deepseek/deepseek-v4.1-flash
           BOOKAI_ANALYZER_MODEL: deepseek/deepseek-v4.1-flash
           BOOKAI_GATE_MODEL: deepseek/deepseek-v4.1-flash
@@ -95,19 +67,20 @@ jobs:
           BOOKAI_LLM_GATE: 'false'
           BOOKAI_REASONING: none
 
-          # Free/cheap bulk path. Azure is preferred when its optional secret is configured;
-          # otherwise the ~80 MB OPUS-MT INT8 model runs locally on CPU.
-          BOOKAI_BULK_PROBE_SEGMENTS: '12'
-          BOOKAI_BULK_MAX_ESTIMATE_SECONDS: '1500'
-          BOOKAI_BULK_HARD_THRESHOLD: '4.8'
-          BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
-          BOOKAI_AZURE_WORKERS: '2'
-          BOOKAI_AZURE_REQUEST_CHARS: '45000'
-          BOOKAI_AZURE_REQUEST_ITEMS: '500'
-          BOOKAI_OPUS_BEAM_SIZE: '1'
-          BOOKAI_OPUS_MAX_BATCH: '256'
+          # Primary book translation: one PERS stream with multi-segment requests.
+          BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
+          BOOKAI_GIGACHAT_BATCH_SEGMENTS: '8'
+          BOOKAI_GIGACHAT_BATCH_CHARS: '12000'
+          BOOKAI_GIGACHAT_SPLIT_DEPTH: '5'
+          BOOKAI_GIGACHAT_MAX_TOKENS: '7000'
 
-          # Paid path is bounded and cannot become a silent whole-book fallback.
+          # Health/quality probe. Lightning is an intentional ~90 min PERS choice,
+          # so the gate rejects only pathological slowness, auth failure or poor QA.
+          BOOKAI_BULK_PROBE_SEGMENTS: '12'
+          BOOKAI_BULK_MAX_ESTIMATE_SECONDS: '9000'
+          BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
+
+          # DeepSeek remains bounded: hard prose, QA escalations and selected polish.
           BOOKAI_DEEPSEEK_SEGMENT_CAP: '300'
           BOOKAI_HYBRID_BATCH_CHARS: '16000'
           BOOKAI_RAPID_REFINE_MAX: '80'
@@ -116,16 +89,16 @@ jobs:
           BOOKAI_RETRY_ATTEMPTS: '2'
           BOOKAI_REQUEST_TIMEOUT: '180'
           BOOKAI_ANALYZER_REQUEST_TIMEOUT: '90'
+          BOOKAI_ANALYSIS_CHARS: '70000'
+          BOOKAI_STYLE_SAMPLE_CHARS: '12000'
+          BOOKAI_CONTEXT_WORKERS: '6'
         run: |
           set -euo pipefail
           test -f Devices_and_Desires.fb2
-          if [ -n "${AZURE_TRANSLATOR_KEY:-}" ]; then
-            echo '[bulk-mt] primary=azure-translator-v3 fallback=opus-int8'
-          else
-            echo '[bulk-mt] primary=opus-int8 azure=not-configured'
-          fi
-          echo '[bookai] cost_policy=fail-closed deepseek_segment_cap=300 refine_max=80'
-          timeout --signal=TERM --kill-after=30s 32m \
+          echo '[bookai] primary_translation=GigaChat-3-Lightning'
+          echo '[bookai] reasoning_analysis=DeepSeek-V4.1-Flash'
+          echo '[bookai] cost_policy=no-silent-whole-book-deepseek-fallback deepseek_segment_cap=300 refine_max=80'
+          timeout --signal=TERM --kill-after=30s 165m \
             python scripts/hybrid_reference_translation.py 2>&1 | tee hybrid-translation.log
 
       - name: Set Russian FB2 metadata when full artifact exists
@@ -177,11 +150,11 @@ jobs:
             --candidate Devices_and_Desires_RU_REFERENCE.fb2 \
             --output reference-quality-postflight.json 2>&1 | tee reference-postflight.log
 
-      - name: Upload hybrid diagnostics
+      - name: Upload GigaChat Lightning hybrid diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: azure-opus-hybrid-diagnostics
+          name: gigachat-lightning-deepseek-hybrid-diagnostics
           path: |
             hybrid-probe.json
             hybrid-routing.json
@@ -193,16 +166,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Save resumable book cache
+      - name: Save GigaChat-v11 resumable book cache
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: .bookai-cache-reference-v10
-          key: bookai-reference-v10-${{ github.run_id }}
-
-      - name: Save tiny OPUS-MT cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: .bookai-opus
-          key: opus-mt-en-ru-ct2-int8-v1
+          path: .bookai-cache-reference-v11-gigachat
+          key: bookai-reference-v11-gigachat-${{ github.run_id }}
