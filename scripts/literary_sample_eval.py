@@ -14,7 +14,6 @@ SOURCE = Path("Devices_and_Desires.fb2")
 OUT_JSON = Path("literary-sample-eval.json")
 OUT_MD = Path("literary-sample-eval.md")
 
-# Exact paragraph-level excerpts from the user's PDF benchmark.
 CASES = [
     {
         "case_id": "ch01-valens-fencing",
@@ -73,15 +72,14 @@ def _select(segments: list[Segment], case: dict) -> Segment:
         if not substantial:
             raise RuntimeError(f"No substantial source paragraph found in {case['chapter']}")
         chosen = substantial[0]
-        print(json.dumps({"alignment": case["case_id"], "segment": chosen.id, "chapter": chosen.chapter, "source_start": chosen.text[:180]}, ensure_ascii=False), flush=True)
-        return chosen
-
-    keys = [str(k).casefold() for k in case["must"]]
-    matches = [s for s in segments if all(k in s.text.casefold() for k in keys)]
-    if len(matches) != 1:
-        raise RuntimeError(f"Expected exactly one source match for {case['case_id']}, found {len(matches)}")
-    print(json.dumps({"alignment": case["case_id"], "segment": matches[0].id, "chapter": matches[0].chapter, "source_start": matches[0].text[:180]}, ensure_ascii=False), flush=True)
-    return matches[0]
+    else:
+        keys = [str(k).casefold() for k in case["must"]]
+        matches = [s for s in segments if all(k in s.text.casefold() for k in keys)]
+        if len(matches) != 1:
+            raise RuntimeError(f"Expected exactly one source match for {case['case_id']}, found {len(matches)}")
+        chosen = matches[0]
+    print(json.dumps({"alignment": case["case_id"], "segment": chosen.id, "chapter": chosen.chapter, "source_start": chosen.text[:180]}, ensure_ascii=False), flush=True)
+    return chosen
 
 
 def _memory() -> BookMemory:
@@ -105,6 +103,33 @@ ENGLISH SOURCE:\n{source}\n\nLIGHTNING:\n{lightning}\n\nDEEPSEEK-POLISHED:\n{pol
         return {"raw": text[:1500]}
 
 
+def _write_report(rows: list[dict], bulk, harness, started: float) -> None:
+    report = {
+        "architecture": "GigaChat-3-Lightning draft -> DeepSeek V4.1 Flash polish/judge",
+        "benchmark_alignment": "exact paragraph matching",
+        "requested_cases": len(CASES),
+        "completed_cases": sum(1 for r in rows if r.get("lightning")),
+        "elapsed_seconds": round(time.perf_counter() - started, 2),
+        "gigachat_usage": bulk.usage.as_dict(),
+        "deepseek_usage": harness.usage,
+        "rows": rows,
+    }
+    OUT_JSON.write_text(json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
+    md = ["# Literary sample evaluation — exact PDF alignment", ""]
+    for row in rows:
+        md += [f"## {row['case_id']} — {row['segment_id']}", "", "### English source", row["source"], ""]
+        if row.get("error"):
+            md += ["### Error", row["error"], ""]
+        else:
+            md += [
+                "### GigaChat-3-Lightning", row.get("lightning", ""), "",
+                "### DeepSeek V4.1 Flash polish", row.get("deepseek_polished", ""), "",
+                "### PDF reference", row["reference"], "",
+                "### Scores", "```json", json.dumps({"lightning": row.get("lightning_score"), "polished": row.get("polished_score")}, ensure_ascii=False, indent=2), "```", "",
+            ]
+    OUT_MD.write_text("\n".join(md), "utf-8")
+
+
 def main() -> None:
     document = load_book(SOURCE)
     selected = [_select(document.segments, case) for case in CASES]
@@ -117,58 +142,48 @@ def main() -> None:
     rows: list[dict] = []
     started = time.perf_counter()
     for case, segment in zip(CASES, selected):
-        t1 = time.perf_counter()
-        lightning_map, errors = bulk.translate_many([segment], memory, source_segments=document.segments)
-        lightning = lightning_map.get(segment.id, "")
-        lightning_seconds = time.perf_counter() - t1
-        if not lightning:
-            raise RuntimeError(f"GigaChat failed {case['case_id']}: {errors.get(segment.id)}")
-
-        t2 = time.perf_counter()
-        polished_map = harness.polish([segment], {segment.id: lightning}, memory, context=[])
-        polished = polished_map.get(segment.id, lightning)
-        polish_seconds = time.perf_counter() - t2
-        scores = _judge_pair(harness, segment.text, lightning, polished, case["reference"])
-
-        row = {
+        base = {
             "case_id": case["case_id"],
             "chapter": segment.chapter,
             "segment_id": segment.id,
             "source": segment.text,
-            "lightning": lightning,
-            "deepseek_polished": polished,
             "reference": case["reference"],
-            "lightning_score": scores.get("lightning", scores),
-            "polished_score": scores.get("polished", scores),
-            "lightning_seconds": round(lightning_seconds, 2),
-            "polish_seconds": round(polish_seconds, 2),
         }
+        try:
+            t1 = time.perf_counter()
+            lightning_map, errors = bulk.translate_many([segment], memory, source_segments=document.segments)
+            lightning = lightning_map.get(segment.id, "")
+            lightning_seconds = time.perf_counter() - t1
+            if not lightning:
+                raise RuntimeError(errors.get(segment.id) or "GigaChat returned no translation")
+
+            t2 = time.perf_counter()
+            polished_map = harness.polish([segment], {segment.id: lightning}, memory, context=[])
+            polished = polished_map.get(segment.id, lightning)
+            polish_seconds = time.perf_counter() - t2
+            try:
+                scores = _judge_pair(harness, segment.text, lightning, polished, case["reference"])
+            except Exception as exc:
+                scores = {"judge_error": f"{type(exc).__name__}: {exc}"}
+
+            row = {
+                **base,
+                "lightning": lightning,
+                "deepseek_polished": polished,
+                "lightning_score": scores.get("lightning", scores),
+                "polished_score": scores.get("polished", scores),
+                "lightning_seconds": round(lightning_seconds, 2),
+                "polish_seconds": round(polish_seconds, 2),
+            }
+            print(json.dumps({"case": case["case_id"], "segment": segment.id, "lightning_s": row["lightning_seconds"], "polish_s": row["polish_seconds"]}, ensure_ascii=False), flush=True)
+        except Exception as exc:
+            row = {**base, "error": f"{type(exc).__name__}: {exc}"}
+            print(json.dumps({"case": case["case_id"], "segment": segment.id, "error": row["error"]}, ensure_ascii=False), flush=True)
         rows.append(row)
-        print(json.dumps({"case": case["case_id"], "segment": segment.id, "lightning_s": row["lightning_seconds"], "polish_s": row["polish_seconds"]}, ensure_ascii=False), flush=True)
+        _write_report(rows, bulk, harness, started)
 
-    report = {
-        "architecture": "GigaChat-3-Lightning draft -> DeepSeek V4.1 Flash polish/judge",
-        "benchmark_alignment": "exact paragraph matching",
-        "cases": len(rows),
-        "elapsed_seconds": round(time.perf_counter() - started, 2),
-        "gigachat_usage": bulk.usage.as_dict(),
-        "deepseek_usage": harness.usage,
-        "rows": rows,
-    }
-    OUT_JSON.write_text(json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
-
-    md = ["# Literary sample evaluation — exact PDF alignment", ""]
-    for row in rows:
-        md += [
-            f"## {row['case_id']} — {row['segment_id']}", "",
-            "### English source", row["source"], "",
-            "### GigaChat-3-Lightning", row["lightning"], "",
-            "### DeepSeek V4.1 Flash polish", row["deepseek_polished"], "",
-            "### PDF reference", row["reference"], "",
-            "### Scores", "```json", json.dumps({"lightning": row["lightning_score"], "polished": row["polished_score"]}, ensure_ascii=False, indent=2), "```", "",
-        ]
-    OUT_MD.write_text("\n".join(md), "utf-8")
-    print(json.dumps({"phase": "done", "cases": len(rows), "elapsed_seconds": report["elapsed_seconds"], "gigachat_usage": bulk.usage.as_dict()}, ensure_ascii=False), flush=True)
+    _write_report(rows, bulk, harness, started)
+    print(json.dumps({"phase": "done", "requested_cases": len(CASES), "completed_cases": sum(1 for r in rows if r.get("lightning")), "gigachat_usage": bulk.usage.as_dict()}, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":
