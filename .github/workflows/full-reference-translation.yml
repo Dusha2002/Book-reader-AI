@@ -46,7 +46,7 @@ jobs:
           python -m compileall -q src scripts/hybrid_reference_translation.py scripts/rapid_reference_translation.py
           pytest -q
 
-      - name: Verify GigaChat secret exists without exposing it
+      - name: Verify API secrets without exposing them
         shell: bash
         run: |
           set -euo pipefail
@@ -54,10 +54,10 @@ jobs:
           test -n "${OPENROUTER_API_KEY:-}" || { echo 'OPENROUTER_API_KEY is not configured' >&2; exit 1; }
           echo '[bookai] gigachat_secret_present=1 openrouter_secret_present=1'
 
-      - name: GigaChat Lightning → DeepSeek V4.1 Flash literary translation
+      - name: Progressive GigaChat Lightning → DeepSeek V4.1 Flash translation
         shell: bash
         env:
-          # DeepSeek is the reasoning/editorial layer, not the bulk translator.
+          # DeepSeek V4.1 Flash is the only reasoning/editorial model.
           BOOKAI_TRANSLATOR_MODEL: deepseek/deepseek-v4.1-flash
           BOOKAI_ANALYZER_MODEL: deepseek/deepseek-v4.1-flash
           BOOKAI_GATE_MODEL: deepseek/deepseek-v4.1-flash
@@ -67,22 +67,23 @@ jobs:
           BOOKAI_LLM_GATE: 'false'
           BOOKAI_REASONING: none
 
-          # Primary book translation: one PERS stream with multi-segment requests.
+          # Primary book translation: one PERS stream, small enough batches to make
+          # early pages readable quickly and recursive JSON recovery for failures.
           BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
           BOOKAI_GIGACHAT_BATCH_SEGMENTS: '8'
           BOOKAI_GIGACHAT_BATCH_CHARS: '12000'
-          BOOKAI_GIGACHAT_SPLIT_DEPTH: '5'
+          BOOKAI_GIGACHAT_SPLIT_DEPTH: '6'
           BOOKAI_GIGACHAT_MAX_TOKENS: '7000'
+          BOOKAI_GIGACHAT_RECOVERY_ROUNDS: '3'
 
-          # Health/quality probe. Lightning is an intentional ~90 min PERS choice,
-          # so the gate rejects only pathological slowness, auth failure or poor QA.
           BOOKAI_BULK_PROBE_SEGMENTS: '12'
           BOOKAI_BULK_MAX_ESTIMATE_SECONDS: '9000'
           BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
 
-          # DeepSeek remains bounded: hard prose, QA escalations and selected polish.
+          # DeepSeek is bounded: analysis/style/context + genuinely hard prose +
+          # QA/recovery/refinement. There is no V4 Pro and no whole-book fallback.
           BOOKAI_DEEPSEEK_SEGMENT_CAP: '300'
-          BOOKAI_HYBRID_BATCH_CHARS: '16000'
+          BOOKAI_HYBRID_BATCH_CHARS: '9000'
           BOOKAI_RAPID_REFINE_MAX: '80'
           BOOKAI_RAPID_REFINE_WORKERS: '4'
           BOOKAI_RAPID_REFINE_BATCH_CHARS: '8000'
@@ -97,11 +98,12 @@ jobs:
           test -f Devices_and_Desires.fb2
           echo '[bookai] primary_translation=GigaChat-3-Lightning'
           echo '[bookai] reasoning_analysis=DeepSeek-V4.1-Flash'
-          echo '[bookai] cost_policy=no-silent-whole-book-deepseek-fallback deepseek_segment_cap=300 refine_max=80'
+          echo '[bookai] external_pro_judge=disabled'
+          echo '[bookai] mode=progressive partial_fb2_after_each_batch=1'
           timeout --signal=TERM --kill-after=30s 165m \
             python scripts/hybrid_reference_translation.py 2>&1 | tee hybrid-translation.log
 
-      - name: Set Russian FB2 metadata when full artifact exists
+      - name: Set Russian FB2 metadata when any partial/full artifact exists
         if: always()
         shell: bash
         run: |
@@ -110,7 +112,7 @@ jobs:
           from lxml import etree
           path = Path('Devices_and_Desires_RU_REFERENCE.fb2')
           if not path.exists():
-              print('[metadata] no full FB2 produced in this run')
+              print('[metadata] no FB2 snapshot produced in this run')
               raise SystemExit(0)
           tree = etree.parse(str(path))
           titles = tree.xpath("//*[local-name()='description']/*[local-name()='title-info']/*[local-name()='book-title']")
@@ -120,48 +122,20 @@ jobs:
           if langs:
               langs[0].text = 'ru'
           tree.write(str(path), encoding='utf-8', xml_declaration=True, pretty_print=False)
-          print('[metadata] updated')
+          print('[metadata] updated partial/full snapshot')
           PY
 
-      - name: Independent V4 Pro benchmark only for a complete book
-        if: always()
-        continue-on-error: true
-        shell: bash
-        run: |
-          if [ ! -f reference-progress.json ]; then
-            echo '[postflight] no complete-book progress report; benchmark deferred'
-            exit 0
-          fi
-          if ! python - <<'PY'
-          import json
-          from pathlib import Path
-          p = Path('reference-progress.json')
-          ok = p.exists() and json.loads(p.read_text('utf-8')).get('status') == 'complete'
-          raise SystemExit(0 if ok else 1)
-          PY
-          then
-            echo '[postflight] partial/diagnostic run; benchmark deferred'
-            exit 0
-          fi
-          test -n "${OPENROUTER_API_KEY:-}"
-          export BOOKAI_REFERENCE_JUDGE_MODEL='deepseek/deepseek-v4-pro-0813'
-          export BOOKAI_REASONING='none'
-          python scripts/reference_quality_gate_v2.py \
-            --candidate Devices_and_Desires_RU_REFERENCE.fb2 \
-            --output reference-quality-postflight.json 2>&1 | tee reference-postflight.log
-
-      - name: Upload GigaChat Lightning hybrid diagnostics
+      - name: Upload progressive translation snapshot and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gigachat-lightning-deepseek-hybrid-diagnostics
+          name: gigachat-lightning-progressive-translation
           path: |
             hybrid-probe.json
             hybrid-routing.json
             hybrid-sample.json
             hybrid-translation.log
             reference-progress.json
-            reference-quality-postflight.json
             Devices_and_Desires_RU_REFERENCE.fb2
           if-no-files-found: ignore
           retention-days: 7
