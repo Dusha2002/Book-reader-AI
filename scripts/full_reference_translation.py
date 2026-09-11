@@ -23,14 +23,7 @@ def _sanitize_resume_state(
     state: dict,
     chapters: list[tuple[str, list[Segment]]],
 ) -> tuple[dict, dict]:
-    """Keep every usable cached translation, including unfinished chapters.
-
-    The old strict resume policy deleted a whole unfinished chapter unless it had
-    already passed every QA gate. That made transient model/JSON failures extremely
-    expensive because the next run translated the same material again. Best-effort
-    mode keeps all non-empty source translations and only revokes chapter-level
-    completion claims that are impossible because ids are missing.
-    """
+    """Keep every usable cached translation, including unfinished chapters."""
     original = dict(state.get("translations") or {})
     source_ids = {segment.id for _, chapter in chapters for segment in chapter}
     translations = {
@@ -113,6 +106,92 @@ def _cached_state(source: Path, cache_dir: Path, mode: str = "optimal") -> dict:
         return {}
 
 
+def _chapter_lookup() -> dict[str, list[Segment]]:
+    document = load_book(SOURCE)
+    targets = [segment for segment in document.segments if _should_translate(segment.text)]
+    return {name: chapter for name, chapter in _chapter_groups(targets)}
+
+
+def _waivable_failure(error: BaseException) -> tuple[str, str] | None:
+    """Return (stage, chapter) only for failures where usable prose already exists."""
+    text = str(error)
+    polish_prefix = "Literary polish failed strict acceptance in chapter "
+    if text.startswith(polish_prefix):
+        return "polish", text[len(polish_prefix):].strip()
+
+    qa_prefix = "Chapter "
+    qa_marker = " failed final literary QA;"
+    if text.startswith(qa_prefix) and qa_marker in text:
+        chapter = text[len(qa_prefix):].split(qa_marker, 1)[0].strip()
+        return "qa", chapter
+    return None
+
+
+def _record_best_effort_waiver(error: BaseException) -> dict | None:
+    """Let a fully translated chapter continue despite polish/QA failure.
+
+    We never fabricate a missing translation. A waiver is allowed only when every
+    source id in the chapter already has non-empty cached Russian text. The exact
+    failure is retained in cache metadata so the chapter can be revisited later.
+    """
+    classified = _waivable_failure(error)
+    if classified is None:
+        return None
+    stage, chapter_name = classified
+
+    state_path = _cache_path(SOURCE, CACHE, "optimal")
+    state = _cached_state(SOURCE, CACHE)
+    if not state or state.get("pipeline_version") != PIPELINE_VERSION:
+        return None
+
+    chapter = _chapter_lookup().get(chapter_name)
+    if not chapter:
+        return None
+    chapter_ids = {segment.id for segment in chapter}
+    translations = {
+        str(sid): text
+        for sid, text in dict(state.get("translations") or {}).items()
+        if isinstance(text, str) and text.strip()
+    }
+    if not chapter_ids or not chapter_ids.issubset(translations):
+        return None
+
+    polished = set(state.get("polished_chapters") or [])
+    completed = set(state.get("completed_chapters") or [])
+    qa_passed = set(state.get("qa_passed_chapters") or [])
+
+    # A polish waiver means: keep the faithful draft and proceed to deterministic
+    # and optional semantic QA on the next loop. A QA waiver means: keep the fully
+    # translated chapter as usable-but-flagged and move to the next chapter.
+    polished.add(chapter_name)
+    if stage == "qa":
+        completed.add(chapter_name)
+        qa_passed.add(chapter_name)
+
+    state["polished_chapters"] = sorted(polished)
+    state["completed_chapters"] = sorted(completed)
+    state["qa_passed_chapters"] = sorted(qa_passed)
+    state.pop("final_quality", None)
+
+    waivers = dict(state.get("best_effort_waivers") or {})
+    history = list(waivers.get(chapter_name) or [])
+    entry = {"stage": stage, "error": str(error)[:2000]}
+    if entry not in history:
+        history.append(entry)
+    waivers[chapter_name] = history
+    state["best_effort_waivers"] = waivers
+    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
+
+    result = {
+        "stage": stage,
+        "chapter": chapter_name,
+        "chapter_segments": len(chapter_ids),
+        "waived_chapters": len(waivers),
+    }
+    print("[full-reference] best_effort_waiver=" + json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)
+    return result
+
+
 def _write_latest_artifact(error: BaseException | None = None) -> dict:
     """Build the newest usable FB2 even when the strict pipeline aborted midway."""
     document = load_book(SOURCE)
@@ -130,7 +209,11 @@ def _write_latest_artifact(error: BaseException | None = None) -> dict:
     if translated:
         save_book(document, translations, OUTPUT)
 
-    status = "complete" if error is None and translated == total else "partial"
+    if translated == total:
+        status = "complete" if error is None else "complete_with_warnings"
+    else:
+        status = "partial"
+    waivers = dict(state.get("best_effort_waivers") or {})
     report = {
         "status": status,
         "translated_segments": translated,
@@ -138,6 +221,8 @@ def _write_latest_artifact(error: BaseException | None = None) -> dict:
         "completion_percent": round((translated / total * 100.0) if total else 0.0, 2),
         "remaining_segments": max(0, total - translated),
         "qa_passed_chapters": list(state.get("qa_passed_chapters") or []),
+        "best_effort_waived_chapters": sorted(waivers),
+        "best_effort_waiver_count": len(waivers),
         "output_exists": OUTPUT.exists(),
         "output_bytes": OUTPUT.stat().st_size if OUTPUT.exists() else 0,
         "error_type": type(error).__name__ if error is not None else None,
@@ -156,29 +241,41 @@ def main() -> None:
     print("[full-reference] resume=" + json.dumps(resume, ensure_ascii=False, sort_keys=True), flush=True)
 
     harness = build_reference_harness()
-    try:
-        result = translate_book(
-            SOURCE,
-            OUTPUT,
-            harness,
-            mode="optimal",
-            cache_dir=CACHE,
-            progress=progress,
-            memory_updates=True,
-        )
-        print(f"[full-reference] output={result} bytes={result.stat().st_size}", flush=True)
-        print("[full-reference] usage=" + json.dumps(harness.usage, ensure_ascii=False), flush=True)
-        _write_latest_artifact(None)
-    except Exception as exc:
-        report = _write_latest_artifact(exc)
-        if report["translated_segments"] <= 0:
-            raise
-        print(
-            "[full-reference] best_effort_recovered=true; strict pipeline stopped, "
-            "but cached translation was exported and the workflow may continue",
-            flush=True,
-        )
-        print("[full-reference] usage=" + json.dumps(harness.usage, ensure_ascii=False), flush=True)
+    # One bad chapter must not end a whole-book run. Each safe waiver is persisted,
+    # then translate_book resumes and skips only that already-complete flagged chapter.
+    max_waivers = 128
+    for _ in range(max_waivers + 1):
+        try:
+            result = translate_book(
+                SOURCE,
+                OUTPUT,
+                harness,
+                mode="optimal",
+                cache_dir=CACHE,
+                progress=progress,
+                memory_updates=True,
+            )
+            print(f"[full-reference] output={result} bytes={result.stat().st_size}", flush=True)
+            print("[full-reference] usage=" + json.dumps(harness.usage, ensure_ascii=False), flush=True)
+            _write_latest_artifact(None)
+            return
+        except Exception as exc:
+            report = _write_latest_artifact(exc)
+            waiver = _record_best_effort_waiver(exc)
+            if waiver is not None:
+                continue
+            if report["translated_segments"] <= 0:
+                raise
+            print(
+                "[full-reference] best_effort_recovered=true; strict pipeline stopped, "
+                "but cached translation was exported and the workflow may continue",
+                flush=True,
+            )
+            print("[full-reference] usage=" + json.dumps(harness.usage, ensure_ascii=False), flush=True)
+            return
+
+    report = _write_latest_artifact(RuntimeError("best-effort waiver limit reached"))
+    print("[full-reference] waiver_limit_reached=true report=" + json.dumps(report, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":
