@@ -53,6 +53,54 @@ def _candidate_bad(segment: Segment, candidate: str, memory: BookMemory) -> bool
     return bool(locked_glossary_violations([segment], mapping, REFERENCE_GLOSSARY_SEED))
 
 
+def _readable_through(targets: list[Segment], translated: dict[str, str]) -> int:
+    count = 0
+    for segment in targets:
+        if segment.id not in translated:
+            break
+        count += 1
+    return count
+
+
+def _publish_partial(
+    document,
+    targets: list[Segment],
+    translated: dict[str, str],
+    state: dict,
+    memory: BookMemory,
+    stats: HybridStats,
+    bulk: GigaChatLightningBackend,
+    *,
+    phase: str = "hybrid_batch_done",
+    unresolved: int = 0,
+) -> None:
+    """Persist state and a readable mixed-language snapshot after every accepted batch."""
+    state_path = _cache_path(SOURCE, CACHE, "optimal")
+    state["hybrid_stats"] = stats.as_dict()
+    state["bulk_backend"] = bulk.backend_name
+    state["gigachat_usage"] = bulk.usage.as_dict()
+    state["unresolved_segments"] = unresolved
+    atomic_persist(state_path, state, translated, memory)
+    save_book(document, translated, OUTPUT)
+    completed = sum(segment.id in translated for segment in targets)
+    readable = _readable_through(targets, translated)
+    progress(
+        {
+            "phase": phase,
+            "completed": completed,
+            "total": len(targets),
+            "progress": round(completed / max(1, len(targets)) * 100, 2),
+            "readable_through": readable,
+            "readable_percent": round(readable / max(1, len(targets)) * 100, 2),
+            "unresolved": unresolved,
+            "partial_output": str(OUTPUT),
+            "gigachat_api_calls": bulk.usage.api_calls,
+            "gigachat_tokens": bulk.usage.total_tokens,
+            **stats.as_dict(),
+        }
+    )
+
+
 def _translate_hybrid_batch(
     harness,
     bulk: GigaChatLightningBackend,
@@ -60,7 +108,8 @@ def _translate_hybrid_batch(
     batch: list[Segment],
     memory: BookMemory,
     stats: HybridStats,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], set[str]]:
+    """Return every usable translation now; failed GigaChat ids are deferred, never fatal."""
     decisions = {segment.id: decide_route(segment) for segment in batch}
     bulk_targets = [segment for segment in batch if decisions[segment.id].route != "deepseek"]
     direct_deep = [segment for segment in batch if decisions[segment.id].route == "deepseek"]
@@ -70,24 +119,16 @@ def _translate_hybrid_batch(
         memory,
         source_segments=source_segments,
     )
-    max_errors = max(2, math.ceil(len(bulk_targets) * 0.15)) if bulk_targets else 0
-    if len(bulk_errors) > max_errors:
-        raise RuntimeError(
-            f"GigaChat bulk translation unhealthy: {len(bulk_errors)}/{len(bulk_targets)} segments failed; "
-            "refusing silent whole-book DeepSeek fallback"
-        )
-
     qa_bad_ids = {
         segment.id
         for segment in bulk_targets
         if segment.id in bulk_map and _candidate_bad(segment, bulk_map[segment.id], memory)
     }
     error_ids = set(bulk_errors)
-    escalated_ids = qa_bad_ids | error_ids
     accepted_bulk = {
         segment.id: bulk_map[segment.id]
         for segment in bulk_targets
-        if segment.id in bulk_map and segment.id not in escalated_ids
+        if segment.id in bulk_map and segment.id not in qa_bad_ids
     }
 
     stats.add(
@@ -98,16 +139,19 @@ def _translate_hybrid_batch(
         deep_direct=len(direct_deep),
     )
 
-    deep_targets = direct_deep + [
-        segment for segment in bulk_targets if segment.id in escalated_ids
-    ]
+    # GigaChat transport/JSON failures are NOT paid-model escalations. They remain
+    # in a retry queue and are retried as single segments later. DeepSeek is used
+    # only for structurally hard prose or a translation that actually failed QA.
+    deep_targets = direct_deep + [segment for segment in bulk_targets if segment.id in qa_bad_ids]
     cap = max(0, int(os.getenv("BOOKAI_DEEPSEEK_SEGMENT_CAP") or "300"))
     projected = stats.deep_direct + stats.deep_escalated + max(0, len(deep_targets) - len(direct_deep))
     if cap and projected > cap:
-        raise RuntimeError(
-            f"DeepSeek segment cap would be exceeded: projected={projected} cap={cap}; "
-            "refusing silent whole-book paid fallback"
-        )
+        # Preserve the already good GigaChat work instead of killing the whole run.
+        overflow = projected - cap
+        if overflow > 0:
+            qa_slots = max(0, len(qa_bad_ids) - overflow)
+            allowed_qa = [segment for segment in deep_targets if segment not in direct_deep][:qa_slots]
+            deep_targets = direct_deep + allowed_qa
 
     result = dict(accepted_bulk)
     if deep_targets:
@@ -120,17 +164,23 @@ def _translate_hybrid_batch(
         )
         result.update(deep_map)
         stats.add(
-            deep_escalated=len(deep_targets) - len(direct_deep),
+            deep_escalated=max(0, len(deep_targets) - len(direct_deep)),
             source_chars_deep=sum(len(segment.text) for segment in deep_targets),
         )
 
-    hard = hard_ids(batch_issues(batch, result, memory))
-    glossary = locked_glossary_violations(batch, result, REFERENCE_GLOSSARY_SEED)
-    missing = [segment.id for segment in batch if segment.id not in result]
-    if hard or glossary or missing:
-        problem = sorted(set(hard) | set(glossary) | set(missing))
-        raise ValueError("hybrid batch final QA failed: " + ", ".join(problem[:20]))
-    return result
+    # Reject only the problematic ids. Good ids from the same batch are published
+    # immediately instead of being discarded because one neighbour failed.
+    resolved_segments = [segment for segment in batch if segment.id in result]
+    hard = set(hard_ids(batch_issues(resolved_segments, result, memory))) if resolved_segments else set()
+    glossary = set(locked_glossary_violations(resolved_segments, result, REFERENCE_GLOSSARY_SEED)) if resolved_segments else set()
+    rejected = hard | glossary
+    for sid in rejected:
+        result.pop(sid, None)
+
+    unresolved = error_ids | rejected
+    # A QA-bad GigaChat id that could not fit under the DeepSeek cap remains pending.
+    unresolved.update(sid for sid in qa_bad_ids if sid not in result)
+    return result, unresolved
 
 
 def _run_cost_safe_sample(
@@ -139,7 +189,6 @@ def _run_cost_safe_sample(
     memory: BookMemory,
     probe: dict,
 ) -> dict:
-    """Diagnostic fallback with zero DeepSeek calls."""
     candidates = [segment for segment in targets if _is_bulk(segment)]
     count = min(30, len(candidates))
     if count <= 0:
@@ -179,6 +228,89 @@ def _run_cost_safe_sample(
     return report
 
 
+def _retry_gigachat_failures(
+    bulk: GigaChatLightningBackend,
+    targets: list[Segment],
+    translated: dict[str, str],
+    pending_ids: set[str],
+    memory: BookMemory,
+    document,
+    state: dict,
+    stats: HybridStats,
+) -> set[str]:
+    by_id = {segment.id: segment for segment in targets}
+    rounds = max(1, min(4, int(os.getenv("BOOKAI_GIGACHAT_RECOVERY_ROUNDS") or "3")))
+    remaining = set(pending_ids)
+    for round_index in range(1, rounds + 1):
+        if not remaining:
+            break
+        next_remaining: set[str] = set()
+        # Single-segment retries avoid the JSON batching failures that caused the
+        # old workflow to abort at 2.47%.
+        for sid in sorted(remaining, key=lambda value: int(value[1:]) if value[1:].isdigit() else value):
+            segment = by_id.get(sid)
+            if segment is None:
+                continue
+            rows, errors = bulk.translate_many([segment], memory, source_segments=targets)
+            candidate = rows.get(sid)
+            if candidate and not _candidate_bad(segment, candidate, memory):
+                translated[sid] = candidate
+                stats.add(bulk_accepted=1, source_chars_bulk=len(segment.text))
+            else:
+                next_remaining.add(sid)
+        remaining = next_remaining
+        _publish_partial(
+            document,
+            targets,
+            translated,
+            state,
+            memory,
+            stats,
+            bulk,
+            phase="gigachat_recovery_round",
+            unresolved=len(remaining),
+        )
+        progress({"phase": "gigachat_recovery", "round": round_index, "remaining": len(remaining)})
+    return remaining
+
+
+def _deepseek_final_recovery(
+    harness,
+    targets: list[Segment],
+    translated: dict[str, str],
+    pending_ids: set[str],
+    memory: BookMemory,
+    stats: HybridStats,
+) -> set[str]:
+    """Rare bounded recovery after repeated single-segment GigaChat failures."""
+    if not pending_ids:
+        return set()
+    by_id = {segment.id: segment for segment in targets}
+    cap = max(0, int(os.getenv("BOOKAI_DEEPSEEK_SEGMENT_CAP") or "300"))
+    used = stats.deep_direct + stats.deep_escalated
+    slots = max(0, cap - used) if cap else len(pending_ids)
+    recover_ids = list(sorted(pending_ids))[:slots]
+    still = set(pending_ids) - set(recover_ids)
+    for batch_ids in [recover_ids[i:i + 8] for i in range(0, len(recover_ids), 8)]:
+        batch = [by_id[sid] for sid in batch_ids if sid in by_id]
+        if not batch:
+            continue
+        before, after = _context_for(targets, batch, radius=3)
+        try:
+            rows = harness.translate(batch, memory, context_before=before, context_after=after)
+        except Exception:
+            still.update(segment.id for segment in batch)
+            continue
+        for segment in batch:
+            candidate = rows.get(segment.id)
+            if candidate and not _candidate_bad(segment, candidate, memory):
+                translated[segment.id] = candidate
+                stats.add(deep_escalated=1, source_chars_deep=len(segment.text))
+            else:
+                still.add(segment.id)
+    return still
+
+
 def _run_full(
     harness,
     bulk: GigaChatLightningBackend,
@@ -188,10 +320,6 @@ def _run_full(
     state: dict,
 ) -> dict:
     state_path = _cache_path(SOURCE, CACHE, "optimal")
-
-    # DeepSeek V4.1 Flash is deliberately used for book-level reasoning before
-    # GigaChat sees the bulk prose: analysis, abstract style card, chapter digests,
-    # compact synopsis, glossary/context preparation and later selective refinement.
     memory = _load_or_build_memory(harness, state, chapters)
     memory, chapter_digests, book_synopsis = _prepare_literary_context(
         harness,
@@ -206,7 +334,14 @@ def _run_full(
         if isinstance(text, str) and text.strip()
     }
     stats = HybridStats()
-    batch_chars = max(6000, int(os.getenv("BOOKAI_HYBRID_BATCH_CHARS") or "16000"))
+    pending_retry: set[str] = set()
+
+    # Publish restored work immediately so a restarted translation remains readable.
+    if translated:
+        save_book(document, translated, OUTPUT)
+        _publish_partial(document, targets, translated, state, memory, stats, bulk, phase="resume_published")
+
+    batch_chars = max(4000, int(os.getenv("BOOKAI_HYBRID_BATCH_CHARS") or "9000"))
     batches = [
         [segment for segment in batch if segment.id not in translated]
         for batch in _batches(targets, batch_chars)
@@ -219,7 +354,7 @@ def _run_full(
             "total": len(targets),
             "batches": len(batches),
             "bulk_backend": bulk.backend_name,
-            "strategy": "GigaChat-3-Lightning→deterministic-QA→DeepSeek-V4.1-Flash-hard-or-failed-only",
+            "strategy": "progressive:GigaChat-Lightning→publish-now→retry-failures→DeepSeek-hard/reasoning-only",
         }
     )
 
@@ -231,7 +366,7 @@ def _run_full(
             book_synopsis,
             context_index,
         )
-        accepted = _translate_hybrid_batch(
+        accepted, unresolved = _translate_hybrid_batch(
             harness,
             bulk,
             targets,
@@ -240,26 +375,62 @@ def _run_full(
             stats,
         )
         translated.update(accepted)
-        state["hybrid_stats"] = stats.as_dict()
-        state["bulk_backend"] = bulk.backend_name
-        state["gigachat_usage"] = bulk.usage.as_dict()
-        atomic_persist(state_path, state, translated, memory)
-        completed = sum(segment.id in translated for segment in targets)
-        progress(
-            {
-                "phase": "hybrid_batch_done",
-                "completed": completed,
-                "total": len(targets),
-                "progress": round(completed / max(1, len(targets)) * 100, 2),
-                "gigachat_api_calls": bulk.usage.api_calls,
-                "gigachat_tokens": bulk.usage.total_tokens,
-                **stats.as_dict(),
-            }
+        pending_retry.update(unresolved)
+        pending_retry.difference_update(translated)
+        _publish_partial(
+            document,
+            targets,
+            translated,
+            state,
+            memory,
+            stats,
+            bulk,
+            unresolved=len(pending_retry),
+        )
+
+    pending_retry = _retry_gigachat_failures(
+        bulk,
+        targets,
+        translated,
+        pending_retry,
+        memory,
+        document,
+        state,
+        stats,
+    )
+    if pending_retry:
+        progress({"phase": "deepseek_bounded_recovery", "segments": len(pending_retry)})
+        pending_retry = _deepseek_final_recovery(
+            harness,
+            targets,
+            translated,
+            pending_retry,
+            memory,
+            stats,
+        )
+        _publish_partial(
+            document,
+            targets,
+            translated,
+            state,
+            memory,
+            stats,
+            bulk,
+            phase="deepseek_recovery_done",
+            unresolved=len(pending_retry),
         )
 
     missing = [segment.id for segment in targets if segment.id not in translated]
     if missing:
-        raise RuntimeError(f"hybrid translation left {len(missing)} missing ids: " + ", ".join(missing[:20]))
+        # Keep the partial FB2 and resumable cache instead of deleting useful work.
+        state["status"] = "partial"
+        state["missing_ids"] = missing
+        atomic_persist(state_path, state, translated, memory)
+        save_book(document, translated, OUTPUT)
+        raise RuntimeError(
+            f"Progressive translation paused with {len(missing)} unresolved segments; "
+            "partial FB2 and cache were preserved: " + ", ".join(missing[:20])
+        )
 
     translated = _repair_hard_failures(
         harness,
@@ -271,6 +442,8 @@ def _run_full(
         book_synopsis=book_synopsis,
         context_index=context_index,
     )
+    save_book(document, translated, OUTPUT)
+
     translated = _selective_literary_refinement(
         harness,
         targets,
@@ -281,19 +454,21 @@ def _run_full(
         book_synopsis=book_synopsis,
         context_index=context_index,
     )
-
     save_book(document, translated, OUTPUT)
+
     state["completed_chapters"] = [
         name for name, chapter in chapters
         if all(segment.id in translated for segment in chapter)
     ]
+    state["status"] = "complete"
     state["final_quality"] = {
         "hard_issues": 0,
         "segments": len(targets),
-        "strategy": "gigachat-lightning-deepseek-v41-hybrid-v1",
+        "strategy": "progressive-gigachat-lightning-deepseek-v41-v2",
         "primary_mt": bulk.backend_name,
-        "deepseek_role": "book-analysis+style-card+synopsis+chapter-digests+hard-routing+qa-escalation+bounded-literary-refinement",
-        "gigachat_role": "primary-literary-draft",
+        "deepseek_role": "analysis+style+context+hard-prose+bounded-recovery+selective-refinement",
+        "gigachat_role": "primary-progressive-literary-translation",
+        "external_pro_judge": False,
         "hybrid_stats": stats.as_dict(),
         "gigachat_usage": bulk.usage.as_dict(),
     }
@@ -305,6 +480,8 @@ def _run_full(
             "progress": 100,
             "completed": len(targets),
             "total": len(targets),
+            "readable_through": len(targets),
+            "readable_percent": 100,
             "bulk_backend": bulk.backend_name,
             "gigachat_api_calls": bulk.usage.api_calls,
             "gigachat_tokens": bulk.usage.total_tokens,
@@ -401,6 +578,8 @@ def main() -> None:
         "reasoning_analysis": "deepseek/deepseek-v4.1-flash",
         "hard_translation": "deepseek/deepseek-v4.1-flash",
         "literary_refinement": "deepseek/deepseek-v4.1-flash",
+        "external_pro_judge": None,
+        "progressive_publish": True,
         "full_paid_fallback": False,
     }
     _run_full(harness, bulk, document, targets, chapters, state)
