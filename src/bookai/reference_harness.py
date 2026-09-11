@@ -15,7 +15,7 @@ from .reference_profile import apply_reference_profile
 from .resilience import resilient_findings
 
 
-FLASH_MODEL = "deepseek/deepseek-v4-flash-0731"
+FLASH_MODEL = "deepseek/deepseek-v4.1-flash"
 # Compatibility constant for the independent benchmark judge only.
 # ReferenceTranslationHarness itself hard-forces every operational role to FLASH_MODEL.
 PRO_MODEL = "deepseek/deepseek-v4-pro-0813"
@@ -310,7 +310,7 @@ def build_reference_harness() -> ReferenceTranslationHarness:
     def capped(model: str, role: str, default_cap: int) -> CappedOpenAICompatibleProvider:
         cap = int(os.getenv(f"BOOKAI_{role.upper()}_MAX_TOKENS") or default_cap)
         return CappedOpenAICompatibleProvider(key, base, model, reasoning, role=role, max_tokens=cap)
-    print("[bookai-v10] strategy=flash-only+contextual-sentence-micro-batches+isolated-long-sentences+explicit-semantic-confirmation external_reference_judge=separate", flush=True)
+    print("[bookai-v10] strategy=v4.1-flash-only+contextual-sentence-micro-batches+isolated-long-sentences+explicit-semantic-confirmation external_reference_judge=separate", flush=True)
     translator_provider = normal(translator_model, "translator")
     return ReferenceTranslationHarness(
         analyzer=capped(analyzer_model, "analyzer", 4096),
