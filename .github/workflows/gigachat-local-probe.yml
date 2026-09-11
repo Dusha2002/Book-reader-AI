@@ -1,0 +1,77 @@
+name: gigachat-local-probe
+
+on:
+  push:
+    branches: [mt-bakeoff-v1]
+    paths:
+      - '.github/workflows/gigachat-local-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      BOOKAI_BAKEOFF_SEGMENTS: '32'
+      BOOKAI_LOCAL_LLM_WORKERS: '2'
+      BOOKAI_LOCAL_LLM_TIMEOUT: '180'
+      BOOKAI_LOCAL_LLM_URL: http://127.0.0.1:8080/v1
+      BOOKAI_LOCAL_LLM_NAME: gigachat3-10b-a1.8b-q4-chatml
+      BOOKAI_RU_LLM_REPORT: russian-llm-bakeoff-gigachat3-10b-a1.8b-q4-chatml.json
+      BOOKAI_RU_LLM_SAMPLES: russian-llm-bakeoff-gigachat3-10b-a1.8b-q4-chatml-samples.json
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install -e .
+          curl -LsSf https://llama.app/install.sh | SKIP_CUDA=1 SKIP_ROCM=1 SKIP_VULKAN=1 sh
+      - name: Start GigaChat with explicit ChatML template
+        shell: bash
+        run: |
+          set -euo pipefail
+          ~/.llama-app/llama serve \
+            -hf 'bartowski/ai-sage_GigaChat3-10B-A1.8B-GGUF:Q4_K_M' \
+            -a 'gigachat3-10b-a1.8b-q4-chatml' \
+            -c 4096 -np 2 -t "$(nproc)" -ngl 0 \
+            --no-jinja --chat-template chatml --no-webui \
+            > llama-gigachat-chatml.log 2>&1 &
+          echo $! > llama.pid
+          for i in $(seq 1 180); do
+            if curl -fsS http://127.0.0.1:8080/v1/models >/tmp/models.json 2>/dev/null; then
+              cat /tmp/models.json
+              exit 0
+            fi
+            if ! kill -0 "$(cat llama.pid)" 2>/dev/null; then
+              tail -200 llama-gigachat-chatml.log >&2 || true
+              exit 1
+            fi
+            sleep 5
+          done
+          tail -200 llama-gigachat-chatml.log >&2 || true
+          exit 1
+      - name: Translate the same 32 Parker segments
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout --signal=TERM --kill-after=30s 25m python scripts/russian_llm_bakeoff.py 2>&1 | tee russian-llm-gigachat-chatml.log
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: russian-llm-bakeoff-gigachat3-chatml
+          path: |
+            russian-llm-bakeoff-gigachat3-10b-a1.8b-q4-chatml.json
+            russian-llm-bakeoff-gigachat3-10b-a1.8b-q4-chatml-samples.json
+            russian-llm-gigachat-chatml.log
+            llama-gigachat-chatml.log
+          if-no-files-found: ignore
+          retention-days: 7
