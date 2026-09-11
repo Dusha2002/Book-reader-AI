@@ -126,7 +126,20 @@ class GigaChatLightningBackend:
             value = json.loads(raw[start : end + 1])
         if not isinstance(value, dict):
             raise ValueError("GigaChat response is not a JSON object")
-        return {str(k): str(v).strip() for k, v in value.items() if str(v).strip()}
+
+        # Lightning occasionally decorates a requested id despite the prompt,
+        # e.g. "[s000010]" or "s000010:". Normalize those harmless variants so
+        # a valid translation is not discarded as a missing segment.
+        normalized: dict[str, str] = {}
+        for key, val in value.items():
+            candidate = str(val).strip()
+            if not candidate:
+                continue
+            raw_key = str(key).strip()
+            match = re.search(r"s\d{6}", raw_key, flags=re.I)
+            normalized_key = match.group(0).lower() if match else raw_key
+            normalized[normalized_key] = candidate
+        return normalized
 
     @staticmethod
     def _relevant_glossary(batch: list[Segment], memory: BookMemory) -> str:
