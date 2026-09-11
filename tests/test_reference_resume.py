@@ -1,5 +1,5 @@
 from bookai.models import Segment
-from scripts.full_reference_translation import _sanitize_resume_state
+from bookai.resume import sanitize_resume_state
 
 
 def _segment(sid: str, chapter: str) -> Segment:
@@ -25,7 +25,7 @@ def test_resume_preserves_partial_chapter_progress():
         "final_quality": {"hard_issues": 0},
     }
 
-    cleaned, report = _sanitize_resume_state(state, chapters)
+    cleaned, report = sanitize_resume_state(state, chapters)
 
     assert cleaned["translations"] == {
         "s000001": "Один.",
@@ -52,7 +52,7 @@ def test_resume_keeps_unfinished_translations_even_without_qa_claims():
         "qa_passed_chapters": [],
     }
 
-    cleaned, report = _sanitize_resume_state(state, chapters)
+    cleaned, report = sanitize_resume_state(state, chapters)
 
     assert cleaned["translations"] == {"s000001": "Готовая половина."}
     assert cleaned["completed_chapters"] == []

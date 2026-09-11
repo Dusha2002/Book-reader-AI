@@ -7,6 +7,7 @@ from bookai.models import Segment
 from bookai.parsers.base import load_book, save_book
 from bookai.pipeline import PIPELINE_VERSION, _cache_path, _chapter_groups, _should_translate, translate_book
 from bookai.reference_harness import build_reference_harness
+from bookai.resume import sanitize_resume_state
 
 
 SOURCE = Path("Devices_and_Desires.fb2")
@@ -17,58 +18,6 @@ PROGRESS_REPORT = Path("reference-progress.json")
 
 def progress(event: dict) -> None:
     print("[bookai-progress] " + json.dumps(event, ensure_ascii=False, sort_keys=True), flush=True)
-
-
-def _sanitize_resume_state(
-    state: dict,
-    chapters: list[tuple[str, list[Segment]]],
-) -> tuple[dict, dict]:
-    """Keep every usable cached translation, including unfinished chapters."""
-    original = dict(state.get("translations") or {})
-    source_ids = {segment.id for _, chapter in chapters for segment in chapter}
-    translations = {
-        str(sid): text
-        for sid, text in original.items()
-        if str(sid) in source_ids and isinstance(text, str) and text.strip()
-    }
-
-    chapter_ids = {name: {segment.id for segment in chapter} for name, chapter in chapters}
-    known_names = set(chapter_ids)
-
-    def valid_claims(key: str) -> set[str]:
-        claimed = set(state.get(key) or []) & known_names
-        return {
-            name
-            for name in claimed
-            if chapter_ids[name] and chapter_ids[name].issubset(translations)
-        }
-
-    completed = valid_claims("completed_chapters")
-    polished = valid_claims("polished_chapters")
-    qa_passed = valid_claims("qa_passed_chapters")
-
-    state = dict(state)
-    state["translations"] = translations
-    state["completed_chapters"] = sorted(completed)
-    state["polished_chapters"] = sorted(polished)
-    state["qa_passed_chapters"] = sorted(qa_passed)
-
-    all_ids = set(translations)
-    if all_ids != source_ids or qa_passed != known_names:
-        state.pop("final_quality", None)
-
-    partial_chapters = [
-        name
-        for name, ids in chapter_ids.items()
-        if ids.intersection(translations) and not ids.issubset(translations)
-    ]
-    report = {
-        "preserved_translations": len(translations),
-        "removed_invalid_or_stale": len(original) - len(translations),
-        "partial_chapters": partial_chapters,
-        "qa_passed_chapters": len(qa_passed),
-    }
-    return state, report
 
 
 def _sanitize_resume_cache(source: Path, cache_dir: Path, mode: str = "optimal") -> dict:
@@ -92,7 +41,7 @@ def _sanitize_resume_cache(source: Path, cache_dir: Path, mode: str = "optimal")
     document = load_book(source)
     source_segments = [segment for segment in document.segments if _should_translate(segment.text)]
     chapters = _chapter_groups(source_segments)
-    cleaned, report = _sanitize_resume_state(state, chapters)
+    cleaned, report = sanitize_resume_state(state, chapters)
     if cleaned != state:
         state_path.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), "utf-8")
     return report
@@ -113,7 +62,6 @@ def _chapter_lookup() -> dict[str, list[Segment]]:
 
 
 def _waivable_failure(error: BaseException) -> tuple[str, str] | None:
-    """Return (stage, chapter) only for failures where usable prose already exists."""
     text = str(error)
     polish_prefix = "Literary polish failed strict acceptance in chapter "
     if text.startswith(polish_prefix):
@@ -128,12 +76,7 @@ def _waivable_failure(error: BaseException) -> tuple[str, str] | None:
 
 
 def _record_best_effort_waiver(error: BaseException) -> dict | None:
-    """Let a fully translated chapter continue despite polish/QA failure.
-
-    We never fabricate a missing translation. A waiver is allowed only when every
-    source id in the chapter already has non-empty cached Russian text. The exact
-    failure is retained in cache metadata so the chapter can be revisited later.
-    """
+    """Let a fully translated chapter continue despite polish/QA failure."""
     classified = _waivable_failure(error)
     if classified is None:
         return None
@@ -160,9 +103,6 @@ def _record_best_effort_waiver(error: BaseException) -> dict | None:
     completed = set(state.get("completed_chapters") or [])
     qa_passed = set(state.get("qa_passed_chapters") or [])
 
-    # A polish waiver means: keep the faithful draft and proceed to deterministic
-    # and optional semantic QA on the next loop. A QA waiver means: keep the fully
-    # translated chapter as usable-but-flagged and move to the next chapter.
     polished.add(chapter_name)
     if stage == "qa":
         completed.add(chapter_name)
@@ -241,8 +181,6 @@ def main() -> None:
     print("[full-reference] resume=" + json.dumps(resume, ensure_ascii=False, sort_keys=True), flush=True)
 
     harness = build_reference_harness()
-    # One bad chapter must not end a whole-book run. Each safe waiver is persisted,
-    # then translate_book resumes and skips only that already-complete flagged chapter.
     max_waivers = 128
     for _ in range(max_waivers + 1):
         try:
