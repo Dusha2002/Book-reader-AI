@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
+from collections import Counter
 from pathlib import Path
 
 import full_reference_translation as fullref
@@ -11,17 +13,20 @@ from bookai.gigachat_mt import GigaChatLightningBackend, benchmark_gigachat
 from bookai.hybrid_mt import choose_probe_segments, dumps_report, routing_summary
 from bookai.parsers.base import load_book
 from bookai.pipeline import PIPELINE_VERSION, _chapter_groups, _should_translate
+from bookai.quality import batch_issues
 
 SOURCE = Path("Devices_and_Desires.fb2")
-OUTPUT = Path("Devices_and_Desires_RU_CH11_EVAL.fb2")
-CACHE = Path(".bookai-cache-ch11-eval-v1")
-PROGRESS = Path("chapter11-progress.json")
-PROBE = Path("chapter11-probe.json")
-ROUTING = Path("chapter11-routing.json")
-REPORT = Path("chapter11-eval.json")
-SOURCE_TXT = Path("chapter11-source.txt")
-TRANSLATED_TXT = Path("chapter11-translated.txt")
-MAP_JSON = Path("chapter11-translation-map.json")
+CHAPTER_NAME = os.getenv("BOOKAI_CHAPTER_NAME") or "Chapter Nine"
+CHAPTER_SLUG = re.sub(r"[^a-z0-9]+", "-", CHAPTER_NAME.casefold()).strip("-") or "chapter"
+OUTPUT = Path("Devices_and_Desires_RU_CHAPTER_EVAL.fb2")
+CACHE = Path(f".bookai-cache-chapter-eval-v2-{CHAPTER_SLUG}")
+PROGRESS = Path("chapter-eval-progress.json")
+PROBE = Path("chapter-eval-probe.json")
+ROUTING = Path("chapter-eval-routing.json")
+REPORT = Path("chapter-eval.json")
+SOURCE_TXT = Path("chapter-eval-source.txt")
+TRANSLATED_TXT = Path("chapter-eval-translated.txt")
+MAP_JSON = Path("chapter-eval-translation-map.json")
 
 
 def _norm(value: str) -> str:
@@ -29,14 +34,11 @@ def _norm(value: str) -> str:
 
 
 def _configure_modules() -> None:
-    # Reuse the battle-tested progressive pipeline, but isolate this evaluation
-    # completely from the whole-book output/cache.
     hybrid.SOURCE = SOURCE
     hybrid.OUTPUT = OUTPUT
     hybrid.CACHE = CACHE
     hybrid.PROBE_REPORT = PROBE
     hybrid.ROUTING_REPORT = ROUTING
-
     fullref.SOURCE = SOURCE
     fullref.OUTPUT = OUTPUT
     fullref.CACHE = CACHE
@@ -46,8 +48,7 @@ def _configure_modules() -> None:
 def _select_chapter(document) -> tuple[str, list]:
     all_targets = [segment for segment in document.segments if _should_translate(segment.text)]
     groups = _chapter_groups(all_targets)
-    wanted = _norm(os.getenv("BOOKAI_CHAPTER_NAME") or "Chapter Eleven")
-
+    wanted = _norm(CHAPTER_NAME)
     exact = [(name, rows) for name, rows in groups if _norm(name) == wanted]
     if not exact:
         exact = [(name, rows) for name, rows in groups if wanted in _norm(name)]
@@ -57,7 +58,7 @@ def _select_chapter(document) -> tuple[str, list]:
     return exact[0]
 
 
-def _write_exports(chapter_name: str, targets: list, state: dict, *, status: str, extra: dict | None = None) -> None:
+def _write_exports(chapter_name: str, targets: list, state: dict, memory, *, status: str, extra: dict | None = None) -> None:
     translations = {
         str(k): str(v)
         for k, v in dict(state.get("translations") or {}).items()
@@ -74,12 +75,19 @@ def _write_exports(chapter_name: str, targets: list, state: dict, *, status: str
             "chapter": segment.chapter,
             "source": segment.text,
             "translation": translations.get(segment.id),
+            "length_ratio": round(len(translations.get(segment.id, "")) / max(1, len(segment.text)), 3),
         }
         for segment in targets
     ]
     MAP_JSON.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), "utf-8")
 
     completed = sum(segment.id in translations for segment in targets)
+    resolved = [segment for segment in targets if segment.id in translations]
+    issues = batch_issues(resolved, translations, memory) if resolved else []
+    issue_counts = Counter(f"{issue.severity}:{issue.code}" for issue in issues)
+    ratios = [row for row in mapping if row["translation"]]
+    ratios.sort(key=lambda row: abs(row["length_ratio"] - 0.78), reverse=True)
+
     report = {
         "chapter": chapter_name,
         "status": status,
@@ -88,8 +96,13 @@ def _write_exports(chapter_name: str, targets: list, state: dict, *, status: str
         "completion_percent": round(completed / max(1, len(targets)) * 100, 2),
         "source_chars": sum(len(segment.text) for segment in targets),
         "translated_chars": sum(len(translations.get(segment.id, "")) for segment in targets),
+        "overall_length_ratio": round(
+            sum(len(translations.get(segment.id, "")) for segment in targets)
+            / max(1, sum(len(segment.text) for segment in targets)),
+            3,
+        ),
         "architecture": {
-            "primary": "GigaChat-3-Lightning",
+            "primary": "GigaChat-3-Lightning strict-json-schema",
             "reasoning_analysis_refinement": "deepseek/deepseek-v4.1-flash",
             "external_pro_judge": False,
             "full_paid_fallback": False,
@@ -98,6 +111,11 @@ def _write_exports(chapter_name: str, targets: list, state: dict, *, status: str
         "hybrid_stats": state.get("hybrid_stats") or {},
         "gigachat_usage": state.get("gigachat_usage") or {},
         "final_quality": state.get("final_quality") or {},
+        "post_export_issue_counts": dict(issue_counts),
+        "largest_length_outliers": [
+            {"id": row["id"], "ratio": row["length_ratio"], "source": row["source"][:160], "translation": (row["translation"] or "")[:220]}
+            for row in ratios[:12]
+        ],
         "extra": extra or {},
     }
     REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
@@ -121,6 +139,7 @@ def main() -> None:
                 "source_chars": total_chars,
                 "first_id": targets[0].id if targets else None,
                 "last_id": targets[-1].id if targets else None,
+                "cache": str(CACHE),
             },
             ensure_ascii=False,
         ),
@@ -190,7 +209,7 @@ def main() -> None:
     state["routing_summary"] = routing
     state["bulk_backend"] = bulk.backend_name
     state["architecture"] = {
-        "primary_translation": "GigaChat-3-Lightning",
+        "primary_translation": "GigaChat-3-Lightning-strict-json-schema",
         "reasoning_analysis": "deepseek/deepseek-v4.1-flash",
         "hard_translation": "deepseek/deepseek-v4.1-flash",
         "literary_refinement": "deepseek/deepseek-v4.1-flash",
@@ -199,10 +218,19 @@ def main() -> None:
         "full_paid_fallback": False,
     }
 
+    memory = base_memory
     try:
         result = hybrid._run_full(harness, bulk, document, targets, chapters, state)
         latest = hybrid._cached_state(SOURCE, CACHE)
-        _write_exports(chapter_name, targets, latest, status="complete", extra={"run_result": result, "deepseek_usage": harness.usage})
+        memory = hybrid._base_memory()
+        _write_exports(
+            chapter_name,
+            targets,
+            latest,
+            memory,
+            status="complete",
+            extra={"run_result": result, "deepseek_usage": harness.usage},
+        )
         print(
             "[chapter-eval-done] "
             + json.dumps(
@@ -222,6 +250,7 @@ def main() -> None:
             chapter_name,
             targets,
             latest,
+            memory,
             status="partial",
             extra={"error": f"{type(exc).__name__}: {exc}", "deepseek_usage": getattr(harness, "usage", {})},
         )
