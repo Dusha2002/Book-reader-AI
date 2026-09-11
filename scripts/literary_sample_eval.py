@@ -38,7 +38,8 @@ CASES = [
     },
     {
         "case_id": "ch11-head-dark-irony",
-        "must": ["disadvantage", "enemy", "head"],
+        "chapter": "Chapter Eleven",
+        "first_long_after_opening": True,
         "reference": "Один из недостатков обычая посылать врагу голову в качестве жеста состоит в том, что всё остальное тело остаётся у тебя. Орсеа настоял, что хочет его увидеть. Миэль не был уверен зачем; по его мнению, потому что Орсеа всегда отличался некоторой брезгливостью. Раз он приказал казнить несчастную женщину, значит, обязан наказать себя видом её обезглавленного тела. Если причина действительно была в этом, она была путаной, нелогичной, трудной для понимания всеми, кроме самого Орсеа, — то есть совершенно в его характере.",
     },
 ]
@@ -65,10 +66,21 @@ STYLE = StyleGuide(
 
 
 def _select(segments: list[Segment], case: dict) -> Segment:
+    if case.get("first_long_after_opening"):
+        chapter_name = str(case["chapter"]).casefold()
+        chapter = [s for s in segments if chapter_name in (s.chapter or "").casefold()]
+        substantial = [s for s in chapter if len(s.text) >= 250]
+        if not substantial:
+            raise RuntimeError(f"No substantial source paragraph found in {case['chapter']}")
+        chosen = substantial[0]
+        print(json.dumps({"alignment": case["case_id"], "segment": chosen.id, "chapter": chosen.chapter, "source_start": chosen.text[:180]}, ensure_ascii=False), flush=True)
+        return chosen
+
     keys = [str(k).casefold() for k in case["must"]]
     matches = [s for s in segments if all(k in s.text.casefold() for k in keys)]
     if len(matches) != 1:
         raise RuntimeError(f"Expected exactly one source match for {case['case_id']}, found {len(matches)}")
+    print(json.dumps({"alignment": case["case_id"], "segment": matches[0].id, "chapter": matches[0].chapter, "source_start": matches[0].text[:180]}, ensure_ascii=False), flush=True)
     return matches[0]
 
 
