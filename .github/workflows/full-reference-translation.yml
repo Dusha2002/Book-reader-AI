@@ -73,6 +73,10 @@ jobs:
             bookai-ch11-eval-v1-
 
       - name: Install project and run tests
+        env:
+          # Unit tests verify the router's normal threshold, not this evaluation's
+          # deliberate first-pass-all-through-Lightning override.
+          BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
         shell: bash
         run: |
           set -euo pipefail
