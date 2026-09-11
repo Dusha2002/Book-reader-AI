@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+
+import chapter_reference_translation_v9d as v9d
+
+v9c = v9d.v9c
+v9 = v9d.v9
+
+
+# v9e keeps v9d's semantic/format improvements but makes discourse QA sparse.
+# Document-level dependencies are sparse: do not audit every dialogue paragraph.
+# Trigger on explicit referent risk OR very short quoted utterances where English
+# ellipsis/idiomatic pragmatics is most likely. Then confidence-gate and cap the
+# micro findings before they can consume repair/candidate budget.
+
+_QUOTED_SPAN_RE = re.compile(r"[\"'“‘]([^\"'”’\n]{1,180})[\"'”’]")
+_WORD_RE = re.compile(r"[A-Za-z]+(?:[-'][A-Za-z]+)?")
+_BASE_PARALLEL_MICRO = v9c._parallel_micro_audit
+
+
+def _short_utterance_risk(text: str) -> bool:
+    max_words = max(3, int(os.getenv("BOOKAI_V9E_SHORT_UTTERANCE_WORDS") or "8"))
+    for match in _QUOTED_SPAN_RE.finditer(str(text or "")):
+        words = _WORD_RE.findall(match.group(1))
+        if words and len(words) <= max_words:
+            return True
+    return False
+
+
+def _risk_segment_v9e(segment) -> bool:
+    text = str(segment.text or "")
+    if v9._extract_invariants(text).get("referent_risk"):
+        return True
+    return _short_utterance_risk(text)
+
+
+def _parallel_micro_v9e(harness, targets, translations, selected=None):
+    rows = _BASE_PARALLEL_MICRO(harness, targets, translations, selected=selected)
+    threshold = max(0.0, min(1.0, float(os.getenv("BOOKAI_V9E_MICRO_CONFIDENCE") or "0.90")))
+    cap = max(1, int(os.getenv("BOOKAI_V9E_MICRO_FINDINGS_MAX") or "12"))
+    accepted = [row for row in rows if float(row.get("confidence") or 0.0) >= threshold]
+    priority = {"critical": 0, "major": 1}
+    accepted.sort(key=lambda row: (priority.get(str(row.get("severity") or "major"), 2), -float(row.get("confidence") or 0.0)))
+    kept = accepted[:cap]
+    print("[v9e-sparse-discourse] " + json.dumps({
+        "raw_findings": len(rows),
+        "high_confidence": len(accepted),
+        "kept": len(kept),
+        "threshold": threshold,
+        "cap": cap,
+    }, ensure_ascii=False), flush=True)
+    return kept
+
+
+# v9c's parallel audit resolves both helpers from its own module globals.
+v9c._risk_segment = _risk_segment_v9e
+v9c._parallel_micro_audit = _parallel_micro_v9e
+
+
+def _annotate_v9e() -> None:
+    report = v9.v3.REPORT
+    if not report.exists():
+        return
+    try:
+        data = json.loads(report.read_text("utf-8"))
+    except Exception:
+        return
+    data["architecture"] = {
+        **dict(data.get("architecture") or {}),
+        "version": "quality-v9e-sparse-discourse",
+        "discourse_audit": "explicit referent risk + very-short utterances only",
+        "micro_findings": "confidence-gated and capped before repair routing",
+        "gold_reference_available_to_pipeline": False,
+    }
+    report.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+
+
+def main() -> None:
+    try:
+        v9d.main()
+    finally:
+        _annotate_v9e()
+
+
+if __name__ == "__main__":
+    main()
