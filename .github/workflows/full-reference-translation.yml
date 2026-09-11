@@ -15,7 +15,7 @@ permissions:
 jobs:
   chapter-eval:
     runs-on: ubuntu-latest
-    timeout-minutes: 42
+    timeout-minutes: 38
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       BOOKAI_BASE_URL: https://openrouter.ai/api/v1
@@ -43,32 +43,32 @@ jobs:
       BOOKAI_UNIFIED_QE_BATCH_CHARS: '14500'
       BOOKAI_UNIFIED_QE_WORKERS: '5'
       BOOKAI_TARGETED_EDIT_WORKERS: '4'
-      BOOKAI_SECOND_REPAIR_MAX: '10'
-      BOOKAI_FRESH_RETRANSLATE_MAX: '6'
+      BOOKAI_SECOND_REPAIR_MAX: '0'
+      BOOKAI_FRESH_RETRANSLATE_MAX: '0'
       BOOKAI_V8B_COUNCIL_MAX: '8'
       BOOKAI_V8B_COUNCIL_WORKERS: '4'
       BOOKAI_BOOK_INTELLIGENCE_WAIT: '30'
       BOOKAI_TM_RETRIEVAL_K: '4'
       BOOKAI_HYBRID_BATCH_CHARS: '10000'
       BOOKAI_BULK_PROBE_SEGMENTS: '8'
-      BOOKAI_RETRY_ATTEMPTS: '2'
-      BOOKAI_REQUEST_TIMEOUT: '150'
-      BOOKAI_ANALYZER_REQUEST_TIMEOUT: '120'
+      BOOKAI_RETRY_ATTEMPTS: '1'
+      BOOKAI_REQUEST_TIMEOUT: '100'
+      BOOKAI_ANALYZER_REQUEST_TIMEOUT: '90'
       BOOKAI_ANALYSIS_CHARS: '28500'
       BOOKAI_CONTEXT_WORKERS: '4'
-      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first3-v8b-shared'
+      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first3-v8c-shared'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Restore first-three v8b shared self-TM cache
+      - name: Restore first-three v8c shared self-TM cache
         uses: actions/cache/restore@v4
         with:
-          path: .bookai-cache-first3-v8b-shared
-          key: bookai-first3-quality-v8b-${{ github.run_id }}
+          path: .bookai-cache-first3-v8c-shared
+          key: bookai-first3-quality-v8c-${{ github.run_id }}
           restore-keys: |
-            bookai-first3-quality-v8b-
+            bookai-first3-quality-v8c-
       - name: Install project and run tests
         env:
           BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
@@ -76,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/hybrid_reference_translation.py
+          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/hybrid_reference_translation.py
           pytest -q
       - name: Verify API secrets without exposing them
         shell: bash
@@ -84,44 +84,41 @@ jobs:
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
           test -n "${OPENROUTER_API_KEY:-}" || { echo 'OPENROUTER_API_KEY is not configured' >&2; exit 1; }
-          echo '[bookai] chapters=1,2,3 architecture=v8b source_only=yes shared_self_tm=yes specialized_parallel_hard_tail=yes'
-      - name: Translate Chapter One with v8b
+          echo '[bookai] chapters=1,2,3 architecture=v8c complete_chapter_spans=yes source_only=yes shared_self_tm=yes duplicate_tail=no'
+      - name: Translate complete Chapter One with v8c
         shell: bash
         run: |
           set -euo pipefail
           test -f Devices_and_Desires.fb2
-          echo '[bookai-first3] starting Chapter One with empty/self source-only TM'
-          BOOKAI_CHAPTER_NAME='Chapter One' timeout --signal=TERM --kill-after=30s 11m \
-            python scripts/chapter_reference_translation_v8b.py 2>&1 | tee chapter-v8-chapter-one.log
-      - name: Translate Chapter Two with v8b and Chapter One TM
+          BOOKAI_CHAPTER_NAME='Chapter One' timeout --signal=TERM --kill-after=30s 10m \
+            python scripts/chapter_reference_translation_v8c.py 2>&1 | tee chapter-v8c-chapter-one.log
+      - name: Translate complete Chapter Two with Chapter One TM
         shell: bash
         run: |
           set -euo pipefail
-          echo '[bookai-first3] starting Chapter Two with Chapter One approved self-TM'
-          BOOKAI_CHAPTER_NAME='Chapter Two' timeout --signal=TERM --kill-after=30s 11m \
-            python scripts/chapter_reference_translation_v8b.py 2>&1 | tee chapter-v8-chapter-two.log
-      - name: Translate Chapter Three with v8b and prior TM
+          BOOKAI_CHAPTER_NAME='Chapter Two' timeout --signal=TERM --kill-after=30s 12m \
+            python scripts/chapter_reference_translation_v8c.py 2>&1 | tee chapter-v8c-chapter-two.log
+      - name: Translate complete Chapter Three with prior TM
         shell: bash
         run: |
           set -euo pipefail
-          echo '[bookai-first3] starting Chapter Three with Chapters One-Two approved self-TM'
-          BOOKAI_CHAPTER_NAME='Chapter Three' timeout --signal=TERM --kill-after=30s 11m \
-            python scripts/chapter_reference_translation_v8b.py 2>&1 | tee chapter-v8-chapter-three.log
-      - name: Upload first-three v8b evaluation
+          BOOKAI_CHAPTER_NAME='Chapter Three' timeout --signal=TERM --kill-after=30s 10m \
+            python scripts/chapter_reference_translation_v8c.py 2>&1 | tee chapter-v8c-chapter-three.log
+      - name: Upload complete first-three v8c evaluation
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: first-three-quality-v8b-source-only-evaluation
+          name: first-three-complete-quality-v8c-source-only-evaluation
           path: |
-            Devices_and_Desires_RU_*_EVAL_V8.fb2
-            chapter-v8-*.txt
-            chapter-v8-*.json
-            chapter-v8-*.log
+            Devices_and_Desires_RU_*_EVAL_V8C.fb2
+            chapter-v8c-*.txt
+            chapter-v8c-*.json
+            chapter-v8c-*.log
           if-no-files-found: ignore
           retention-days: 7
-      - name: Save first-three v8b shared self-TM cache
+      - name: Save first-three v8c shared self-TM cache
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: .bookai-cache-first3-v8b-shared
-          key: bookai-first3-quality-v8b-${{ github.run_id }}
+          path: .bookai-cache-first3-v8c-shared
+          key: bookai-first3-quality-v8c-${{ github.run_id }}
