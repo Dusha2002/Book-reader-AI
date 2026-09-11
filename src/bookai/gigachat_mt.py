@@ -211,6 +211,11 @@ SOURCE:
         parsed = self._parse_json_object(str(response.choices[0].message.content or ""))
         expected = {segment.id for segment in batch}
         translated = {sid: text for sid, text in parsed.items() if sid in expected and text}
+        # For a single requested segment there is no ambiguity: if Lightning
+        # returns exactly one non-empty JSON value under a generic key such as
+        # "translation", map that value to the sole requested id.
+        if len(batch) == 1 and not translated and len(parsed) == 1:
+            translated = {batch[0].id: next(iter(parsed.values()))}
         usage_obj = getattr(response, "usage", None)
         usage = {
             "prompt_tokens": int(getattr(usage_obj, "prompt_tokens", 0) or 0),
