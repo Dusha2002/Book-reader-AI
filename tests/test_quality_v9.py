@@ -87,6 +87,12 @@ def test_sparse_referent_and_elliptical_utterances_are_micro_audit_risks():
     assert v9e._risk_segment_v9e(seg("The man looked at him. 'You mean that one?'"))
 
 
+def test_possessive_apostrophes_do_not_create_false_dialogue_risk():
+    source = "It was typical of Valens' father that he insisted on his son's lessons; the man's patience was endless and didn't help."
+    assert not v9e._short_utterance_risk(source)
+    assert not v9e._risk_segment_v9e(seg(source))
+
+
 def test_normal_long_dialogue_is_not_sparse_micro_audit_risk():
     source = "'I walked across the entire valley yesterday because the western bridge had been destroyed by the flood and nobody had repaired it yet,' he said."
     assert not v9e._risk_segment_v9e(seg(source))
