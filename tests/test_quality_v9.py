@@ -9,10 +9,11 @@ if str(SCRIPTS) not in sys.path:
 
 from bookai.models import BookMemory, Segment
 
-import chapter_reference_translation_v9c as v9c
+import chapter_reference_translation_v9d as v9d
 
+v9c = v9d.v9c
 v9b = v9c.v9b
-v9 = v9c.v9
+v9 = v9d.v9
 
 
 def seg(text: str) -> Segment:
@@ -49,15 +50,15 @@ def test_time_and_a_half_accepts_one_and_a_half_pay():
 
 def test_dialogue_formatter_does_not_create_unbalanced_guillemets():
     source = seg("'No,' he said. 'Not today.'")
-    value, _ = v9c._format_dialogue_v9c(source, "'Нет,' — сказал он. 'Не сегодня.'")
+    value, _ = v9d._format_dialogue_v9d(source, "'Нет,' — сказал он. 'Не сегодня.'")
     assert value.count("«") == value.count("»")
     assert not value.startswith(("'", '"'))
     assert ",," not in value
 
 
-def test_v9c_formatter_repairs_observed_double_comma_and_stray_quote():
+def test_v9d_formatter_repairs_observed_double_comma_and_stray_quote():
     source = seg("'I should do,' the man replied. 'I used to make them.'")
-    value, _ = v9c._format_dialogue_v9c(source, "— Я должен', — ответил мужчина. — Раньше я их делал.")
+    value, _ = v9d._format_dialogue_v9d(source, "— Я должен', — ответил мужчина. — Раньше я их делал.")
     assert "'," not in value
     assert ",," not in value
     assert value.startswith("— ")
@@ -65,17 +66,26 @@ def test_v9c_formatter_repairs_observed_double_comma_and_stray_quote():
 
 def test_narrative_paired_quotes_become_safe_guillemets():
     source = seg("He called it 'necessary evil'.")
-    value, _ = v9c._format_dialogue_v9c(source, 'Он называл это "необходимым злом".')
+    value, _ = v9d._format_dialogue_v9d(source, 'Он называл это "необходимым злом".')
     assert "«необходимым злом»" in value
     assert value.count("«") == value.count("»")
 
 
+def test_embedded_dialogue_after_narration_is_detected_and_normalized():
+    source = seg("The man looked at him. 'You mean, what sort of weapon was it?'")
+    value, _ = v9d._format_dialogue_v9d(source, 'Человек посмотрел на него. — «Ты имеешь в виду, что это было за оружие?»')
+    assert v9d._source_has_dialogue(source.text)
+    assert '— «' not in value
+    assert value.endswith('?')
+
+
 def test_referent_and_short_dialogue_are_micro_audit_risks():
-    assert v9c._risk_segment(seg("'I won't see either of them again.'"))
-    assert v9c._risk_segment(seg("'I should do,' the man replied."))
-    assert v9c._risk_segment(seg("'Cocky with it,' Orsea said."))
+    assert v9d._risk_segment_v9d(seg("'I won't see either of them again.'"))
+    assert v9d._risk_segment_v9d(seg("'I should do,' the man replied."))
+    assert v9d._risk_segment_v9d(seg("'Cocky with it,' Orsea said."))
+    assert v9d._risk_segment_v9d(seg("The man looked at him. 'You mean that one?'"))
 
 
 def test_long_narration_without_referent_is_not_micro_audit_risk():
     source = "The road crossed the valley and climbed the ridge before disappearing into fog. " * 12
-    assert not v9c._risk_segment(seg(source))
+    assert not v9d._risk_segment_v9d(seg(source))
