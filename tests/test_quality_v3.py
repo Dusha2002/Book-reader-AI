@@ -56,3 +56,62 @@ def test_letter_speaker_gender_is_detected():
         source_segments=rows,
     )
     assert any(i.severity == "hard" and i.code == "speaker_gender" for i in issues)
+
+
+def test_mixed_latin_cyrillic_token_is_hard():
+    segment = Segment(
+        "s000030",
+        "The overhead shafts carry the drive along the gallery.",
+        "/p",
+        "Chapter Twelve",
+    )
+    issues = enhanced_candidate_issues(
+        segment,
+        "Надставные shaftы передают привод вдоль галереи.",
+        memory(),
+    )
+    assert any(i.severity == "hard" and i.code == "mixed_script_token" for i in issues)
+
+
+def test_single_latin_residue_is_hard_in_russian_prose():
+    segment = Segment(
+        "s000031",
+        "He treated prove as a legitimate rhyme for love.",
+        "/p",
+        "Chapter Twelve",
+    )
+    issues = enhanced_candidate_issues(
+        segment,
+        "Он считал prove вполне допустимой рифмой к love.",
+        memory(),
+    )
+    assert any(i.severity == "hard" and i.code == "latin_residue" for i in issues)
+
+
+def test_missing_interrogative_is_hard_even_when_length_looks_normal():
+    segment = Segment(
+        "s000032",
+        "When did I stop doing useful work? Was it about the time I acquired power over my fellow citizens?",
+        "/p",
+        "Chapter Twelve",
+    )
+    candidate = "Когда я перестал заниматься полезной работой? Наверное, примерно тогда я и получил власть над согражданами."
+    issues = enhanced_candidate_issues(segment, candidate, memory())
+    assert any(i.severity == "hard" and i.code == "question_loss" for i in issues)
+
+
+def test_dynamic_character_rendering_is_hard_consistency_constraint():
+    mem = BookMemory(
+        glossary={"Falier": "Фалиер"},
+        characters={"Falier": "ru=Фалиер; gender=male; мужчина"},
+    )
+    segment = Segment("s000033", "Falier looked at the machine.", "/p", "Chapter Twelve")
+    issues = enhanced_candidate_issues(segment, "Фалир посмотрел на машину.", mem)
+    assert any(i.severity == "hard" and i.code == "character_name" for i in issues)
+
+
+def test_dynamic_named_glossary_term_is_hard_consistency_constraint():
+    mem = BookMemory(glossary={"Lonazep": "Лоназеп"})
+    segment = Segment("s000034", "The ship reached Lonazep before dawn.", "/p", "Chapter Twelve")
+    issues = enhanced_candidate_issues(segment, "Корабль достиг Лонацепа до рассвета.", mem)
+    assert any(i.severity == "hard" and i.code == "entity_consistency" for i in issues)
