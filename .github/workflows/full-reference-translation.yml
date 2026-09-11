@@ -5,6 +5,10 @@ on:
     branches: [full-literary-reference-v9]
   workflow_dispatch:
 
+concurrency:
+  group: full-reference-translation-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -45,24 +49,27 @@ jobs:
           PY
           mkdir -p .bookai-cache-reference-v10
 
-      - name: Reference preflight — advisory only
-        continue-on-error: true
+      - name: OpenRouter V4.1 Flash smoke test
         shell: bash
         run: |
-          export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4.1-flash'
-          export BOOKAI_ANALYZER_MODEL='deepseek/deepseek-v4.1-flash'
-          export BOOKAI_GATE_MODEL='deepseek/deepseek-v4.1-flash'
-          export BOOKAI_MEMORY_MODEL='deepseek/deepseek-v4.1-flash'
-          export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4.1-flash'
-          export BOOKAI_HARD_MODEL='deepseek/deepseek-v4.1-flash'
-          export BOOKAI_REFERENCE_JUDGE_MODEL='deepseek/deepseek-v4-pro-0813'
-          export BOOKAI_LLM_GATE='true'
-          export BOOKAI_REASONING='none'
-          export BOOKAI_V10_SENTENCE_BATCH='1'
           test -n "${OPENROUTER_API_KEY:-}"
-          python scripts/reference_quality_gate_v2.py --output reference-quality-preflight.json 2>&1 | tee reference-preflight.log
+          export BOOKAI_REASONING='none'
+          export BOOKAI_RETRY_ATTEMPTS='2'
+          export BOOKAI_REQUEST_TIMEOUT='90'
+          python - <<'PY'
+          from bookai.llm import OpenAICompatibleProvider, extract_json
+          provider = OpenAICompatibleProvider(model='deepseek/deepseek-v4.1-flash', role='smoke')
+          obj = extract_json(provider.complete(
+              'Return only valid JSON. No prose.',
+              'Return exactly {"ok":true,"model":"v4.1-flash"}.',
+              temperature=0.0,
+          ))
+          if not isinstance(obj, dict) or obj.get('ok') is not True:
+              raise SystemExit(f'Unexpected smoke response: {obj!r}')
+          print('[bookai] openrouter_smoke=ok model=deepseek/deepseek-v4.1-flash')
+          PY
 
-      - name: Translate complete book — best effort V4.1 Flash-only
+      - name: Translate complete book — balanced-fast V4.1 Flash
         continue-on-error: true
         shell: bash
         run: |
@@ -73,22 +80,28 @@ jobs:
           export BOOKAI_EDITOR_MODEL='deepseek/deepseek-v4.1-flash'
           export BOOKAI_HARD_MODEL='deepseek/deepseek-v4.1-flash'
 
-          # Full-book generation should keep moving. Semantic/literary critics are
-          # retained in pre/postflight reports instead of blocking every chapter.
+          # Keep generation moving. Semantic/literary critics remain advisory
+          # outside generation; deterministic invariants still protect the cache.
           export BOOKAI_LLM_GATE='false'
           export BOOKAI_REASONING='none'
-          export BOOKAI_BATCH_CHARS='9000'
-          export BOOKAI_POLISH_BATCH_CHARS='4200'
-          export BOOKAI_GATE_BATCH_CHARS='3200'
-          export BOOKAI_EDIT_BATCH_CHARS='2200'
+
+          # V4.1 Flash can safely handle larger context windows. Larger batches
+          # sharply reduce request count while keeping the separate polish pass.
+          export BOOKAI_BATCH_CHARS='16000'
+          export BOOKAI_POLISH_BATCH_CHARS='10000'
+          export BOOKAI_GATE_BATCH_CHARS='12000'
+          export BOOKAI_EDIT_BATCH_CHARS='8000'
           export BOOKAI_ANALYSIS_CHARS='90000'
           export BOOKAI_CHAPTER_BRIEF_CHARS='26000'
           export BOOKAI_QUALITY_REPAIR_ROUNDS='1'
 
-          export BOOKAI_V10_DECOMPOSE_CHARS='650'
-          export BOOKAI_V10_DECOMPOSE_SENTENCES='4'
-          export BOOKAI_V10_ISOLATE_SENTENCE_CHARS='420'
-          export BOOKAI_V10_SENTENCE_BATCH='1'
+          # Decompose only genuinely difficult prose. Previously any 4-sentence
+          # paragraph — even ~100 chars — became 4+ sequential model calls.
+          # Batch up to four sentence obligations in each micro-call.
+          export BOOKAI_V10_DECOMPOSE_CHARS='1600'
+          export BOOKAI_V10_DECOMPOSE_SENTENCES='10'
+          export BOOKAI_V10_ISOLATE_SENTENCE_CHARS='1000'
+          export BOOKAI_V10_SENTENCE_BATCH='4'
 
           export BOOKAI_RETRY_ATTEMPTS='2'
           export BOOKAI_REQUEST_TIMEOUT='240'
@@ -104,7 +117,7 @@ jobs:
 
           test -f Devices_and_Desires.fb2
           test -n "${OPENROUTER_API_KEY:-}"
-          echo '[full-reference] mode=best-effort v4.1-flash-only generation; QA is advisory outside generation'
+          echo '[full-reference] mode=balanced-fast v4.1-flash; larger batches + selective decomposition + advisory LLM QA'
           python scripts/full_reference_translation.py 2>&1 | tee translation.log
 
       - name: Set Russian FB2 metadata when artifact exists
