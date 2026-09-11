@@ -19,7 +19,7 @@ jobs:
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       BOOKAI_BASE_URL: https://openrouter.ai/api/v1
-      BOOKAI_HYMT_REPO: tencent/Hy-MT1.5-1.8B-2bit-GGUF
+      BOOKAI_HYMT_REPO: tencent/HY-MT1.5-1.8B-GGUF:Q4_K_M
       BOOKAI_HYMT_BASE_URL: http://127.0.0.1:8080/v1
     steps:
       - uses: actions/checkout@v4
@@ -42,7 +42,7 @@ jobs:
           path: |
             ~/.cache/huggingface
             ~/.cache/llama.cpp
-          key: hymt15-18b-2bit-gguf-v1
+          key: hymt15-18b-q4km-gguf-v1
 
       - name: Install project and run tests
         shell: bash
@@ -69,14 +69,14 @@ jobs:
           echo "LLAMA_BIN=$LLAMA_BIN" >> "$GITHUB_ENV"
           echo "[hy-mt] llama_bin=$LLAMA_BIN"
 
-      - name: Start local HY-MT 2-bit server
+      - name: Start local HY-MT Q4_K_M server
         shell: bash
         run: |
           set -euo pipefail
           echo "[hy-mt] starting ${BOOKAI_HYMT_REPO}"
           nohup "$LLAMA_BIN" serve -hf "$BOOKAI_HYMT_REPO" > hymt-server.log 2>&1 &
           echo $! > hymt-server.pid
-          for i in $(seq 1 180); do
+          for i in $(seq 1 240); do
             if curl -fsS http://127.0.0.1:8080/v1/models > hymt-models.json 2>/dev/null; then
               echo '[hy-mt] local server ready'
               cat hymt-models.json
@@ -118,7 +118,7 @@ jobs:
           set -euo pipefail
           test -n "${OPENROUTER_API_KEY:-}"
           test -f Devices_and_Desires.fb2
-          echo '[bookai] mode=hybrid-hymt2bit-deepseek-v1 cost_policy=fail-closed'
+          echo '[bookai] mode=hybrid-hymt-q4km-deepseek-v1 cost_policy=fail-closed'
           timeout --signal=TERM --kill-after=30s 32m \
             python scripts/hybrid_reference_translation.py 2>&1 | tee hybrid-translation.log
 
@@ -201,4 +201,4 @@ jobs:
           path: |
             ~/.cache/huggingface
             ~/.cache/llama.cpp
-          key: hymt15-18b-2bit-gguf-v1
+          key: hymt15-18b-q4km-gguf-v1
