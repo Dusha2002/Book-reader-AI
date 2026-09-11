@@ -32,14 +32,14 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .bookai-t5
-          key: t5-en-ru-zh-v2-ct2-int8-v1
+          key: t5-en-ru-zh-v2-ct2-int8-v2
 
       - name: Install runtime
         shell: bash
         run: |
           set -euo pipefail
           pip install -e '.[mt]'
-          pip install 'transformers>=4.50,<5' huggingface_hub sacremoses
+          pip install 'transformers>=4.50,<5' huggingface_hub sacremoses protobuf
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           python -m compileall -q scripts/t5_mt_probe.py src
 
@@ -82,4 +82,4 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .bookai-t5
-          key: t5-en-ru-zh-v2-ct2-int8-v1
+          key: t5-en-ru-zh-v2-ct2-int8-v2
