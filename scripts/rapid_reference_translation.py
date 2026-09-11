@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 
 from bookai.parsers.base import load_book, save_book
 from bookai.pipeline import (
@@ -19,10 +18,9 @@ from bookai.pipeline import (
 )
 from bookai.quality import batch_issues, hard_ids
 from bookai.reference_harness import build_reference_harness
-from scripts.full_reference_translation import (
+from full_reference_translation import (
     CACHE,
     OUTPUT,
-    PROGRESS_REPORT,
     SOURCE,
     _cached_state,
     _sanitize_resume_cache,
@@ -50,12 +48,7 @@ def _split_by_chars(batch):
 
 
 def _translate_resilient(harness, source_segments, batch, memory, *, depth: int = 0):
-    """Translate one batch; retry locally and split only the failing batch.
-
-    The old pipeline retried an entire 20-50 segment batch when one response had
-    malformed JSON. Here a failing batch is bisected recursively, preserving all
-    successful work and keeping the retry surface small.
-    """
+    """Translate one batch; retry locally and split only the failing batch."""
     before, after = _context_for(source_segments, batch, radius=3)
     last_error: BaseException | None = None
     for attempt in range(2):
@@ -124,7 +117,7 @@ def _load_or_build_memory(harness, state: dict, chapters):
     return harness.analyze(_analysis_sample(chapters, analysis_chars))
 
 
-def _parallel_translate(harness, document, targets, chapters, state, memory) -> dict[str, str]:
+def _parallel_translate(harness, targets, state, memory) -> dict[str, str]:
     state_path = _cache_path(SOURCE, CACHE, "optimal")
     translated: dict[str, str] = {
         str(sid): text
@@ -194,9 +187,6 @@ def _parallel_translate(harness, document, targets, chapters, state, memory) -> 
                 }
             )
 
-    # One final sequential salvage pass for only batches that still failed under
-    # concurrency. This avoids discarding successful parallel work because one
-    # provider response was malformed or rate-limited.
     for batch, original_error in failures:
         try:
             accepted = _translate_resilient(harness, targets, batch, memory, depth=1)
@@ -276,7 +266,7 @@ def main() -> None:
     _persist(state_path, state, dict(state.get("translations") or {}), memory)
 
     try:
-        translated = _parallel_translate(harness, document, targets, chapters, state, memory)
+        translated = _parallel_translate(harness, targets, state, memory)
         missing = [segment.id for segment in targets if segment.id not in translated]
         if missing:
             raise RuntimeError(
