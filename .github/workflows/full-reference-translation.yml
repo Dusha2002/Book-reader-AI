@@ -76,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/hybrid_reference_translation.py
+          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/hybrid_reference_translation.py
           pytest -q
       - name: Verify API secrets without exposing them
         shell: bash
@@ -84,26 +84,26 @@ jobs:
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
           test -n "${OPENROUTER_API_KEY:-}" || { echo 'OPENROUTER_API_KEY is not configured' >&2; exit 1; }
-          echo '[bookai] architecture=v9 source_only=yes blueprint=persistent tm=trusted+working qe=confidence-aware invariants=yes thread-index=yes fallback=deepseek'
+          echo '[bookai] architecture=v9 source_only=yes blueprint=persistent tm=trusted+working qe=confidence-aware invariants=ordered-materials thread-index=yes fallback=deepseek'
       - name: Translate complete Chapter One with v9
         shell: bash
         run: |
           set -euo pipefail
           test -f Devices_and_Desires.fb2
           BOOKAI_CHAPTER_NAME='Chapter One' timeout --signal=TERM --kill-after=30s 11m \
-            python scripts/chapter_reference_translation_v9.py 2>&1 | tee chapter-v9-chapter-one.log
+            python scripts/chapter_reference_translation_v9b.py 2>&1 | tee chapter-v9-chapter-one.log
       - name: Translate complete Chapter Two with Chapter One trusted memory
         shell: bash
         run: |
           set -euo pipefail
           BOOKAI_CHAPTER_NAME='Chapter Two' timeout --signal=TERM --kill-after=30s 11m \
-            python scripts/chapter_reference_translation_v9.py 2>&1 | tee chapter-v9-chapter-two.log
+            python scripts/chapter_reference_translation_v9b.py 2>&1 | tee chapter-v9-chapter-two.log
       - name: Translate complete Chapter Three with prior trusted memory
         shell: bash
         run: |
           set -euo pipefail
           BOOKAI_CHAPTER_NAME='Chapter Three' timeout --signal=TERM --kill-after=30s 11m \
-            python scripts/chapter_reference_translation_v9.py 2>&1 | tee chapter-v9-chapter-three.log
+            python scripts/chapter_reference_translation_v9b.py 2>&1 | tee chapter-v9-chapter-three.log
       - name: Upload first-three v9 evaluation
         if: always()
         uses: actions/upload-artifact@v4
