@@ -58,22 +58,22 @@ jobs:
       BOOKAI_RELIABILITY_WORKERS: '4'
       BOOKAI_V9C_MICRO_BATCH_CHARS: '9000'
       BOOKAI_V9C_MICRO_WORKERS: '4'
-      BOOKAI_V9E_SHORT_UTTERANCE_WORDS: '8'
+      BOOKAI_V9E_SHORT_UTTERANCE_WORDS: '6'
       BOOKAI_V9E_MICRO_CONFIDENCE: '0.90'
       BOOKAI_V9E_MICRO_FINDINGS_MAX: '12'
-      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first3-v9e-shared'
+      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first3-v9e2-shared'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Restore first-three v9e shared book memory
+      - name: Restore first-three v9e2 shared book memory
         uses: actions/cache/restore@v4
         with:
-          path: .bookai-cache-first3-v9e-shared
-          key: bookai-first3-quality-v9e-${{ github.run_id }}
+          path: .bookai-cache-first3-v9e2-shared
+          key: bookai-first3-quality-v9e2-${{ github.run_id }}
           restore-keys: |
-            bookai-first3-quality-v9e-
+            bookai-first3-quality-v9e2-
       - name: Install project and run tests
         env:
           BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
@@ -125,5 +125,5 @@ jobs:
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: .bookai-cache-first3-v9e-shared
-          key: bookai-first3-quality-v9e-${{ github.run_id }}
+          path: .bookai-cache-first3-v9e2-shared
+          key: bookai-first3-quality-v9e2-${{ github.run_id }}
