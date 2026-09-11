@@ -19,12 +19,24 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        model:
+          - GigaChat-3-Lightning
+          - GigaChat-3-Pro
+          - GigaChat-3-Ultra
     env:
       GIGACHAT_AUTH_KEY: ${{ secrets.GIGACHAT_AUTH_KEY }}
       GIGACHAT_SCOPE: GIGACHAT_API_PERS
       GIGACHAT_BASE_URL: https://api.giga.chat/v1
+      BOOKAI_GIGACHAT_MODEL: ${{ matrix.model }}
       BOOKAI_BAKEOFF_SEGMENTS: '32'
-      BOOKAI_GIGACHAT_WORKERS: '2'
+      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '8'
+      BOOKAI_GIGACHAT_BATCH_CHARS: '12000'
+      BOOKAI_GIGACHAT_REPORT: gigachat-api-${{ matrix.model }}.json
+      BOOKAI_GIGACHAT_SAMPLES: gigachat-api-${{ matrix.model }}-samples.json
     steps:
       - uses: actions/checkout@v4
 
@@ -47,23 +59,23 @@ jobs:
             echo 'GIGACHAT_AUTH_KEY is not configured' >&2
             exit 1
           fi
-          echo '[gigachat-api] secret_present=1'
+          echo '[gigachat-api] secret_present=1 model=${{ matrix.model }}'
 
       - name: GigaChat API → same 32 Parker segments
         shell: bash
         run: |
           set -euo pipefail
           timeout --signal=TERM --kill-after=20s 15m \
-            python scripts/gigachat_api_bakeoff.py 2>&1 | tee gigachat-api-bakeoff.log
+            python scripts/gigachat_api_bakeoff.py 2>&1 | tee gigachat-api-${{ matrix.model }}.log
 
       - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gigachat-api-bakeoff-results
+          name: gigachat-api-${{ matrix.model }}-results
           path: |
-            gigachat-api-bakeoff.json
-            gigachat-api-bakeoff-samples.json
-            gigachat-api-bakeoff.log
+            gigachat-api-${{ matrix.model }}.json
+            gigachat-api-${{ matrix.model }}-samples.json
+            gigachat-api-${{ matrix.model }}.log
           if-no-files-found: ignore
           retention-days: 7
