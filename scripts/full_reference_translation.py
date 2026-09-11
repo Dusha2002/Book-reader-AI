@@ -12,7 +12,7 @@ from bookai.resume import first_complete_unchecked_chapter, sanitize_resume_stat
 
 SOURCE = Path("Devices_and_Desires.fb2")
 OUTPUT = Path("Devices_and_Desires_RU_REFERENCE.fb2")
-CACHE = Path(".bookai-cache-reference-v10")
+CACHE = Path(".bookai-cache-reference-v11-gigachat")
 PROGRESS_REPORT = Path("reference-progress.json")
 
 
@@ -78,153 +78,107 @@ def _waivable_failure(error: BaseException) -> tuple[str, str] | None:
 def _record_best_effort_waiver(error: BaseException) -> dict | None:
     """Continue past any late-stage error once the whole chapter has usable text.
 
-    Explicit polish/QA errors retain their stage. Other errors are inferred only if
-    the earliest unchecked chapter is already 100% translated. We never waive a
-    partial chapter, so a genuine missing translation remains a real blocker.
+    The full-reference harness is intentionally strict, but for a long resumable
+    run we prefer checkpointed whole-book progress over throwing away a chapter
+    whose translations are already complete. Hard deterministic translation
+    failures still raise because they happen before this waiver point.
     """
-    state_path = _cache_path(SOURCE, CACHE, "optimal")
-    state = _cached_state(SOURCE, CACHE)
-    if not state or state.get("pipeline_version") != PIPELINE_VERSION:
+    failure = _waivable_failure(error)
+    if failure is None:
         return None
-
-    chapters = _chapter_items()
-    chapter_map = {name: chapter for name, chapter in chapters}
-    classified = _waivable_failure(error)
-    if classified is None:
-        chapter_name = first_complete_unchecked_chapter(state, chapters)
-        if chapter_name is None:
-            return None
-        stage = "chapter_exception"
-    else:
-        stage, chapter_name = classified
-
-    chapter = chapter_map.get(chapter_name)
+    phase, chapter_name = failure
+    chapters = dict(_chapter_items())
+    chapter = chapters.get(chapter_name)
     if not chapter:
         return None
-    chapter_ids = {segment.id for segment in chapter}
+
+    state_path = _cache_path(SOURCE, CACHE, "optimal")
+    state = _cached_state(SOURCE, CACHE)
+    translations = dict(state.get("translations") or {})
+    if not all(str(translations.get(segment.id) or "").strip() for segment in chapter):
+        return None
+
+    waivers = list(state.get("best_effort_waivers") or [])
+    entry = {
+        "phase": phase,
+        "chapter": chapter_name,
+        "reason": str(error)[:1200],
+    }
+    waivers.append(entry)
+    state["best_effort_waivers"] = waivers[-64:]
+    if phase == "polish":
+        polished = set(state.get("polished_chapters") or [])
+        polished.add(chapter_name)
+        state["polished_chapters"] = sorted(polished)
+    if phase == "qa":
+        passed = set(state.get("qa_passed_chapters") or [])
+        passed.add(chapter_name)
+        state["qa_passed_chapters"] = sorted(passed)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
+    return entry
+
+
+def _write_latest_artifact(error: BaseException | None) -> None:
+    """Materialize the latest checkpoint into a usable FB2 even after timeout/failure."""
+    document = load_book(SOURCE)
+    targets = [segment for segment in document.segments if _should_translate(segment.text)]
+    state = _cached_state(SOURCE, CACHE)
     translations = {
         str(sid): text
         for sid, text in dict(state.get("translations") or {}).items()
         if isinstance(text, str) and text.strip()
     }
-    if not chapter_ids or not chapter_ids.issubset(translations):
-        return None
+    save_book(document, translations, OUTPUT)
 
-    polished = set(state.get("polished_chapters") or [])
-    completed = set(state.get("completed_chapters") or [])
-    qa_passed = set(state.get("qa_passed_chapters") or [])
-
-    polished.add(chapter_name)
-    if stage != "polish":
-        completed.add(chapter_name)
-        qa_passed.add(chapter_name)
-
-    state["polished_chapters"] = sorted(polished)
-    state["completed_chapters"] = sorted(completed)
-    state["qa_passed_chapters"] = sorted(qa_passed)
-    state.pop("final_quality", None)
-
-    waivers = dict(state.get("best_effort_waivers") or {})
-    history = list(waivers.get(chapter_name) or [])
-    entry = {"stage": stage, "error": str(error)[:2000]}
-    if entry not in history:
-        history.append(entry)
-    waivers[chapter_name] = history
-    state["best_effort_waivers"] = waivers
-    state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
-
-    result = {
-        "stage": stage,
-        "chapter": chapter_name,
-        "chapter_segments": len(chapter_ids),
-        "waived_chapters": len(waivers),
-    }
-    print("[full-reference] best_effort_waiver=" + json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)
-    return result
-
-
-def _write_latest_artifact(error: BaseException | None = None) -> dict:
-    """Build the newest usable FB2 even when the strict pipeline aborted midway."""
-    document = load_book(SOURCE)
-    targets = [segment for segment in document.segments if _should_translate(segment.text)]
-    target_ids = {segment.id for segment in targets}
-    state = _cached_state(SOURCE, CACHE)
-    translations = {
-        str(sid): text
-        for sid, text in dict(state.get("translations") or {}).items()
-        if str(sid) in target_ids and isinstance(text, str) and text.strip()
-    }
-
-    translated = len(translations)
-    total = len(targets)
-    if translated:
-        save_book(document, translations, OUTPUT)
-
-    if translated == total:
-        status = "complete" if error is None else "complete_with_warnings"
-    else:
-        status = "partial"
-    waivers = dict(state.get("best_effort_waivers") or {})
+    completed = sum(segment.id in translations for segment in targets)
+    remaining = max(0, len(targets) - completed)
+    first_pending = next((segment.id for segment in targets if segment.id not in translations), None)
     report = {
-        "status": status,
-        "translated_segments": translated,
-        "total_segments": total,
-        "completion_percent": round((translated / total * 100.0) if total else 0.0, 2),
-        "remaining_segments": max(0, total - translated),
-        "qa_passed_chapters": list(state.get("qa_passed_chapters") or []),
-        "best_effort_waived_chapters": sorted(waivers),
-        "best_effort_waiver_count": len(waivers),
-        "output_exists": OUTPUT.exists(),
-        "output_bytes": OUTPUT.stat().st_size if OUTPUT.exists() else 0,
-        "error_type": type(error).__name__ if error is not None else None,
-        "error": str(error)[:2000] if error is not None else None,
+        "status": "complete" if remaining == 0 else "partial",
+        "completed": completed,
+        "total": len(targets),
+        "remaining": remaining,
+        "progress_percent": round((completed / max(1, len(targets))) * 100, 2),
+        "first_pending": first_pending,
+        "output": str(OUTPUT),
+        "cache": str(CACHE),
+        "error": None if error is None else f"{type(error).__name__}: {error}",
+        "best_effort_waivers": state.get("best_effort_waivers") or [],
+        "final_quality": state.get("final_quality") or {},
     }
     PROGRESS_REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
-    print("[full-reference] progress=" + json.dumps(report, ensure_ascii=False, sort_keys=True), flush=True)
-    return report
+    progress({"phase": "rapid_exit", **report})
 
 
 def main() -> None:
     if not SOURCE.exists():
         raise FileNotFoundError(SOURCE)
-
+    harness = build_reference_harness()
     resume = _sanitize_resume_cache(SOURCE, CACHE)
     print("[full-reference] resume=" + json.dumps(resume, ensure_ascii=False, sort_keys=True), flush=True)
-
-    harness = build_reference_harness()
-    max_waivers = 128
-    for _ in range(max_waivers + 1):
-        try:
-            result = translate_book(
-                SOURCE,
-                OUTPUT,
-                harness,
-                mode="optimal",
-                cache_dir=CACHE,
-                progress=progress,
-                memory_updates=True,
-            )
-            print(f"[full-reference] output={result} bytes={result.stat().st_size}", flush=True)
-            print("[full-reference] usage=" + json.dumps(harness.usage, ensure_ascii=False), flush=True)
-            _write_latest_artifact(None)
-            return
-        except Exception as exc:
-            report = _write_latest_artifact(exc)
-            waiver = _record_best_effort_waiver(exc)
-            if waiver is not None:
-                continue
-            if report["translated_segments"] <= 0:
-                raise
-            print(
-                "[full-reference] best_effort_recovered=true; strict pipeline stopped, "
-                "but cached translation was exported and the workflow may continue",
-                flush=True,
-            )
-            print("[full-reference] usage=" + json.dumps(harness.usage, ensure_ascii=False), flush=True)
-            return
-
-    report = _write_latest_artifact(RuntimeError("best-effort waiver limit reached"))
-    print("[full-reference] waiver_limit_reached=true report=" + json.dumps(report, ensure_ascii=False), flush=True)
+    try:
+        while True:
+            try:
+                translate_book(
+                    SOURCE,
+                    OUTPUT,
+                    harness,
+                    mode="optimal",
+                    cache_dir=CACHE,
+                    quality_gate=True,
+                    allow_waivers=False,
+                )
+                break
+            except BaseException as exc:
+                waiver = _record_best_effort_waiver(exc)
+                if waiver is None:
+                    raise
+                print("[full-reference] best_effort_waiver=" + json.dumps(waiver, ensure_ascii=False), flush=True)
+        _write_latest_artifact(None)
+    except BaseException as exc:
+        _write_latest_artifact(exc)
+        raise
 
 
 if __name__ == "__main__":
