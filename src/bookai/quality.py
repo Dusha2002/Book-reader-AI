@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass
 
 from .models import BookMemory, Segment
@@ -16,6 +17,23 @@ _FORBIDDEN_SCRIPTS = {
     "hebrew": re.compile(r"[\u0590-\u05ff]"),
     "devanagari": re.compile(r"[\u0900-\u097f]"),
 }
+_SERVICE_LEAK = re.compile(
+    r"(?:так\s+и\s+оставь|оставь\s+без\s+перевода|глоссари|служебн(?:ая|ые)\s+инструкц|"
+    r"переведи\s+только|не\s+переводи\s+контекст|context[_ ]only|\btargets?\b|translation\s+note)",
+    re.I,
+)
+_FEMALE_VERBS = (
+    "сказала", "ответила", "повторила", "спросила", "настояла", "подумала", "решила",
+    "повернулась", "посмотрела", "усмехнулась", "улыбнулась", "кивнула", "вздохнула",
+    "пожала", "заметила", "продолжила", "остановилась", "встала", "села",
+)
+_MALE_VERBS = tuple(
+    word for word in (
+        "сказал", "ответил", "повторил", "спросил", "настоял", "подумал", "решил",
+        "повернулся", "посмотрел", "усмехнулся", "улыбнулся", "кивнул", "вздохнул",
+        "пожал", "заметил", "продолжил", "остановился", "встал", "сел",
+    )
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -47,6 +65,39 @@ def _balanced(text: str, left: str, right: str) -> bool:
     return text.count(left) == text.count(right)
 
 
+def _has_repetition_loop(text: str) -> bool:
+    sentences = [
+        " ".join(row.casefold().split())
+        for row in re.split(r"(?<=[.!?…])\s+|\n+", text)
+        if len(" ".join(row.split())) >= 28
+    ]
+    counts = Counter(sentences)
+    return any(count >= 3 for count in counts.values())
+
+
+def _character_gender_mismatch(original: str, candidate: str, memory: BookMemory) -> str | None:
+    original_lower = original.casefold()
+    for source_name, description in memory.characters.items():
+        if not source_name or source_name.casefold() not in original_lower:
+            continue
+        desc = str(description or "")
+        gender_match = re.search(r"\bgender=(male|female)\b", desc, flags=re.I)
+        ru_match = re.search(r"\bru=([^;]+)", desc, flags=re.I)
+        if not gender_match or not ru_match:
+            continue
+        gender = gender_match.group(1).casefold()
+        ru_name = ru_match.group(1).strip()
+        wrong = _FEMALE_VERBS if gender == "male" else _MALE_VERBS
+        verbs = "|".join(map(re.escape, wrong))
+        name = re.escape(ru_name)
+        # Restrict to direct name/verb adjacency to avoid blaming another character.
+        if re.search(rf"\b{name}\b\s+(?:\w+\s+){{0,2}}(?:{verbs})\b", candidate, flags=re.I):
+            return f"gender drift near {ru_name}: expected {gender}"
+        if re.search(rf"\b(?:{verbs})\b\s+\b{name}\b", candidate, flags=re.I):
+            return f"gender drift near {ru_name}: expected {gender}"
+    return None
+
+
 def candidate_issues(segment: Segment, candidate: str, memory: BookMemory | None = None) -> list[QualityIssue]:
     original = segment.text.strip()
     candidate = (candidate or "").strip()
@@ -60,32 +111,55 @@ def candidate_issues(segment: Segment, candidate: str, memory: BookMemory | None
         return out
     if candidate == original and _LATIN_WORD.search(original):
         add("hard", "unchanged", "translation is identical to English source")
+
     scripts = _unexpected_scripts(original, candidate)
     if scripts:
         add("hard", "unexpected_script", "unexpected writing system: " + ", ".join(scripts))
+
     latin_words = _LATIN_WORD.findall(candidate)
     cyr = len(_CYRILLIC.findall(candidate))
     if len(latin_words) >= 5 and cyr < max(8, sum(map(len, latin_words)) // 2):
         add("hard", "english_leftover", f"too much English remains ({len(latin_words)} words)")
+
     if _numbers(original) != _numbers(candidate):
         add("hard", "numbers", "numbers changed, disappeared, or were added")
-    if len(original) >= 80:
-        ratio = len(candidate) / max(1, len(original))
-        if ratio < 0.42:
+
+    source_len = len(original)
+    ratio = len(candidate) / max(1, source_len)
+    if source_len <= 60:
+        if len(candidate) > max(120, source_len * 6):
+            add("hard", "short_expansion", f"short source expanded from {source_len} to {len(candidate)} chars")
+        elif len(candidate) > max(80, source_len * 4):
+            add("medium", "short_expansion", f"short source unusually expanded from {source_len} to {len(candidate)} chars")
+    elif source_len < 80 and ratio > 1.85:
+        add("hard", "too_long", f"translation/source length ratio is {ratio:.2f}")
+    elif source_len >= 80:
+        if ratio < 0.48:
             add("hard", "too_short", f"translation/source length ratio is {ratio:.2f}")
-        elif ratio > 2.20:
+        elif ratio > 1.65:
             add("hard", "too_long", f"translation/source length ratio is {ratio:.2f}")
-        elif ratio < 0.58 or ratio > 1.75:
+        elif ratio < 0.58 or ratio > 1.35:
             add("medium", "length", f"unusual translation/source length ratio is {ratio:.2f}")
+
+    if _SERVICE_LEAK.search(candidate) and not _SERVICE_LEAK.search(original):
+        add("hard", "service_leak", "translator instruction or service text leaked into literary output")
+
+    if len(candidate) >= 180 and _has_repetition_loop(candidate):
+        add("hard", "repetition_loop", "translation contains a repeated sentence loop")
+
     for left, right, label in (("(", ")", "parentheses"), ("[", "]", "brackets"), ("«", "»", "Russian quotes")):
         if not _balanced(candidate, left, right):
             add("medium", "unbalanced_punctuation", f"unbalanced {label}")
             break
+
     if is_heading(segment):
         if "\n" in candidate:
             add("hard", "heading_multiline", "chapter/title translation became multiline")
-        if len(candidate) > max(180, len(original) * 4):
+        if len(candidate) > max(80, len(original) * 3):
             add("hard", "heading_expanded", "heading expanded into body-like prose")
+        if re.match(r"^\s*Chapter\b", original, flags=re.I) and not re.match(r"^\s*Глава\b", candidate, flags=re.I):
+            add("hard", "chapter_heading", "English Chapter heading was not translated as a Russian chapter heading")
+
     if memory is not None:
         lower_original = original.casefold()
         lower_candidate = candidate.casefold()
@@ -95,6 +169,10 @@ def candidate_issues(segment: Segment, candidate: str, memory: BookMemory | None
             if src.casefold() in lower_original and preferred.casefold() not in lower_candidate:
                 add("medium", "glossary", f"preferred term missing: {src} → {preferred}")
                 break
+        mismatch = _character_gender_mismatch(original, candidate, memory)
+        if mismatch:
+            add("hard", "character_gender", mismatch)
+
     return out
 
 
@@ -109,7 +187,6 @@ def batch_issues(segments: list[Segment], translations: dict[str, str], memory: 
 
 
 def _single_segment_wrapper(obj: dict, sid: str) -> str | None:
-    # Single-target recovery is safe because there is no possible cross-target mapping.
     for key in ("translation", "translated_text", "text", "result", "output"):
         value = obj.get(key)
         if isinstance(value, str) and value.strip():
