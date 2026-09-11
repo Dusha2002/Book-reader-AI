@@ -41,6 +41,9 @@ def _format_dialogue_v9d(segment, text: str):
             value = re.sub(r"^\s*[\"'«]\s*", "— ", value, count=1)
         value = re.sub(r"—\s*[\"'«]\s*(?=[А-ЯЁ])", "— ", value)
         value = re.sub(r"(?<=[.!?…])\s*[\"'«]\s*(?=[А-ЯЁ])", " — ", value)
+        # English closing quote before Russian punctuation/author words. Safe only
+        # because this branch is source-confirmed direct speech.
+        value = re.sub(r"(?<=[А-Яа-яЁё0-9])['\"](?=[,!?….])", "", value)
         value = re.sub(r"([,!?….])\s*[\"'»](?=\s*(?:—|-|$))", r"\1", value)
         value = re.sub(r"[\"'»]\s*$", "", value)
     else:
