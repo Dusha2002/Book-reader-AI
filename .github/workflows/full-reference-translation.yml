@@ -53,7 +53,7 @@ jobs:
       BOOKAI_CONTEXT_WORKERS: '4'
       BOOKAI_RELIABILITY_WORKERS: '4'
       BOOKAI_V9F_CUE_WORDS: '5'
-      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-chapter3-v9o-clean'
+      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-chapter3-v9p-clean'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -66,7 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/chapter_reference_translation_v9e.py scripts/chapter_reference_translation_v9f.py scripts/chapter_reference_translation_v9g.py scripts/chapter_reference_translation_v9h.py scripts/chapter_reference_translation_v9i.py scripts/chapter_reference_translation_v9j.py scripts/chapter_reference_translation_v9k.py scripts/chapter_reference_translation_v9l.py scripts/chapter_reference_translation_v9m.py scripts/chapter_reference_translation_v9n.py scripts/chapter_reference_translation_v9o.py scripts/hybrid_reference_translation.py
+          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/chapter_reference_translation_v9e.py scripts/chapter_reference_translation_v9f.py scripts/chapter_reference_translation_v9g.py scripts/chapter_reference_translation_v9h.py scripts/chapter_reference_translation_v9i.py scripts/chapter_reference_translation_v9j.py scripts/chapter_reference_translation_v9k.py scripts/chapter_reference_translation_v9l.py scripts/chapter_reference_translation_v9m.py scripts/chapter_reference_translation_v9n.py scripts/chapter_reference_translation_v9o.py scripts/chapter_reference_translation_v9p.py scripts/hybrid_reference_translation.py
           pytest -q
       - name: Verify API secrets without exposing them
         shell: bash
@@ -74,19 +74,19 @@ jobs:
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
           test -n "${OPENROUTER_API_KEY:-}" || { echo 'OPENROUTER_API_KEY is not configured' >&2; exit 1; }
-          echo '[bookai] architecture=v9o chapter=three quote-local-ellipsis=yes retry=bounded'
-      - name: Translate complete Chapter Three with v9o
+          echo '[bookai] architecture=v9p chapter=three third-person-antecedent-invariant=yes'
+      - name: Translate complete Chapter Three with v9p
         shell: bash
         run: |
           set -euo pipefail
           test -f Devices_and_Desires.fb2
           BOOKAI_CHAPTER_NAME='Chapter Three' timeout --signal=TERM --kill-after=30s 4m \
-            python scripts/chapter_reference_translation_v9o.py 2>&1 | tee chapter-v9-chapter-three.log
-      - name: Upload Chapter Three v9o evaluation
+            python scripts/chapter_reference_translation_v9p.py 2>&1 | tee chapter-v9-chapter-three.log
+      - name: Upload Chapter Three v9p evaluation
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chapter-three-quality-v9o-source-only-evaluation
+          name: chapter-three-quality-v9p-source-only-evaluation
           path: |
             Devices_and_Desires_RU_*_EVAL_V9.fb2
             chapter-v9-*.txt
