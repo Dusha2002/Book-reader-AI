@@ -15,7 +15,7 @@ permissions:
 jobs:
   chapter-eval:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 20
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       BOOKAI_BASE_URL: https://openrouter.ai/api/v1
@@ -55,7 +55,7 @@ jobs:
       BOOKAI_V9F_CUE_WORDS: '5'
       BOOKAI_V9_REPAIR_MAX: '42'
       BOOKAI_V9_REPAIR_WORKERS: '5'
-      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first-three-v9q'
+      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-chapter3-v9r-full-clean'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -68,7 +68,7 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/chapter_reference_translation_v9e.py scripts/chapter_reference_translation_v9f.py scripts/chapter_reference_translation_v9g.py scripts/chapter_reference_translation_v9h.py scripts/chapter_reference_translation_v9i.py scripts/chapter_reference_translation_v9j.py scripts/chapter_reference_translation_v9k.py scripts/chapter_reference_translation_v9l.py scripts/chapter_reference_translation_v9m.py scripts/chapter_reference_translation_v9n.py scripts/chapter_reference_translation_v9o.py scripts/chapter_reference_translation_v9p.py scripts/chapter_reference_translation_v9q.py scripts/hybrid_reference_translation.py
+          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/chapter_reference_translation_v9e.py scripts/chapter_reference_translation_v9f.py scripts/chapter_reference_translation_v9g.py scripts/chapter_reference_translation_v9h.py scripts/chapter_reference_translation_v9i.py scripts/chapter_reference_translation_v9j.py scripts/chapter_reference_translation_v9k.py scripts/chapter_reference_translation_v9l.py scripts/chapter_reference_translation_v9m.py scripts/chapter_reference_translation_v9n.py scripts/chapter_reference_translation_v9o.py scripts/chapter_reference_translation_v9p.py scripts/chapter_reference_translation_v9q.py scripts/chapter_reference_translation_v9r.py scripts/hybrid_reference_translation.py
           pytest -q
       - name: Verify API secrets without exposing them
         shell: bash
@@ -76,24 +76,19 @@ jobs:
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
           test -n "${OPENROUTER_API_KEY:-}" || { echo 'OPENROUTER_API_KEY is not configured' >&2; exit 1; }
-          echo '[bookai] architecture=v9q chapters=one,two,three shared-self-tm=yes full-qe=yes gold-reference=no'
-      - name: Translate Chapters One through Three with v9q
+          echo '[bookai] architecture=v9r chapter=three full-qe=yes semantic-lock=yes gold-reference=no'
+      - name: Translate complete Chapter Three with full v9r
         shell: bash
         run: |
           set -euo pipefail
           test -f Devices_and_Desires.fb2
-          for word in One Two Three; do
-            slug=$(printf '%s' "$word" | tr '[:upper:]' '[:lower:]')
-            echo "[bookai] ===== START Chapter ${word} ====="
-            BOOKAI_CHAPTER_NAME="Chapter ${word}" timeout --signal=TERM --kill-after=30s 15m \
-              python scripts/chapter_reference_translation_v9q.py 2>&1 | tee "chapter-v9-full-${slug}.log"
-            echo "[bookai] ===== DONE Chapter ${word} ====="
-          done
-      - name: Upload first three chapters v9q evaluation
+          BOOKAI_CHAPTER_NAME='Chapter Three' timeout --signal=TERM --kill-after=30s 15m \
+            python scripts/chapter_reference_translation_v9r.py 2>&1 | tee chapter-v9-full-three.log
+      - name: Upload Chapter Three v9r full evaluation
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: first-three-chapters-quality-v9q-source-only-evaluation
+          name: chapter-three-full-v9r-source-only-evaluation
           path: |
             Devices_and_Desires_RU_*_EVAL_V9.fb2
             chapter-v9-*.txt
