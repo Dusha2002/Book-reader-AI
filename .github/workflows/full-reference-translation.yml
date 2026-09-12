@@ -54,10 +54,12 @@ jobs:
       BOOKAI_RELIABILITY_WORKERS: '4'
       BOOKAI_V9F_CUE_WORDS: '5'
       BOOKAI_V9_REPAIR_MAX: '42'
-      BOOKAI_V9_REPAIR_WORKERS: '5'
+      BOOKAI_V9_REPAIR_WORKERS: '6'
       BOOKAI_V9S_VERIFY_BATCH_CHARS: '11500'
       BOOKAI_V9S_TAIL_REPAIR_MAX: '28'
-      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first-three-v9s-final'
+      BOOKAI_V9T_VERIFY_WORKERS: '4'
+      BOOKAI_V9T_TAIL_WORKERS: '6'
+      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first-three-v9t-fast'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -70,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/chapter_reference_translation_v9e.py scripts/chapter_reference_translation_v9f.py scripts/chapter_reference_translation_v9g.py scripts/chapter_reference_translation_v9h.py scripts/chapter_reference_translation_v9i.py scripts/chapter_reference_translation_v9j.py scripts/chapter_reference_translation_v9k.py scripts/chapter_reference_translation_v9l.py scripts/chapter_reference_translation_v9m.py scripts/chapter_reference_translation_v9n.py scripts/chapter_reference_translation_v9o.py scripts/chapter_reference_translation_v9p.py scripts/chapter_reference_translation_v9q.py scripts/chapter_reference_translation_v9r.py scripts/chapter_reference_translation_v9s.py scripts/hybrid_reference_translation.py
+          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/chapter_reference_translation_v9e.py scripts/chapter_reference_translation_v9f.py scripts/chapter_reference_translation_v9g.py scripts/chapter_reference_translation_v9h.py scripts/chapter_reference_translation_v9i.py scripts/chapter_reference_translation_v9j.py scripts/chapter_reference_translation_v9k.py scripts/chapter_reference_translation_v9l.py scripts/chapter_reference_translation_v9m.py scripts/chapter_reference_translation_v9n.py scripts/chapter_reference_translation_v9o.py scripts/chapter_reference_translation_v9p.py scripts/chapter_reference_translation_v9q.py scripts/chapter_reference_translation_v9r.py scripts/chapter_reference_translation_v9s.py scripts/chapter_reference_translation_v9t.py scripts/hybrid_reference_translation.py
           pytest -q
       - name: Verify API secrets without exposing them
         shell: bash
@@ -78,8 +80,8 @@ jobs:
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
           test -n "${OPENROUTER_API_KEY:-}" || { echo 'OPENROUTER_API_KEY is not configured' >&2; exit 1; }
-          echo '[bookai] architecture=v9s chapters=one,two,three shared-self-tm=yes final-consensus-qe=yes semantic-lock=yes gold-reference=no'
-      - name: Translate Chapters One through Three with full v9s
+          echo '[bookai] architecture=v9t chapters=one,two,three shared-self-tm=yes incremental-final-qe=yes parallel-tail=yes semantic-lock=yes gold-reference=no'
+      - name: Translate Chapters One through Three with fast v9t
         shell: bash
         run: |
           set -euo pipefail
@@ -88,14 +90,14 @@ jobs:
             slug=$(printf '%s' "$word" | tr '[:upper:]' '[:lower:]')
             echo "[bookai] ===== START Chapter ${word} ====="
             BOOKAI_CHAPTER_NAME="Chapter ${word}" timeout --signal=TERM --kill-after=30s 15m \
-              python scripts/chapter_reference_translation_v9s.py 2>&1 | tee "chapter-v9-full-${slug}.log"
+              python scripts/chapter_reference_translation_v9t.py 2>&1 | tee "chapter-v9-full-${slug}.log"
             echo "[bookai] ===== DONE Chapter ${word} ====="
           done
-      - name: Upload first three chapters v9s final evaluation
+      - name: Upload first three chapters v9t speed evaluation
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: first-three-chapters-full-v9s-source-only-evaluation
+          name: first-three-chapters-v9t-fast-source-only-evaluation
           path: |
             Devices_and_Desires_RU_*_EVAL_V9.fb2
             chapter-v9-*.txt
