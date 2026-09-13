@@ -8,14 +8,18 @@ from .models import BookMemory, Segment
 from .v10 import GigaPrimaryTransport, _giga_json, _norm, _usage
 
 
+_START_TAG_RE = re.compile(r"<s\s+id=[\"']?(s\d{6})[\"']?\s*>", re.I)
+_CLOSE_TAG_RE = re.compile(r"</s\s*>", re.I)
+_ANY_S_TAG_RE = re.compile(r"</?s(?:\s|>)", re.I)
+
+
 class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
     """Complete tagged transport with bounded Giga-only recovery.
 
-    Normal path stays one tagged request per logical batch. If a response is
-    truncated, missing ids are retried in fixed micro-batches (default 4), not as
-    one large repeated batch and not through recursive split cascades. Tiny JSON
-    recovery is used for a small residual; any final stubborn id is translated by
-    one plain-text single-segment Giga call. DeepSeek is never a transport fallback.
+    A malformed tagged response must never contaminate a neighboring segment. Each
+    block is accepted only when its closing </s> occurs before the next opening <s>.
+    Corrupt/truncated ids are simply treated as missing and recovered with Giga.
+    DeepSeek is never a transport fallback.
     """
 
     name = "gigachat-3-lightning-v10-tagged-complete"
@@ -29,8 +33,31 @@ class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
             "json_fallback_calls": 0,
             "plain_single_calls": 0,
             "first_pass_missing": 0,
+            "corrupt_tag_blocks": 0,
             "final_missing": 0,
         }
+
+    @staticmethod
+    def parse_tagged(text: str, expected: set[str]) -> dict[str, str]:
+        """Parse only independently well-formed blocks; never span into a next block."""
+        raw = str(text or "")
+        starts = list(_START_TAG_RE.finditer(raw))
+        out: dict[str, str] = {}
+        for pos, match in enumerate(starts):
+            sid = match.group(1).casefold()
+            if sid not in expected:
+                continue
+            body_start = match.end()
+            next_start = starts[pos + 1].start() if pos + 1 < len(starts) else len(raw)
+            close = _CLOSE_TAG_RE.search(raw, body_start, next_start)
+            if close is None:
+                continue
+            value = raw[body_start:close.start()].strip()
+            # Reject any protocol residue even if the outer block happened to close.
+            if not value or _ANY_S_TAG_RE.search(value):
+                continue
+            out[sid] = value
+        return out
 
     def _tagged(self, batch: list[Segment], memory: BookMemory, source_segments, *, retry: bool) -> dict[str, str]:
         self.transport_stats["tagged_calls"] += 1
@@ -65,7 +92,7 @@ No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly on
                 continue
             sid = str(row.get("id") or "")
             ru = _norm(row.get("ru") or "")
-            if sid in expected and ru:
+            if sid in expected and ru and not _ANY_S_TAG_RE.search(ru):
                 out[sid] = ru
         return out
 
@@ -108,6 +135,8 @@ No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly on
         text = re.sub(r"^```(?:text|markdown)?\s*", "", text, flags=re.I)
         text = re.sub(r"\s*```$", "", text)
         text = re.sub(r"^\s*(?:перевод|translation)\s*:\s*", "", text, flags=re.I)
+        if _ANY_S_TAG_RE.search(text):
+            return ""
         return text.strip()
 
     def translate_many(self, segments: list[Segment], memory: BookMemory, *, source_segments: list[Segment] | None = None) -> tuple[dict[str, str], dict[str, str]]:
@@ -146,8 +175,6 @@ No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly on
             for start in range(0, len(residual), json_batch):
                 result.update(self._json_recover(residual[start:start + json_batch], memory, source_segments))
 
-        # Final stubborn rows are safest as one input -> one plain translation.
-        # This is bounded by the tiny residual after tagged+micro+JSON recovery.
         final_missing = [s for s in regular if s.id not in result]
         for segment in final_missing:
             candidate = self._plain_single_recover(segment, memory, source_segments)
