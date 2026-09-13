@@ -67,7 +67,7 @@ def main() -> None:
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
         "whole_book_segments": len(all_targets),
-        "architecture": "clean-v10:source-only+two-stage-integrity+v9d-dialogue-speaker+v9ad-canon-risk+quantity-v2+proof-first-deepseek:no-v9-imports",
+        "architecture": "clean-v10:source-only+two-stage-integrity+v9d-dialogue-speaker+v9ad-canon-risk+quantity-v2+clause-dup-fidelity+proof-first-deepseek+boundary-salvage:no-v9-imports",
     }, ensure_ascii=False), flush=True)
 
     giga = RobustTaggedPrimaryTransport()
@@ -83,8 +83,6 @@ def main() -> None:
     translated, primary_errors = giga.translate_many(targets, memory, source_segments=all_targets)
     usage_after_primary = giga.usage.as_dict()
 
-    # First structural gate: wrong-neighbor/prompt-contaminated segments never enter
-    # dialogue or semantic QA. Recovery is one-segment SOURCE-only Giga.
     integrity = SegmentIntegrityGate(giga)
     integrity_changed = integrity.repair(targets, translated, memory, source_segments=all_targets)
     usage_after_integrity = giga.usage.as_dict()
@@ -119,9 +117,6 @@ def main() -> None:
     speaker_guard_final = DialogueSpeakerContinuityGuard()
     speaker_after_semantic = speaker_guard_final.apply(targets, translated)
 
-    # Second structural gate: a later repair must not be allowed to introduce a
-    # boundary/prompt failure that the primary gate could not see. Any such row is
-    # restored source-only by Giga before publication.
     final_integrity_guard = SegmentIntegrityGate(giga)
     final_integrity_changed = final_integrity_guard.repair(targets, translated, memory, source_segments=all_targets)
     usage_after_final_integrity = giga.usage.as_dict()
@@ -164,7 +159,7 @@ def main() -> None:
     MAP.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), "utf-8")
 
     report = {
-        "version": "v10-clean-6d-proof-first-deepseek",
+        "version": "v10-clean-7-clause-dup-transport-salvage",
         "chapter": chapter_name,
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
@@ -178,12 +173,12 @@ def main() -> None:
         },
         "architecture": {
             "book_bible": "SOURCE-ONLY high-coverage v9ad-style spelling canon + conservative technical glossary; no reference seed",
-            "primary": "GigaChat tagged batches + bounded Giga-only recovery + prompt-leak rejection",
+            "primary": "GigaChat tagged batches + next-opening boundary salvage + bounded Giga-only recovery + prompt-leak rejection",
             "segment_integrity": "pre-QA and pre-export structural gates; isolated SOURCE-only Giga recovery",
             "discourse_dialogue": "v9d source-structural quotation normalization + conservative two-speaker continuity",
-            "qa": "deterministic fidelity + proposition-aware QuantityFidelity v2 + direction/kinship/hunting contracts",
+            "qa": "deterministic fidelity + QuantityFidelity v2 + duplicate-content + reliable-anchor clause-order + direction/kinship/hunting contracts",
             "cheap_repair": "Giga exact-span patch, bounded batch rewrite, then single-row Giga fallback for objective local defects",
-            "semantic_repair": "ONE DeepSeek batch, <=8 rows; unresolved proven quantity/omission hard defects have first priority over risk-only candidates",
+            "semantic_repair": "ONE DeepSeek batch, <=8 rows; unresolved proven quantity/omission/duplicate/order hard defects have first priority",
             "final_gate": "deterministic QA + zero-residual structural integrity",
             "reference_seed": False,
             "legacy_sanitizer": False,
