@@ -53,6 +53,8 @@ class GigaLocalRewriter:
         system = """You are a FAST GigaChat EN→RU local fidelity editor. Every item has a PROVEN local defect.
 Fix ONLY the listed defect(s) while preserving the current Russian wording, literary tone, paragraph structure and all unrelated facts.
 Typical defects: missing/wrong number or unit, question force/punctuation, physical material/order, raw untranslated Latin, local gender agreement.
+For a NUMERIC defect, restore the COMPLETE proposition attached to the missing number, not merely the numeral. If English uses a number as a label/choice such as "number six", preserve that meaning naturally in Russian (for example «номер шесть»/«шестой вариант») and never delete the surrounding clause.
+For a LATIN defect, remove mixed-script/transliterated residue without changing the referent.
 Do not add interpretations and do not perform broad stylistic rewriting. corrected_ru MUST be the COMPLETE final Russian translation of exactly source.
 Return every supplied id. ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]}.
 """
