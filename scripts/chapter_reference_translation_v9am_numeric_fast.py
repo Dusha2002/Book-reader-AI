@@ -30,7 +30,34 @@ def _row_priority(row: dict[str, Any]) -> tuple[int, int]:
 
 
 def _numeric_hard_rows(targets, translated, memory) -> list[dict[str, Any]]:
-    rows = [dict(row) for row in _BASE_HARD_ROWS(targets, translated, memory)]
+    raw_rows = [dict(row) for row in _BASE_HARD_ROWS(targets, translated, memory)]
+    checks: dict[str, dict[str, Any]] = {}
+    target_by_id = {str(segment.id): segment for segment in targets}
+    heuristic_dropped: list[str] = []
+    rows: list[dict[str, Any]] = []
+
+    # v9al predates the deterministic numeric contract and conservatively routed
+    # many numbered-looking rows even when their value was already correct. Once
+    # we can prove the value is preserved, that heuristic no longer buys quality
+    # and only bloats the DeepSeek evidence batch.
+    for row in raw_rows:
+        sid = str(row.get("id") or "")
+        segment = target_by_id.get(sid)
+        if segment is None:
+            continue
+        check = compare_numeric_fidelity(
+            str(segment.text or ""), str(translated.get(sid) or "")
+        )
+        checks[sid] = check
+        codes = [str(code) for code in row.get("codes", [])]
+        if "numbered_entity_exactness" in codes and check.get("ok", True):
+            codes = [code for code in codes if code != "numbered_entity_exactness"]
+            heuristic_dropped.append(sid)
+        if not codes:
+            continue
+        row["codes"] = codes
+        rows.append(row)
+
     by_id = {str(row.get("id") or ""): row for row in rows}
     mismatches: list[dict[str, Any]] = []
 
@@ -38,7 +65,10 @@ def _numeric_hard_rows(targets, translated, memory) -> list[dict[str, Any]]:
         sid = str(segment.id)
         source = str(segment.text or "")
         current = str(translated.get(sid) or "")
-        check = compare_numeric_fidelity(source, current)
+        check = checks.get(sid)
+        if check is None:
+            check = compare_numeric_fidelity(source, current)
+            checks[sid] = check
         if check.get("ok", True):
             continue
 
@@ -48,7 +78,9 @@ def _numeric_hard_rows(targets, translated, memory) -> list[dict[str, Any]]:
             "missing": check.get("missing") or [],
         }
         mismatches.append({"id": sid, **detail})
-        code = "spelled_number_fidelity:" + json.dumps(detail, ensure_ascii=False, separators=(",", ":"))
+        code = "spelled_number_fidelity:" + json.dumps(
+            detail, ensure_ascii=False, separators=(",", ":")
+        )
 
         current_row = by_id.get(sid)
         if current_row is not None:
@@ -72,8 +104,7 @@ def _numeric_hard_rows(targets, translated, memory) -> list[dict[str, Any]]:
 
     # Objective numeric mismatches are publication obligations, not a soft cost
     # heuristic. Put them ahead of generic evidence and allow them to exceed the
-    # ordinary evidence cap if necessary. This prevents a late-book 30→35 error
-    # from being silently dropped because 16 earlier heuristic rows filled budget.
+    # ordinary evidence cap if necessary.
     rows.sort(key=_row_priority)
     soft_cap = max(4, int(__import__("os").getenv("BOOKAI_FAST_EVIDENCE_MAX") or "16"))
     effective_cap = max(soft_cap, len(mismatches))
@@ -87,6 +118,7 @@ def _numeric_hard_rows(targets, translated, memory) -> list[dict[str, Any]]:
             "mismatch_count": len(mismatches),
             "mismatch_ids": [row["id"] for row in mismatches],
             "details": mismatches[:32],
+            "heuristic_number_rows_dropped": heuristic_dropped,
             "soft_cap": soft_cap,
             "effective_cap": effective_cap,
             "evidence_rows_after_cap": len(selected),
@@ -94,7 +126,7 @@ def _numeric_hard_rows(targets, translated, memory) -> list[dict[str, Any]]:
             "dropped_numeric_ids": dropped_numeric,
         }
     )
-    if mismatches:
+    if mismatches or heuristic_dropped:
         print("[v9am-numeric-fidelity] " + json.dumps(_NUMERIC_STATS, ensure_ascii=False), flush=True)
     if dropped_numeric:
         raise RuntimeError("numeric publication obligations were dropped from evidence queue")
@@ -102,11 +134,10 @@ def _numeric_hard_rows(targets, translated, memory) -> list[dict[str, Any]]:
 
 
 def _numeric_issue_score(targets, translated, memory, sid: str) -> tuple[int, list[str]]:
-    score, codes = _BASE_ISSUE_SCORE(targets, translated, memory, sid)
+    base_score, codes = _BASE_ISSUE_SCORE(targets, translated, memory, sid)
     segment = next(segment for segment in targets if str(segment.id) == str(sid))
     check = compare_numeric_fidelity(
-        str(segment.text or ""),
-        str(translated.get(sid) or ""),
+        str(segment.text or ""), str(translated.get(sid) or "")
     )
     if not check.get("ok", True):
         detail = "spelled_number_fidelity:" + json.dumps(
@@ -120,10 +151,11 @@ def _numeric_issue_score(targets, translated, memory, sid: str) -> tuple[int, li
         )
         if detail not in codes:
             codes.append(detail)
-        # Bigger than any single generic hard finding, so a candidate cannot be
-        # accepted merely by polishing style while leaving the number wrong.
-        score += 12
-    return score, codes
+        # While the objective number is still wrong, return a constant blocking
+        # score. Fixing unrelated style/hard issues cannot make a numerically-wrong
+        # candidate appear "better" and slip through acceptance.
+        return 1_000_000, codes
+    return base_score, codes
 
 
 def _annotate_numeric_report() -> None:
@@ -140,9 +172,9 @@ def _annotate_numeric_report() -> None:
         {
             "experiment": "v9am-fast-deepseek-numeric-contract",
             "numeric_fidelity": (
-                "span-aware deterministic EN/RU numeric parser; generic lexical ordinals are excluded; "
-                "objective quantity/numbered-entity mismatches outrank the soft evidence budget and "
-                "a repair is rejected until the numeric fact is preserved"
+                "span-aware deterministic EN/RU numeric parser; Russian compact numeric compounds are recognized; "
+                "repeated references compare by value presence rather than duplicate count; objective mismatches "
+                "outrank the soft evidence budget and cannot be accepted until the value is repaired"
             ),
             "gigachat_ultra_used": False,
         }
