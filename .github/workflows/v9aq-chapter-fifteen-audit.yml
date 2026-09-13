@@ -1,0 +1,155 @@
+name: v9aq-chapter-fifteen-audit
+
+on:
+  push:
+    branches: [experiment/v9ah-fast-deepseek]
+    paths: [.github/workflows/v9aq-chapter-fifteen-audit.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_BASE_URL: https://api.deepseek.com
+      GIGACHAT_AUTH_KEY: ${{ secrets.GIGACHAT_AUTH_KEY }}
+      GIGACHAT_SCOPE: GIGACHAT_API_PERS
+      GIGACHAT_BASE_URL: https://api.giga.chat/v1
+      BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
+      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '12'
+      BOOKAI_GIGACHAT_BATCH_CHARS: '10000'
+      BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
+      BOOKAI_GIGACHAT_RECOVERY_ROUNDS: '1'
+      BOOKAI_GIGACHAT_RATE_LIMIT_ATTEMPTS: '7'
+      BOOKAI_GIGACHAT_RATE_LIMIT_BACKOFF: '2.0'
+      BOOKAI_GIGACHAT_RATE_LIMIT_MAX_SLEEP: '15.0'
+      BOOKAI_GIGACHAT_TOKEN_CACHE: /tmp/bookai-gigachat-token.json
+      BOOKAI_ANALYZER_MODEL: deepseek-flash
+      BOOKAI_TRANSLATOR_MODEL: deepseek-flash
+      BOOKAI_GATE_MODEL: deepseek-flash
+      BOOKAI_MEMORY_MODEL: deepseek-flash
+      BOOKAI_EDITOR_MODEL: deepseek-flash
+      BOOKAI_HARD_MODEL: deepseek-flash
+      BOOKAI_MAX_MODEL: deepseek-flash
+      BOOKAI_LLM_GATE: 'false'
+      BOOKAI_REASONING: none
+      BOOKAI_HYMT_HARD_THRESHOLD: '999'
+      BOOKAI_DEEPSEEK_SEGMENT_CAP: '0'
+      BOOKAI_DRAFT_RECOVERY_MAX: '0'
+      BOOKAI_SECOND_REPAIR_MAX: '0'
+      BOOKAI_FRESH_RETRANSLATE_MAX: '0'
+      BOOKAI_BOOK_INTELLIGENCE_WAIT: '30'
+      BOOKAI_TM_RETRIEVAL_K: '4'
+      BOOKAI_HYBRID_BATCH_CHARS: '10000'
+      BOOKAI_BULK_PROBE_SEGMENTS: '8'
+      BOOKAI_RETRY_ATTEMPTS: '3'
+      BOOKAI_REQUEST_TIMEOUT: '45'
+      BOOKAI_ANALYZER_REQUEST_TIMEOUT: '60'
+      BOOKAI_ANALYSIS_CHARS: '32000'
+      BOOKAI_CONTEXT_WORKERS: '3'
+      BOOKAI_RELIABILITY_WORKERS: '2'
+      BOOKAI_V9_REPAIR_MAX: '42'
+      BOOKAI_V9_REPAIR_WORKERS: '3'
+      BOOKAI_V9AB_DEEP_REPAIR_MAX: '48'
+      BOOKAI_V9AB_DEEP_BATCH: '10'
+      BOOKAI_V9AB_FINAL_VERIFY_MAX: '48'
+      BOOKAI_V9AB_VERIFY_BATCH: '12'
+      BOOKAI_V9AF_SANITIZER_MAX: '32'
+      BOOKAI_V9AF_SANITIZER_BATCH: '18'
+      BOOKAI_V9AG_RETRY_MAX: '16'
+      BOOKAI_FAST_EVIDENCE_MAX: '16'
+      BOOKAI_V9AO_GIGA_BATCH: '12'
+      BOOKAI_V9AO_GIGA_MAX: '48'
+      BOOKAI_V9AP_DEEP_MAX: '10'
+      BOOKAI_V9AP_GIGA_JSON_ATTEMPTS: '4'
+      BOOKAI_V9AP_GIGA_JSON_BACKOFF: '1.0'
+      BOOKAI_V9AP_GIGA_JSON_MAX_SLEEP: '6.0'
+      BOOKAI_CHAPTER_NAME: Chapter Fifteen
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install and validate v9aq
+        env:
+          BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
+        run: |
+          set -euo pipefail
+          pip install -e '.[dev]' gigachat
+          python -m compileall -q src scripts/chapter_reference_translation_v9aq_giga_salvage.py
+          pytest -q tests/test_json_salvage.py tests/test_order_fidelity.py tests/test_address_fidelity.py
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, 'scripts')
+          import chapter_reference_translation_v9aq_giga_salvage as q
+          assert q._beat_coverage_failure('A. B. C. D. E. F. ' + 'x'*350, 'А. Б. В. Г. ' + 'я'*180)
+          assert 'invented_laser' in q._invention_failures('a shear-cut plate', 'пластина, вырезанная лазером')
+          assert 'other_day_idiom' in q._invention_failures('We talked the other day.', 'Мы говорили в середине дня.')
+          print('v9aq self-checks ok')
+          PY
+
+      - name: Translate Chapter Fifteen with v9aq
+        run: |
+          set -euo pipefail
+          test -n "${GIGACHAT_AUTH_KEY:-}"
+          test -n "${DEEPSEEK_API_KEY:-}"
+          rm -rf .bookai-cache-chapter-eval-v3-* .bookai-cache-v9aq-audit
+          rm -f chapter-v3-* chapter-v9-* Devices_and_Desires_RU_*_EVAL_V9.fb2
+          mkdir -p audit
+          export BOOKAI_V8_SHARED_CACHE='.bookai-cache-v9aq-audit'
+          /usr/bin/time -f '%e' -o audit/elapsed_seconds.txt \
+            timeout --signal=TERM --kill-after=30s 15m \
+            python scripts/chapter_reference_translation_v9aq_giga_salvage.py \
+            2>&1 | tee audit/run.log
+          cp -f chapter-v9-* audit/ 2>/dev/null || true
+          cp -f Devices_and_Desires_RU_*_EVAL_V9.fb2 audit/ 2>/dev/null || true
+
+      - name: Build audit summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('audit')
+          report_path = root / 'chapter-v9-chapter-fifteen.json'
+          report = json.loads(report_path.read_text('utf-8')) if report_path.exists() else {}
+          try:
+              elapsed = float((root / 'elapsed_seconds.txt').read_text().strip())
+          except Exception:
+              elapsed = None
+          summary = {
+              'chapter': 'Chapter Fifteen',
+              'elapsed_seconds': elapsed,
+              'under_3_minutes': bool(elapsed is not None and elapsed <= 180),
+              'segments': report.get('segments'),
+              'source_chars': report.get('source_chars'),
+              'completion_percent': report.get('completion_percent'),
+              'final_quality': report.get('final_quality'),
+              'post_export_issue_counts': report.get('post_export_issue_counts'),
+              'deepseek_usage': (report.get('extra') or {}).get('deepseek_usage'),
+              'gigachat_usage': report.get('gigachat_usage'),
+              'architecture': report.get('architecture'),
+              'v9ao_giga_first': report.get('v9ao_giga_first'),
+              'v9ap_precision': report.get('v9ap_precision'),
+              'v9aq': report.get('v9aq'),
+          }
+          (root / 'audit-summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), 'utf-8')
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
+          PY
+
+      - name: Upload Chapter Fifteen v9aq audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v9aq-chapter-fifteen-audit
+          path: audit
+          if-no-files-found: warn
+          retention-days: 7
