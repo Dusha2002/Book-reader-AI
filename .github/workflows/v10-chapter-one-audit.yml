@@ -52,6 +52,7 @@ jobs:
           pip install -e '.[dev]' gigachat
           python -m compileall -q \
             src/bookai/v10.py \
+            src/bookai/v10_deepseek.py \
             src/bookai/v10_source_bible.py \
             src/bookai/v10_name_canon.py \
             src/bookai/v10_dialogue.py \
@@ -67,7 +68,8 @@ jobs:
             tests/test_v10_architecture.py \
             tests/test_v10_source_only.py \
             tests/test_v10_discourse_quality.py \
-            tests/test_v10_integrity_quantity.py
+            tests/test_v10_integrity_quantity.py \
+            tests/test_v10_deepseek_routing.py
 
       - name: Translate Chapter One with clean v10
         run: |
@@ -133,7 +135,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v10-chapter-one-clean6c-two-stage-integrity
+          name: v10-chapter-one-clean6d-proof-first-deepseek
           path: audit
           if-no-files-found: warn
           retention-days: 7
