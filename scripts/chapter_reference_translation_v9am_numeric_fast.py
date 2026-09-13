@@ -12,6 +12,23 @@ _BASE_ISSUE_SCORE = v9al._issue_score
 _NUMERIC_STATS: dict[str, Any] = {}
 
 
+def _row_priority(row: dict[str, Any]) -> tuple[int, int]:
+    codes = [str(code) for code in row.get("codes", [])]
+    if any(code.startswith("spelled_number_fidelity:") for code in codes):
+        priority = 0
+    elif "short_omission" in codes:
+        priority = 1
+    elif "latin_leak" in codes or "latin_residue" in codes:
+        priority = 2
+    elif "v9_qe_unresolved" in codes:
+        priority = 3
+    elif "numbered_entity_exactness" in codes:
+        priority = 4
+    else:
+        priority = 5
+    return priority, int(row.get("index") or 0)
+
+
 def _numeric_hard_rows(targets, translated, memory) -> list[dict[str, Any]]:
     rows = [dict(row) for row in _BASE_HARD_ROWS(targets, translated, memory)]
     by_id = {str(row.get("id") or ""): row for row in rows}
@@ -53,21 +70,35 @@ def _numeric_hard_rows(targets, translated, memory) -> list[dict[str, Any]]:
         rows.append(row)
         by_id[sid] = row
 
-    rows.sort(key=lambda row: int(row["index"]))
-    cap = max(4, int(__import__("os").getenv("BOOKAI_FAST_EVIDENCE_MAX") or "16"))
-    rows = rows[:cap]
+    # Objective numeric mismatches are publication obligations, not a soft cost
+    # heuristic. Put them ahead of generic evidence and allow them to exceed the
+    # ordinary evidence cap if necessary. This prevents a late-book 30→35 error
+    # from being silently dropped because 16 earlier heuristic rows filled budget.
+    rows.sort(key=_row_priority)
+    soft_cap = max(4, int(__import__("os").getenv("BOOKAI_FAST_EVIDENCE_MAX") or "16"))
+    effective_cap = max(soft_cap, len(mismatches))
+    selected = rows[:effective_cap]
+    selected_ids = {str(row.get("id") or "") for row in selected}
+    dropped_numeric = [row["id"] for row in mismatches if row["id"] not in selected_ids]
+
     _NUMERIC_STATS.clear()
     _NUMERIC_STATS.update(
         {
             "mismatch_count": len(mismatches),
             "mismatch_ids": [row["id"] for row in mismatches],
-            "details": mismatches[:20],
-            "evidence_rows_after_cap": len(rows),
+            "details": mismatches[:32],
+            "soft_cap": soft_cap,
+            "effective_cap": effective_cap,
+            "evidence_rows_after_cap": len(selected),
+            "selected_ids": [str(row.get("id") or "") for row in selected],
+            "dropped_numeric_ids": dropped_numeric,
         }
     )
     if mismatches:
         print("[v9am-numeric-fidelity] " + json.dumps(_NUMERIC_STATS, ensure_ascii=False), flush=True)
-    return rows
+    if dropped_numeric:
+        raise RuntimeError("numeric publication obligations were dropped from evidence queue")
+    return selected
 
 
 def _numeric_issue_score(targets, translated, memory, sid: str) -> tuple[int, list[str]]:
@@ -89,6 +120,8 @@ def _numeric_issue_score(targets, translated, memory, sid: str) -> tuple[int, li
         )
         if detail not in codes:
             codes.append(detail)
+        # Bigger than any single generic hard finding, so a candidate cannot be
+        # accepted merely by polishing style while leaving the number wrong.
         score += 12
     return score, codes
 
@@ -107,8 +140,9 @@ def _annotate_numeric_report() -> None:
         {
             "experiment": "v9am-fast-deepseek-numeric-contract",
             "numeric_fidelity": (
-                "deterministic EN/RU digit + spelled-number parser; numeric mismatch is a hard "
-                "evidence route and repaired output is rejected until the numeric fact is preserved"
+                "span-aware deterministic EN/RU numeric parser; generic lexical ordinals are excluded; "
+                "objective quantity/numbered-entity mismatches outrank the soft evidence budget and "
+                "a repair is rejected until the numeric fact is preserved"
             ),
             "gigachat_ultra_used": False,
         }
