@@ -10,13 +10,13 @@ from bookai.llm import OpenAICompatibleProvider
 from bookai.parsers.base import load_book, save_book
 from bookai.pipeline import _chapter_groups, _should_translate
 from bookai.v10 import (
-    BookBibleBuilder,
     DeepSeekSemanticSpecialist,
     DeterministicQA,
     GigaPrimaryTransport,
     GigaSpanPatcher,
     issue_summary,
 )
+from bookai.v10_bible import AtomicBookBibleBuilder
 
 
 SOURCE = Path(os.getenv("BOOKAI_SOURCE") or "Devices_and_Desires.fb2")
@@ -76,7 +76,7 @@ def main() -> None:
     # One-time per-book stage. Its cost is reported separately and is not counted
     # against the 2-3 minute per-chapter steady-state SLA.
     bible_started = time.perf_counter()
-    memory, bible_stats = BookBibleBuilder(giga, BIBLE).build(all_targets)
+    memory, bible_stats = AtomicBookBibleBuilder(giga, BIBLE).build(all_targets)
     bible_seconds = time.perf_counter() - bible_started
     usage_after_bible = giga.usage.as_dict()
 
