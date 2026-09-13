@@ -14,7 +14,171 @@ from bookai.semantic_fidelity import (
 
 _BASE_HARD_ROWS = v9al._hard_issue_rows
 _BASE_ISSUE_SCORE = v9al._issue_score
+_BASE_ROUTE = v9al.v9ah._adaptive_route_v9ah
+_BASE_DEEP_REPAIR = v9al.v9ah._BASE_DEEP_REPAIR
 _NUMERIC_STATS: dict[str, Any] = {}
+_ROUTER_STATS: dict[str, Any] = {}
+
+
+def _contract_checks(source: str, target: str) -> dict[str, dict[str, Any]]:
+    return {
+        "numeric": compare_numeric_fidelity(source, target),
+        "question": compare_question_fidelity(source, target),
+        "material": compare_material_fidelity(source, target),
+    }
+
+
+def _contract_failures(source: str, target: str) -> list[tuple[str, dict[str, Any]]]:
+    checks = _contract_checks(source, target)
+    return [(name, check) for name, check in checks.items() if not check.get("ok", True)]
+
+
+def _contract_reason(name: str, check: dict[str, Any]) -> str:
+    if name == "numeric":
+        return (
+            "DETERMINISTIC numeric fidelity failure: source numeric values="
+            + json.dumps(check.get("source_values") or [], ensure_ascii=False)
+            + ", current_ru numeric values="
+            + json.dumps(check.get("target_values") or [], ensure_ascii=False)
+            + ", missing="
+            + json.dumps(check.get("missing") or [], ensure_ascii=False)
+            + ". Corrected Russian MUST preserve every missing source value exactly."
+        )
+    if name == "question":
+        return (
+            f"DETERMINISTIC question fidelity failure: source has {int(check.get('source_questions') or 0)} explicit questions, "
+            f"current_ru has {int(check.get('target_questions') or 0)}. Corrected Russian MUST preserve every source interrogative."
+        )
+    return (
+        "DETERMINISTIC material fidelity failure: physical material(s) missing from current_ru="
+        + json.dumps(check.get("missing") or [], ensure_ascii=False)
+        + ". Preserve the material fact together with its physical object; do not literalize unrelated lexicalized technical compounds."
+    )
+
+
+def _contract_route_v9am(targets, translated, memory):
+    """Inject proven objective failures into v9ah's FIRST specialist repair.
+
+    This does not broaden semantic speculation. Only deterministic numeric,
+    explicit-question and physical-material failures are promoted. Priority 25
+    makes them mandatory under v9ah's existing >=22 budget rule.
+    """
+    selected, ranked = _BASE_ROUTE(targets, translated, memory)
+    index = {str(segment.id): i for i, segment in enumerate(targets)}
+    by_id = {str(segment.id): segment for segment in targets}
+    ranked_by_id = {str(row.get("id") or ""): dict(row) for row in ranked}
+    selected_ids = {str(row.get("id") or "") for row in selected}
+    contract_ids: list[str] = []
+    contract_codes: dict[str, list[str]] = {}
+
+    for sid, segment in by_id.items():
+        source = str(segment.text or "")
+        current = str(translated.get(sid) or "")
+        failures = _contract_failures(source, current)
+        if not failures:
+            continue
+        contract_ids.append(sid)
+        contract_codes[sid] = [name for name, _ in failures]
+        reasons = [_contract_reason(name, check) for name, check in failures]
+        row = ranked_by_id.get(sid) or {
+            "id": sid,
+            "index": index[sid],
+            "priority": 25,
+            "code": "contract_fidelity",
+            "reason": "",
+            "glossary_hits": [],
+        }
+        row = dict(row)
+        row["priority"] = max(25, int(row.get("priority") or 0))
+        # Preserve an existing specialist code when one already gives DeepSeek a
+        # useful semantic lens; otherwise make the deterministic contract explicit.
+        if not str(row.get("code") or "").strip():
+            row["code"] = "contract_fidelity"
+        prior = str(row.get("reason") or "").strip()
+        row["reason"] = "; ".join([x for x in [prior, *reasons] if x])
+        row.setdefault("glossary_hits", [])
+        ranked_by_id[sid] = row
+
+    if not contract_ids:
+        _ROUTER_STATS.clear()
+        _ROUTER_STATS.update({
+            "pre_repair_contract_routes": 0,
+            "pre_repair_contract_ids": [],
+            "pre_repair_contract_codes": {},
+        })
+        return selected, ranked
+
+    # Rebuild ranked with the enhanced mandatory rows, then guarantee every
+    # contract route is present in selected regardless of v9ah's soft budget.
+    ranked_out: list[dict[str, Any]] = []
+    seen_ranked: set[str] = set()
+    for raw in ranked:
+        sid = str(raw.get("id") or "")
+        if not sid or sid in seen_ranked:
+            continue
+        ranked_out.append(dict(ranked_by_id.get(sid) or raw))
+        seen_ranked.add(sid)
+    for sid in contract_ids:
+        if sid not in seen_ranked:
+            ranked_out.append(dict(ranked_by_id[sid]))
+            seen_ranked.add(sid)
+    ranked_out.sort(key=lambda row: (-int(row.get("priority") or 0), int(row.get("index") or 0)))
+
+    selected_out: list[dict[str, Any]] = []
+    seen_selected: set[str] = set()
+    for raw in selected:
+        sid = str(raw.get("id") or "")
+        if not sid or sid in seen_selected:
+            continue
+        selected_out.append(dict(ranked_by_id.get(sid) or raw))
+        seen_selected.add(sid)
+    for sid in contract_ids:
+        if sid not in seen_selected:
+            selected_out.append(dict(ranked_by_id[sid]))
+            seen_selected.add(sid)
+    selected_out.sort(key=lambda row: (-int(row.get("priority") or 0), int(row.get("index") or 0)))
+
+    _ROUTER_STATS.clear()
+    _ROUTER_STATS.update({
+        "pre_repair_contract_routes": len(contract_ids),
+        "pre_repair_contract_ids": contract_ids,
+        "pre_repair_contract_codes": contract_codes,
+        "selected_before_contracts": len(selected),
+        "selected_after_contracts": len(selected_out),
+        "contract_routes_added_to_selected": len([sid for sid in contract_ids if sid not in selected_ids]),
+    })
+    print("[v9am-contract-router] " + json.dumps(_ROUTER_STATS, ensure_ascii=False), flush=True)
+    return selected_out, ranked_out
+
+
+def _contract_validated_deep_repair(harness, targets, translated, memory, routes):
+    """Run the existing v9ad repair, but reject objective-contract regressions."""
+    before = {str(row.get("id") or ""): str(translated.get(str(row.get("id") or "")) or "") for row in routes}
+    changed, calls = _BASE_DEEP_REPAIR(harness, targets, translated, memory, routes)
+    by_id = {str(segment.id): segment for segment in targets}
+    accepted: list[str] = []
+    rejected: list[str] = []
+
+    for sid in changed:
+        segment = by_id.get(str(sid))
+        if segment is None:
+            continue
+        candidate = str(translated.get(str(sid)) or "")
+        if _contract_failures(str(segment.text or ""), candidate):
+            translated[str(sid)] = before.get(str(sid), "")
+            rejected.append(str(sid))
+        else:
+            accepted.append(str(sid))
+
+    if rejected:
+        print(
+            "[v9am-contract-repair-reject] "
+            + json.dumps({"rejected_ids": rejected, "accepted_ids": accepted}, ensure_ascii=False),
+            flush=True,
+        )
+    _ROUTER_STATS["first_repair_contract_rejected_ids"] = rejected
+    _ROUTER_STATS["first_repair_changed_after_contract_validation"] = len(accepted)
+    return accepted, calls
 
 
 def _row_priority(row: dict[str, Any]) -> tuple[int, int]:
@@ -46,11 +210,6 @@ def _contract_hard_rows(targets, translated, memory) -> list[dict[str, Any]]:
     lexicalized_qe_dropped: list[str] = []
     rows: list[dict[str, Any]] = []
 
-    # v9al predates the deterministic numeric contract and conservatively routed
-    # many numbered-looking rows even when their value was already correct. Once
-    # we can prove the value is preserved, that heuristic no longer buys quality.
-    # Also suppress stale QE complaints for lexicalized technical compounds whose
-    # correct Russian term is demonstrably non-literal (lead-screw -> ходовой винт).
     for row in raw_rows:
         sid = str(row.get("id") or "")
         segment = target_by_id.get(sid)
@@ -121,9 +280,7 @@ def _contract_hard_rows(targets, translated, memory) -> list[dict[str, Any]]:
             add_contract_row(
                 i,
                 segment,
-                "spelled_number_fidelity:" + json.dumps(
-                    detail, ensure_ascii=False, separators=(",", ":")
-                ),
+                "spelled_number_fidelity:" + json.dumps(detail, ensure_ascii=False, separators=(",", ":")),
             )
 
         questions = compare_question_fidelity(source, current)
@@ -137,62 +294,47 @@ def _contract_hard_rows(targets, translated, memory) -> list[dict[str, Any]]:
             add_contract_row(
                 i,
                 segment,
-                "question_fidelity:" + json.dumps(
-                    detail, ensure_ascii=False, separators=(",", ":")
-                ),
+                "question_fidelity:" + json.dumps(detail, ensure_ascii=False, separators=(",", ":")),
             )
 
         materials = compare_material_fidelity(source, current)
         if not materials.get("ok", True):
-            detail = {
-                "required": materials.get("required") or [],
-                "missing": materials.get("missing") or [],
-            }
+            detail = {"required": materials.get("required") or [], "missing": materials.get("missing") or []}
             material_mismatches.append({"id": sid, **detail})
             add_contract_row(
                 i,
                 segment,
-                "material_fidelity:" + json.dumps(
-                    detail, ensure_ascii=False, separators=(",", ":")
-                ),
+                "material_fidelity:" + json.dumps(detail, ensure_ascii=False, separators=(",", ":")),
             )
 
-    # Deterministic contract mismatches are publication obligations, not a soft
-    # cost heuristic. Put them ahead of generic evidence and allow them to exceed
-    # the ordinary evidence cap if necessary.
     rows.sort(key=_row_priority)
     soft_cap = max(4, int(__import__("os").getenv("BOOKAI_FAST_EVIDENCE_MAX") or "16"))
-    mandatory_ids = {
-        row["id"]
-        for row in [*numeric_mismatches, *question_mismatches, *material_mismatches]
-    }
+    mandatory_ids = {row["id"] for row in [*numeric_mismatches, *question_mismatches, *material_mismatches]}
     effective_cap = max(soft_cap, len(mandatory_ids))
     selected = rows[:effective_cap]
     selected_ids = {str(row.get("id") or "") for row in selected}
     dropped_mandatory = sorted(mandatory_ids - selected_ids)
 
     _NUMERIC_STATS.clear()
-    _NUMERIC_STATS.update(
-        {
-            "mismatch_count": len(numeric_mismatches),
-            "mismatch_ids": [row["id"] for row in numeric_mismatches],
-            "details": numeric_mismatches[:32],
-            "question_mismatch_count": len(question_mismatches),
-            "question_mismatch_ids": [row["id"] for row in question_mismatches],
-            "question_details": question_mismatches[:32],
-            "material_mismatch_count": len(material_mismatches),
-            "material_mismatch_ids": [row["id"] for row in material_mismatches],
-            "material_details": material_mismatches[:32],
-            "heuristic_number_rows_dropped": heuristic_dropped,
-            "lexicalized_qe_rows_dropped": lexicalized_qe_dropped,
-            "soft_cap": soft_cap,
-            "effective_cap": effective_cap,
-            "evidence_rows_after_cap": len(selected),
-            "selected_ids": [str(row.get("id") or "") for row in selected],
-            "dropped_numeric_ids": [row["id"] for row in numeric_mismatches if row["id"] not in selected_ids],
-            "dropped_mandatory_ids": dropped_mandatory,
-        }
-    )
+    _NUMERIC_STATS.update({
+        "mismatch_count": len(numeric_mismatches),
+        "mismatch_ids": [row["id"] for row in numeric_mismatches],
+        "details": numeric_mismatches[:32],
+        "question_mismatch_count": len(question_mismatches),
+        "question_mismatch_ids": [row["id"] for row in question_mismatches],
+        "question_details": question_mismatches[:32],
+        "material_mismatch_count": len(material_mismatches),
+        "material_mismatch_ids": [row["id"] for row in material_mismatches],
+        "material_details": material_mismatches[:32],
+        "heuristic_number_rows_dropped": heuristic_dropped,
+        "lexicalized_qe_rows_dropped": lexicalized_qe_dropped,
+        "soft_cap": soft_cap,
+        "effective_cap": effective_cap,
+        "evidence_rows_after_cap": len(selected),
+        "selected_ids": [str(row.get("id") or "") for row in selected],
+        "dropped_numeric_ids": [row["id"] for row in numeric_mismatches if row["id"] not in selected_ids],
+        "dropped_mandatory_ids": dropped_mandatory,
+    })
     if numeric_mismatches or question_mismatches or material_mismatches or heuristic_dropped or lexicalized_qe_dropped:
         print("[v9am-fidelity-contracts] " + json.dumps(_NUMERIC_STATS, ensure_ascii=False), flush=True)
     if dropped_mandatory:
@@ -208,44 +350,32 @@ def _contract_issue_score(targets, translated, memory, sid: str) -> tuple[int, l
 
     numeric = compare_numeric_fidelity(source, current)
     if not numeric.get("ok", True):
-        detail = "spelled_number_fidelity:" + json.dumps(
-            {
-                "source_values": numeric.get("source_values") or [],
-                "target_values": numeric.get("target_values") or [],
-                "missing": numeric.get("missing") or [],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+        detail = "spelled_number_fidelity:" + json.dumps({
+            "source_values": numeric.get("source_values") or [],
+            "target_values": numeric.get("target_values") or [],
+            "missing": numeric.get("missing") or [],
+        }, ensure_ascii=False, separators=(",", ":"))
         if detail not in codes:
             codes.append(detail)
         return 1_000_000, codes
 
     questions = compare_question_fidelity(source, current)
     if not questions.get("ok", True):
-        detail = "question_fidelity:" + json.dumps(
-            {
-                "source_questions": questions.get("source_questions", 0),
-                "target_questions": questions.get("target_questions", 0),
-                "missing_questions": questions.get("missing_questions", 0),
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+        detail = "question_fidelity:" + json.dumps({
+            "source_questions": questions.get("source_questions", 0),
+            "target_questions": questions.get("target_questions", 0),
+            "missing_questions": questions.get("missing_questions", 0),
+        }, ensure_ascii=False, separators=(",", ":"))
         if detail not in codes:
             codes.append(detail)
         return 1_000_000, codes
 
     materials = compare_material_fidelity(source, current)
     if not materials.get("ok", True):
-        detail = "material_fidelity:" + json.dumps(
-            {
-                "required": materials.get("required") or [],
-                "missing": materials.get("missing") or [],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+        detail = "material_fidelity:" + json.dumps({
+            "required": materials.get("required") or [],
+            "missing": materials.get("missing") or [],
+        }, ensure_ascii=False, separators=(",", ":"))
         if detail not in codes:
             codes.append(detail)
         return 1_000_000, codes
@@ -254,7 +384,6 @@ def _contract_issue_score(targets, translated, memory, sid: str) -> tuple[int, l
 
 
 def _filter_resolved_stale_qe(data: dict[str, Any]) -> int:
-    """Remove stale material-QE rows only when final text proves them resolved."""
     v3 = v9al.v9ah.v9ag.v9ad.v9ac.v9ab.v3
     mapping_path = getattr(v3, "MAP_JSON", None)
     if mapping_path is None or not mapping_path.exists():
@@ -301,9 +430,7 @@ def _filter_resolved_stale_qe(data: dict[str, Any]) -> int:
     final_quality = dict(data.get("final_quality") or {})
     if final_quality:
         final_quality["hard_issues"] = sum(
-            int(value or 0)
-            for name, value in counts.items()
-            if str(name).startswith("hard:")
+            int(value or 0) for name, value in counts.items() if str(name).startswith("hard:")
         )
         data["final_quality"] = final_quality
     return removed
@@ -320,23 +447,21 @@ def _annotate_numeric_report() -> None:
         return
     stale_removed = _filter_resolved_stale_qe(data)
     architecture = dict(data.get("architecture") or {})
-    architecture.update(
-        {
-            "experiment": "v9am-fast-deepseek-fidelity-contracts",
-            "numeric_fidelity": (
-                "span-aware deterministic EN/RU numeric parser; objective mismatches outrank the soft evidence budget"
-            ),
-            "question_fidelity": "explicit source question count is a deterministic publication obligation",
-            "material_fidelity": (
-                "physical material+noun facts are locked; lexicalized technical compounds such as lead-screw -> ходовой винт "
-                "are recognized rather than forced into literal token matching"
-            ),
-            "gigachat_ultra_used": False,
-        }
-    )
+    architecture.update({
+        "experiment": "v9am-fast-deepseek-fidelity-contracts",
+        "numeric_fidelity": "span-aware deterministic EN/RU numeric parser; objective mismatches outrank the soft evidence budget",
+        "question_fidelity": "explicit source question count is a deterministic publication obligation",
+        "material_fidelity": (
+            "physical material+noun facts are locked; lexicalized technical compounds such as lead-screw -> ходовой винт "
+            "are recognized rather than forced into literal token matching"
+        ),
+        "pre_repair_contract_routing": "numeric/question/material failures are mandatory priority-25 routes in the first DeepSeek repair",
+        "gigachat_ultra_used": False,
+    })
     data["architecture"] = architecture
     stats = dict(_NUMERIC_STATS)
     stats["stale_material_qe_rows_removed"] = stale_removed
+    stats["pre_repair_router"] = dict(_ROUTER_STATS)
     data["v9am_numeric_fidelity"] = stats
     report.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
 
@@ -344,13 +469,19 @@ def _annotate_numeric_report() -> None:
 def main() -> None:
     old_rows = v9al._hard_issue_rows
     old_score = v9al._issue_score
+    old_route = v9al.v9ah._adaptive_route_v9ah
+    old_deep_repair = v9al.v9ah._BASE_DEEP_REPAIR
     v9al._hard_issue_rows = _contract_hard_rows
     v9al._issue_score = _contract_issue_score
+    v9al.v9ah._adaptive_route_v9ah = _contract_route_v9am
+    v9al.v9ah._BASE_DEEP_REPAIR = _contract_validated_deep_repair
     try:
         v9al.main()
     finally:
         v9al._hard_issue_rows = old_rows
         v9al._issue_score = old_score
+        v9al.v9ah._adaptive_route_v9ah = old_route
+        v9al.v9ah._BASE_DEEP_REPAIR = old_deep_repair
         _annotate_numeric_report()
 
 
