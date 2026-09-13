@@ -36,6 +36,13 @@ def test_integrity_rejects_prompt_labels_even_when_ratio_is_plausible():
     assert any(i.code == "protocol_residue" for i in issues)
 
 
+def test_integrity_rejects_leaked_closing_source_tag():
+    source = "I suppose I ought to say something, he thought; but he couldn't think of anything."
+    target = "Полагаю, мне следовало бы что-то сказать; но он ничего не мог придумать.</src>"
+    issues = SegmentIntegrityGate.scan_segment(seg(source), target)
+    assert any(i.code == "protocol_residue" for i in issues)
+
+
 def test_quantity_v2_counts_twelve_and_a_dozen_as_two_obligations():
     source = "The hammer rang twelve times. You get a dozen hits at the hot metal before it cools."
     bad = "Молот ударил двенадцать раз. Ты успеваешь сделать один-два удара по горячему металлу."
