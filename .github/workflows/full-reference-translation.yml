@@ -116,12 +116,22 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/bookai-bergamot-enru
-          key: firefox-bergamot-enru-base-v2-0ef9a209
+          key: firefox-bergamot-enru-base-v2-0ef9a209-lfs
       - name: Prepare and smoke-test Firefox Bergamot EN-RU
         shell: bash
         run: |
           set -euo pipefail
-          python scripts/setup_bergamot_enru.py --output /tmp/bookai-bergamot-enru
+          if [ ! -s /tmp/bookai-bergamot-enru/model.enru.intgemm.alphas.bin ]; then
+            git lfs version
+            rm -rf /tmp/firefox-translations-models
+            GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --filter=blob:none --sparse \
+              https://github.com/mozilla/firefox-translations-models.git /tmp/firefox-translations-models
+            git -C /tmp/firefox-translations-models sparse-checkout set models/base/enru
+            git -C /tmp/firefox-translations-models lfs pull --include='models/base/enru/*'
+            python scripts/setup_bergamot_enru.py \
+              --output /tmp/bookai-bergamot-enru \
+              --source-dir /tmp/firefox-translations-models/models/base/enru
+          fi
           "$BOOKAI_BERGAMOT_PYTHON" scripts/bergamot_worker.py \
             --config "$BOOKAI_BERGAMOT_CONFIG" --workers 4 --smoke | tee /tmp/bergamot-smoke.json
           python - <<'PY'
