@@ -51,12 +51,7 @@ _LEAD_SCREW_RU = re.compile(r"\bходов\w*\s+винт\w*\b", re.I)
 
 
 def compare_question_fidelity(source_en: str, target_ru: str) -> dict[str, Any]:
-    """Require every explicit source question mark to survive.
-
-    Literary Russian can restructure a question internally, but silently collapsing
-    one of several explicit interrogatives in the same paragraph is a strong,
-    objective omission signal. Extra target questions are not blocked here.
-    """
+    """Require every explicit source question mark to survive."""
     source_count = str(source_en or "").count("?")
     target_count = str(target_ru or "").count("?")
     return {
@@ -64,6 +59,32 @@ def compare_question_fidelity(source_en: str, target_ru: str) -> dict[str, Any]:
         "source_questions": source_count,
         "target_questions": target_count,
         "missing_questions": max(0, source_count - target_count),
+    }
+
+
+def compare_short_omission_fidelity(source_en: str, target_ru: str) -> dict[str, Any]:
+    """Detect only extreme collapse of a short multi-beat source segment.
+
+    A normal EN→RU translation may be materially shorter, so length alone is not
+    enough. We hard-fail only short source rows with evidence of multiple dialogue
+    or sentence beats when the Russian text collapses below 42% of source length.
+    This intentionally catches cases such as `Woman, Bosc replied. Odd-looking.`
+    becoming only `Женщина,` without turning ordinary compression into a defect.
+    """
+    source = str(source_en or "").strip()
+    target = str(target_ru or "").strip()
+    if not source:
+        return {"ok": True, "source_chars": 0, "target_chars": len(target), "ratio": 1.0, "multi_beat": False}
+    ratio = len(target) / max(1, len(source))
+    multi_beat = source.count(".") >= 2 or source.count("'") >= 4 or source.count('"') >= 4
+    applicable = 20 <= len(source) < 100 and multi_beat
+    return {
+        "ok": not (applicable and ratio < 0.42),
+        "source_chars": len(source),
+        "target_chars": len(target),
+        "ratio": round(ratio, 3),
+        "multi_beat": multi_beat,
+        "applicable": applicable,
     }
 
 
