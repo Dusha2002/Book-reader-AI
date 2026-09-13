@@ -23,13 +23,7 @@ class IntegrityIssue:
 
 
 class SegmentIntegrityGate:
-    """Reject cross-segment/protocol corruption before semantic QA.
-
-    The gate deliberately does not judge literary quality. It catches only strong
-    evidence that a target is not the translation of exactly its own source segment:
-    extreme expansion/compression, prompt/protocol residue, or missing output.
-    Suspects are retranslated one-at-a-time with GigaChat and read-only context.
-    """
+    """Reject cross-segment/protocol corruption before semantic QA."""
 
     def __init__(self, backend: RobustTaggedPrimaryTransport) -> None:
         self.backend = backend
@@ -54,13 +48,13 @@ class SegmentIntegrityGate:
         if _looks_like_prompt_leak(ru) or _PROTOCOL_RE.search(ru):
             out.append(IntegrityIssue(segment.id, "protocol_residue", "model prompt/protocol residue leaked into translation"))
 
-        # Russian literary prose is commonly somewhat shorter/longer than English,
-        # so thresholds are intentionally wide. These catch only the failure mode
-        # observed in cold v10 runs where a neighboring segment was assigned to this id.
+        # Empirically, clean Chapter One segments >=55 chars stayed below ~1.38x;
+        # known cross-segment contamination starts above 2.09x. 1.75 leaves a large
+        # natural-language margin while catching the failure before semantic QA.
         if len(source) >= 55:
             ratio = len(ru) / max(1, len(source))
             low_limit = 0.48 if len(source) < 260 else 0.42
-            high_limit = 1.90 if len(source) < 260 else 1.72
+            high_limit = 1.75 if len(source) < 260 else 1.65
             if ratio < low_limit:
                 out.append(IntegrityIssue(segment.id, "implausible_compression", f"source/target char ratio={ratio:.2f}"))
             elif ratio > high_limit:
@@ -96,9 +90,6 @@ class SegmentIntegrityGate:
                 continue
             before = self.scan_segment(segment, translated.get(sid, ""))
             after = self.scan_segment(segment, candidate)
-            # Accept only if the isolated translation removes all structural doubts.
-            # Literary/semantic QA happens later; this layer must never trade one
-            # integrity warning for another.
             if before and not after:
                 translated[sid] = candidate
                 changed.append(sid)
