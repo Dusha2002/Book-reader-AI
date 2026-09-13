@@ -87,7 +87,7 @@ def test_quantity_v2_accepts_twelve_thousand_compound():
 
 def test_quantity_v2_accepts_inflected_six_hundred():
     source = "Licinius had six hundred Guards."
-    target = "У Лициния было шесть сотен гвардейцев."
+    target = "У Лициния было против шести сотен гвардейцев."
     assert compare_quantity_fidelity_v2(source, target)["ok"]
 
 
