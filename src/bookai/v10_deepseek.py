@@ -6,12 +6,9 @@ from typing import Any
 from .models import BookMemory, Segment
 from .v10 import DeepSeekSemanticSpecialist as _BaseDeepSeekSemanticSpecialist
 from .v10 import V10Issue, _json_from_text, _norm
+from .v10_quantity import extract_quantity_obligations
 
 
-# These defects are not heuristic "maybe bad" signals. They are deterministic,
-# source-grounded fidelity failures that survived both cheap Giga repair tiers.
-# They therefore get first claim on the existing ONE DeepSeek batch rather than
-# causing another Giga loop or an extra DeepSeek request.
 PROVEN_DEEPSEEK_CODES = frozenset({
     "numeric",
     "quantity_obligation",
@@ -22,19 +19,11 @@ PROVEN_DEEPSEEK_CODES = frozenset({
     "duplicate_content",
     "clause_order",
 })
+_QUANTITY_CODES = {"numeric", "quantity_obligation", "numbered_choice", "quarter_inch"}
 
 
 class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
-    """One-batch DeepSeek tail with proof-first routing.
-
-    Selection priority:
-      1. deterministic hard fidelity defects that survived Giga;
-      2. other deterministic hard semantic defects;
-      3. ordinary v9ad-style semantic-risk candidates.
-
-    No second DeepSeek call is ever created. For proof-routed rows, a candidate is
-    accepted only if every proven defect code present before the call disappears.
-    """
+    """One-batch DeepSeek tail with proof-first routing."""
 
     def __init__(self, provider: Any, qa: Any, max_segments: int = 8):
         super().__init__(provider, qa, max_segments=max_segments)
@@ -43,6 +32,7 @@ class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
             "forced_proven_ids": [],
             "forced_proven_accepted": 0,
             "forced_proven_rejected": 0,
+            "forced_rejection_details": [],
         })
 
     @staticmethod
@@ -53,19 +43,9 @@ class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
                 out.setdefault(issue.id, set()).add(issue.code)
         return out
 
-    def _select(
-        self,
-        targets: list[Segment],
-        translated: dict[str, str],
-        memory: BookMemory,
-        issues: list[V10Issue],
-    ) -> list[Segment]:
+    def _select(self, targets: list[Segment], translated: dict[str, str], memory: BookMemory, issues: list[V10Issue]) -> list[Segment]:
         proven = self._proven_codes_by_id(issues)
-        semantic_hard = {
-            issue.id
-            for issue in issues
-            if issue.severity == "hard" and issue.mode == "semantic"
-        }
+        semantic_hard = {issue.id for issue in issues if issue.severity == "hard" and issue.mode == "semantic"}
         ranked = sorted(
             targets,
             key=lambda segment: (
@@ -76,7 +56,6 @@ class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
             ),
             reverse=True,
         )
-
         selected: list[Segment] = []
         for segment in ranked:
             risk = self.qa.semantic_risk(segment, memory)
@@ -87,13 +66,7 @@ class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
                 break
         return selected
 
-    def repair(
-        self,
-        targets: list[Segment],
-        translated: dict[str, str],
-        memory: BookMemory,
-        issues: list[V10Issue],
-    ) -> list[str]:
+    def repair(self, targets: list[Segment], translated: dict[str, str], memory: BookMemory, issues: list[V10Issue]) -> list[str]:
         selected = self._select(targets, translated, memory, issues)
         if not selected:
             return []
@@ -112,54 +85,49 @@ class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
         for segment in selected:
             i = index[segment.id]
             must_fix = sorted(proven.get(segment.id, set()))
+            obligations = []
+            if set(must_fix) & _QUANTITY_CODES:
+                obligations = [
+                    {"kind": row.kind, "value": row.value, "source_phrase": row.source_phrase}
+                    for row in extract_quantity_obligations(segment.text)
+                ]
             items.append({
                 "id": segment.id,
                 "source": segment.text,
                 "current_ru": translated.get(segment.id, ""),
                 "known_defects": issue_map.get(segment.id, []),
                 "must_fix_codes": must_fix,
+                "exact_quantity_obligations": obligations,
                 "before_en": [row.text for row in targets[max(0, i - 2):i]],
                 "after_en": [row.text for row in targets[i + 1:i + 3]],
             })
 
-        self.stats.update({
-            "selected": len(selected),
-            "selected_ids": [segment.id for segment in selected],
-        })
+        self.stats.update({"selected": len(selected), "selected_ids": [segment.id for segment in selected]})
         system = """You are the ONE expensive semantic specialist in a cost-sensitive EN→RU literary pipeline.
 All rows are handled in THIS ONE batch. Never request another pass.
 
-Rows with must_fix_codes contain SOURCE-GROUNDED, DETERMINISTICALLY PROVEN fidelity failures that already survived cheap Giga repair. They are mandatory, not stylistic suggestions:
-- numeric / quantity_obligation: restore every exact quantity and the proposition attached to it;
-- numbered_choice: preserve the numbered option/label and its surrounding action (for example, "number six" must not disappear);
-- quarter_inch: preserve the exact fraction/unit (quarter inch = 1/4 inch, or 6.35 mm if converted);
-- short_omission / omission: restore every missing source beat, clause, dialogue turn and action without inventing text;
-- duplicate_content: remove target-only repeated clauses/phrases while preserving the single source proposition;
-- clause_order: restore the source order of reliable quantities, names and established terms without otherwise flattening Russian syntax.
-For those rows, change=true is expected unless current_ru already demonstrably contains the required meaning.
+Rows with must_fix_codes contain SOURCE-GROUNDED, DETERMINISTICALLY PROVEN fidelity failures. They are mandatory:
+- numeric / quantity_obligation: restore every exact quantity AND its proposition. exact_quantity_obligations gives arithmetic truth. In particular two dozen=24, NOT «два десятка»; half a dozen=6; a dozen=12;
+- numbered_choice: preserve the numbered option/label and its governing action;
+- quarter_inch: preserve 1/4 inch or faithful 6.35 mm conversion;
+- short_omission / omission: restore every missing source beat, clause, dialogue turn and action without invention;
+- duplicate_content: remove target-only repeated clauses/phrases while preserving the source proposition once;
+- clause_order: restore source discourse-clause order of reliable anchors, but keep natural Russian word order inside a clause.
 
 For other rows, repair only genuine semantic/publication defects: invented facts, actor/action/object reversals, antecedents, chronology, causality, negation/modality, difficult word sense or technical denotation. Do not rewrite merely for taste.
-If change=true, corrected_ru MUST be the complete publication-ready Russian translation of exactly that source segment. Preserve every fact, number, name and established term.
+If change=true, corrected_ru MUST be the complete publication-ready Russian translation of exactly that source segment. Preserve every fact, number, name and established term. No English residue unless it is genuinely an established proper name that should remain Latin.
 Return exactly one row per id.
 ONLY JSON {"items":[{"id":"...","change":true,"corrected_ru":"...","confidence":0.0,"reason":"..."}]}"""
 
         try:
-            raw = self.provider.complete(
-                system,
-                json.dumps({"items": items}, ensure_ascii=False),
-                temperature=0.0,
-            )
+            raw = self.provider.complete(system, json.dumps({"items": items}, ensure_ascii=False), temperature=0.0)
             obj = _json_from_text(raw)
             self.stats["calls"] = 1
         except Exception as exc:
             print(f"[v10-deepseek] error={type(exc).__name__}: {exc}", flush=True)
             return []
 
-        parsed = {
-            str(row.get("id") or ""): row
-            for row in (obj.get("items") or [])
-            if isinstance(row, dict)
-        }
+        parsed = {str(row.get("id") or ""): row for row in (obj.get("items") or []) if isinstance(row, dict)}
         changed: list[str] = []
         by_id = {segment.id: segment for segment in selected}
         for sid, segment in by_id.items():
@@ -167,6 +135,7 @@ ONLY JSON {"items":[{"id":"...","change":true,"corrected_ru":"...","confidence":
             if type(row.get("change")) is not bool or not row.get("change"):
                 if sid in proven:
                     self.stats["forced_proven_rejected"] += 1
+                    self.stats["forced_rejection_details"].append({"id": sid, "reason": "model_change_false"})
                 continue
             try:
                 confidence = float(row.get("confidence") or 0)
@@ -176,6 +145,7 @@ ONLY JSON {"items":[{"id":"...","change":true,"corrected_ru":"...","confidence":
             if confidence < 0.62 or not candidate:
                 if sid in proven:
                     self.stats["forced_proven_rejected"] += 1
+                    self.stats["forced_rejection_details"].append({"id": sid, "reason": "low_confidence_or_empty"})
                 continue
 
             current = str(translated.get(sid) or "")
@@ -186,13 +156,16 @@ ONLY JSON {"items":[{"id":"...","change":true,"corrected_ru":"...","confidence":
 
             required_codes = proven.get(sid, set())
             if required_codes:
-                residual_required = {
-                    issue.code
-                    for issue in after
-                    if issue.severity == "hard" and issue.code in required_codes
-                }
+                residual_required = {issue.code for issue in after if issue.severity == "hard" and issue.code in required_codes}
                 if residual_required or after_hard > before_hard:
                     self.stats["forced_proven_rejected"] += 1
+                    self.stats["forced_rejection_details"].append({
+                        "id": sid,
+                        "reason": "required_code_remains_or_new_hard",
+                        "residual_required": sorted(residual_required),
+                        "hard_before": before_hard,
+                        "hard_after": after_hard,
+                    })
                     continue
                 self.stats["forced_proven_accepted"] += 1
             elif after_hard > before_hard:
