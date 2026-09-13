@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .models import BookMemory, Segment
+from .v10 import _usage
 from .v10_transport import RobustTaggedPrimaryTransport, _looks_like_prompt_leak
 
 
@@ -47,10 +48,6 @@ class SegmentIntegrityGate:
             return [IntegrityIssue(segment.id, "missing", "segment has no translation")]
         if _looks_like_prompt_leak(ru) or _PROTOCOL_RE.search(ru):
             out.append(IntegrityIssue(segment.id, "protocol_residue", "model prompt/protocol residue leaked into translation"))
-
-        # Empirically, clean Chapter One segments >=55 chars stayed below ~1.38x;
-        # known cross-segment contamination starts above 2.09x. 1.75 leaves a large
-        # natural-language margin while catching the failure before semantic QA.
         if len(source) >= 55:
             ratio = len(ru) / max(1, len(source))
             low_limit = 0.48 if len(source) < 260 else 0.42
@@ -67,6 +64,45 @@ class SegmentIntegrityGate:
             out.extend(self.scan_segment(segment, translated.get(segment.id, "")))
         return out
 
+    def _source_only_recover(self, segment: Segment) -> str:
+        """Retranslate one exact source segment with zero neighboring prose.
+
+        The previous fallback reused CONTEXT_ONLY, which is precisely dangerous after
+        detecting a boundary shift: the model can copy the neighboring paragraph again.
+        Structural recovery therefore receives only the suspect source itself.
+        """
+        client = self.backend._ensure_client()
+        request = {
+            "model": self.backend.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Переведи РОВНО один английский фрагмент литературной прозы на русский. "
+                        "SOURCE ниже — единственный текст, который разрешено переводить. "
+                        "Не продолжай сцену, не добавляй соседний контекст, служебные подписи или комментарии. "
+                        "Сохрани все предложения, реплики, числа, имена, причинность и порядок. "
+                        "Верни только полный готовый русский перевод этого SOURCE."
+                    ),
+                },
+                {"role": "user", "content": str(segment.text or "")},
+            ],
+            "temperature": 0.0,
+            "top_p": 0.9,
+            "max_tokens": max(1200, min(6000, int(self.backend.max_tokens))),
+        }
+        try:
+            response = client.chat(request)
+            self.backend.usage.add(_usage(response), calls=1)
+        except Exception as exc:
+            print(f"[v10-integrity] id={segment.id} error={type(exc).__name__}", flush=True)
+            return ""
+        value = str(response.choices[0].message.content or "").strip()
+        value = re.sub(r"^```(?:text|markdown)?\s*", "", value, flags=re.I)
+        value = re.sub(r"\s*```$", "", value)
+        value = re.sub(r"^\s*(?:перевод|translation)\s*:\s*", "", value, flags=re.I)
+        return value.strip()
+
     def repair(
         self,
         segments: list[Segment],
@@ -75,6 +111,7 @@ class SegmentIntegrityGate:
         *,
         source_segments: list[Segment] | None = None,
     ) -> list[str]:
+        del memory, source_segments  # integrity recovery intentionally ignores both
         issues = self.scan(segments, translated)
         suspect_ids = list(dict.fromkeys(issue.id for issue in issues))
         self.stats["detected"] = len(suspect_ids)
@@ -84,7 +121,7 @@ class SegmentIntegrityGate:
         for sid in suspect_ids:
             segment = by_id[sid]
             self.stats["recovery_calls"] += 1
-            candidate = self.backend._plain_single_recover(segment, memory, source_segments)
+            candidate = self._source_only_recover(segment)
             if not candidate:
                 self.stats["rejected_recoveries"] += 1
                 continue
