@@ -4,6 +4,7 @@ import re
 
 from .models import BookMemory, Segment
 from .v10 import DeterministicQA, V10Issue
+from .v10_clause_fidelity import scan_clause_fidelity
 from .v10_quantity import compare_quantity_fidelity_v2
 
 
@@ -68,6 +69,9 @@ class V10QualityQA(DeterministicQA):
                 segment.id, "hunting_collocation", "semantic", "hard",
                 "mill-stream is a stream/watercourse in the hunt, not a dam",
             ))
+
+        for issue in scan_clause_fidelity(segment, target, memory):
+            out.append(V10Issue(segment.id, issue.code, "semantic", "hard", issue.reason))
 
         mixed = self._mixed_script_tokens(target)
         if mixed:
