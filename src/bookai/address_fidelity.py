@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import re
 
-# Narrow deterministic cleanup for untranslated English numeric address labels.
+# Narrow deterministic cleanup for source-proven numeric place/address labels.
 # This is intentionally not a general translator. It only fires when the English
-# source proves that a number-word phrase is an ordinal street/avenue/road/lane
-# name (or an Island + cardinal label) and the same English words leaked into RU.
+# source proves that a number-word phrase is a Street/Island label and the Russian
+# draft either leaks those English words or drops the place-type noun itself.
 
 _EN_UNITS_ORD = {
     "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
@@ -75,8 +75,14 @@ _CARD_WORD = (
     r"eighty|ninety|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)[- ]"
     r"(?:one|two|three|four|five|six|seven|eight|nine))"
 )
-_SOURCE_STREET_RE = re.compile(rf"\b(?P<num>{_ORD_WORD})\s+(?P<kind>Street|Avenue|Road|Lane)\b", re.I)
+# Restrict deterministic ordinal rendering to Street: Russian grammatical gender
+# for Avenue/Road/Lane varies, and that is better left to the translator.
+_SOURCE_STREET_RE = re.compile(rf"\b(?P<num>{_ORD_WORD})\s+Street\b", re.I)
 _SOURCE_ISLAND_RE = re.compile(rf"\bIsland\s+(?P<num>{_CARD_WORD})\b", re.I)
+_SOURCE_ISLAND_STREET_RE = re.compile(
+    rf"\bIsland\s+(?P<island>{_CARD_WORD})\s*,\s*(?P<street>{_ORD_WORD})\s+Street\b",
+    re.I,
+)
 
 
 def _parse_ordinal(phrase: str) -> int | None:
@@ -126,28 +132,30 @@ def _cap_first(text: str) -> str:
 
 
 def normalize_numbered_address_literals(source_en: str, target_ru: str) -> tuple[str, int]:
-    """Replace only source-proven English numeric address labels leaked into RU.
+    """Normalize only source-proven numeric Street/Island labels in RU output.
 
-    Example: `Sixty-Seventh Street` -> `Шестьдесят седьмая улица`.
-    The function does nothing unless the exact number-word label is present in the
-    English source as an address/street entity, which keeps the transform narrow.
+    Examples:
+    - `Sixty-Seventh Street` -> `Шестьдесят седьмая улица`;
+    - source `Island Seventeen, Sixty-Seventh Street` plus target
+      `Семнадцать, Шестьдесят седьмая улица` ->
+      `Остров Семнадцать, Шестьдесят седьмая улица`.
     """
     source = str(source_en or "")
     out = str(target_ru or "")
     fixes = 0
 
-    streets: list[tuple[str, int, str]] = []
+    streets: list[tuple[str, int]] = []
     for match in _SOURCE_STREET_RE.finditer(source):
         phrase = match.group("num")
         value = _parse_ordinal(phrase)
         if value is not None:
-            streets.append((phrase, value, match.group("kind")))
+            streets.append((phrase, value))
 
     # Handle the common coordinated address form first so Russian case is natural:
     # "between Sixty-Sixth and Sixty-Eighth Street" ->
     # "между Шестьдесят шестой и Шестьдесят восьмой улицами".
     if len(streets) >= 2:
-        source_values = {phrase.casefold(): value for phrase, value, _ in streets}
+        source_values = {phrase.casefold(): value for phrase, value in streets}
         pair_re = re.compile(
             rf"\bмежду\s+(?P<a>{_ORD_WORD})(?:\s+Street)?\s+и\s+(?P<b>{_ORD_WORD})(?:\s+Street)?\b",
             re.I,
@@ -165,21 +173,49 @@ def normalize_numbered_address_literals(source_en: str, target_ru: str) -> tuple
 
         out = pair_re.sub(repl_pair, out)
 
-    for phrase, value, kind in streets:
+    for phrase, value in streets:
         phrase_re = re.escape(phrase).replace(r"\-", r"[- ]")
-        # Full English address label.
-        full_re = re.compile(rf"\b{phrase_re}\s+{re.escape(kind)}\b", re.I)
         replacement = _cap_first(_ru_ordinal_fem(value)) + " улица"
+
+        # If Russian already supplied a street noun, avoid producing the ugly
+        # duplicate `улицы Шестьдесят седьмая улица`.
+        prefixed_full = re.compile(
+            rf"\b(?P<prefix>улиц(?:а|ы|е|у|ей|ой|ами|ах))\s+{phrase_re}\s+Street\b",
+            re.I,
+        )
+
+        def repl_prefixed_full(match: re.Match[str]) -> str:
+            nonlocal fixes
+            fixes += 1
+            prefix = match.group("prefix")
+            if prefix.casefold() == "улица":
+                return replacement
+            return f"{prefix} «{replacement}»"
+
+        out = prefixed_full.sub(repl_prefixed_full, out)
+
+        full_re = re.compile(rf"\b{phrase_re}\s+Street\b", re.I)
         out, n = full_re.subn(replacement, out)
         fixes += n
 
-        # Common mixed leak: "улица Sixty-Seventh".
-        mixed_re = re.compile(rf"\bулиц\w*\s+{phrase_re}\b", re.I)
-        out, n = mixed_re.subn(replacement, out)
-        fixes += n
+        # Common mixed leak: `улица Sixty-Seventh`.
+        prefixed_bare = re.compile(
+            rf"\b(?P<prefix>улиц(?:а|ы|е|у|ей|ой|ами|ах))\s+{phrase_re}\b",
+            re.I,
+        )
 
-        # If the street noun was elided in the RU draft but the exact English
-        # ordinal still leaked, remove the Latin residue while preserving value.
+        def repl_prefixed_bare(match: re.Match[str]) -> str:
+            nonlocal fixes
+            fixes += 1
+            prefix = match.group("prefix")
+            if prefix.casefold() == "улица":
+                return replacement
+            return f"{prefix} «{replacement}»"
+
+        out = prefixed_bare.sub(repl_prefixed_bare, out)
+
+        # If the street noun was elided in RU but the exact English ordinal still
+        # leaked, remove the Latin residue while preserving the value.
         bare_re = re.compile(rf"\b{phrase_re}\b", re.I)
         out, n = bare_re.subn(_cap_first(_ru_ordinal_fem(value)), out)
         fixes += n
@@ -195,6 +231,24 @@ def normalize_numbered_address_literals(source_en: str, target_ru: str) -> tuple
         fixes += n
         mixed_re = re.compile(rf"\bостров\s+{phrase_re}\b", re.I)
         out, n = mixed_re.subn("Остров " + _cap_first(_ru_cardinal(value)), out)
+        fixes += n
+
+    # Primary MT can preserve both numeric values while silently dropping the
+    # place-type noun: `Island Seventeen, Sixty-Seventh Street` ->
+    # `Семнадцать, Шестьдесят седьмая улица`. The exact paired source label makes
+    # restoring `Остров` deterministic rather than semantic guesswork.
+    for match in _SOURCE_ISLAND_STREET_RE.finditer(source):
+        island_value = _parse_cardinal(match.group("island"))
+        street_value = _parse_ordinal(match.group("street"))
+        if island_value is None or street_value is None:
+            continue
+        island_ru = _cap_first(_ru_cardinal(island_value))
+        street_ru = _cap_first(_ru_ordinal_fem(street_value)) + " улица"
+        missing_type = re.compile(
+            rf"(?<!Остров\s)\b{re.escape(island_ru)}\s*,\s*{re.escape(street_ru)}\b",
+            re.I,
+        )
+        out, n = missing_type.subn(f"Остров {island_ru}, {street_ru}", out)
         fixes += n
 
     return out, fixes
