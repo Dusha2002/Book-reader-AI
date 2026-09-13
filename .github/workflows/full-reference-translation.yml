@@ -29,13 +29,13 @@ jobs:
       BOOKAI_GIGACHAT_SPLIT_DEPTH: '4'
       BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
       BOOKAI_GIGACHAT_RECOVERY_ROUNDS: '1'
-      BOOKAI_ANALYZER_MODEL: deepseek-v4.1-flash
-      BOOKAI_TRANSLATOR_MODEL: deepseek-v4.1-flash
-      BOOKAI_GATE_MODEL: deepseek-v4.1-flash
-      BOOKAI_MEMORY_MODEL: deepseek-v4.1-flash
-      BOOKAI_EDITOR_MODEL: deepseek-v4.1-flash
-      BOOKAI_HARD_MODEL: deepseek-v4.1-flash
-      BOOKAI_MAX_MODEL: deepseek-v4.1-flash
+      BOOKAI_ANALYZER_MODEL: deepseek-v4-flash
+      BOOKAI_TRANSLATOR_MODEL: deepseek-v4-flash
+      BOOKAI_GATE_MODEL: deepseek-v4-flash
+      BOOKAI_MEMORY_MODEL: deepseek-v4-flash
+      BOOKAI_EDITOR_MODEL: deepseek-v4-flash
+      BOOKAI_HARD_MODEL: deepseek-v4-flash
+      BOOKAI_MAX_MODEL: deepseek-v4-flash
       BOOKAI_LLM_GATE: 'false'
       BOOKAI_REASONING: none
       BOOKAI_HYMT_HARD_THRESHOLD: '999'
@@ -83,7 +83,7 @@ jobs:
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
           test -n "${DEEPSEEK_API_KEY:-}" || { echo 'DEEPSEEK_API_KEY is not configured' >&2; exit 1; }
-          echo '[bookai] architecture=v9x transport=deepseek-direct model=deepseek-v4.1-flash chapters=one,two,three deterministic-router=yes llm-scanner=no legacy-priority-retries=no gold-reference=no'
+          echo '[bookai] architecture=v9x transport=deepseek-direct model=deepseek-v4-flash chapters=one,two,three deterministic-router=yes llm-scanner=no legacy-priority-retries=no gold-reference=no'
       - name: Translate Chapters One through Three with v9x over direct DeepSeek API
         shell: bash
         run: |
