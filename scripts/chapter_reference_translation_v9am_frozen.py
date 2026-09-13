@@ -1,23 +1,15 @@
 from __future__ import annotations
 
-import os
+# Compatibility entrypoint kept for the existing frozen benchmark workflow.
+# The active experiment is v9an: v9am fidelity contracts plus deterministic
+# numbered-address cleanup. Keeping this shim avoids touching the long benchmark
+# workflow just to advance the experimental implementation.
 
-import chapter_reference_translation_v9am_numeric_fast as v9am
-from bookai.frozen_draft import make_frozen_draft_backend
+import chapter_reference_translation_v9an_frozen as v9an_frozen
 
 
 def main() -> None:
-    path = os.getenv("BOOKAI_FROZEN_DRAFT_PATH") or "benchmark/frozen-primary-draft.json"
-    old_backend = v9am.v9al.v9ak.GigaChatLightningV9AKBackend
-    v9am.v9al.v9ak.GigaChatLightningV9AKBackend = make_frozen_draft_backend(
-        old_backend,
-        path=path,
-        mode="replay",
-    )
-    try:
-        v9am.main()
-    finally:
-        v9am.v9al.v9ak.GigaChatLightningV9AKBackend = old_backend
+    v9an_frozen.main()
 
 
 if __name__ == "__main__":
