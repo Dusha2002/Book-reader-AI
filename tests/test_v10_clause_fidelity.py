@@ -31,11 +31,18 @@ def test_duplicate_content_allows_nonrepeated_clean_translation():
     assert compare_duplicate_content_fidelity(source, target)["ok"]
 
 
-def test_clause_order_uses_book_bible_anchors_only_when_unique():
+def test_clause_order_ignores_natural_name_reordering_inside_one_clause():
     memory = BookMemory(glossary={"Miel": "Миэль", "Ziani": "Зиани"})
     source = "Miel handed the file to Ziani."
-    good = "Миэль передал напильник Зиани."
-    bad = "Зиани получил напильник от Миэля."
+    target = "Зиани получил напильник от Миэля."
+    assert compare_clause_order_fidelity(source, target, memory)["ok"]
+
+
+def test_clause_order_catches_reversal_across_distinct_discourse_clauses():
+    memory = BookMemory(glossary={"Miel": "Миэль", "Ziani": "Зиани"})
+    source = "Miel spoke first. Much later, Ziani answered."
+    good = "Сначала заговорил Миэль. Намного позже ответил Зиани."
+    bad = "Сначала ответил Зиани. Намного позже заговорил Миэль."
     assert compare_clause_order_fidelity(source, good, memory)["ok"]
     assert not compare_clause_order_fidelity(source, bad, memory)["ok"]
 
