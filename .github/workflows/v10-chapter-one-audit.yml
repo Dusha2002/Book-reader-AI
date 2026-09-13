@@ -25,13 +25,15 @@ jobs:
       GIGACHAT_SCOPE: GIGACHAT_API_PERS
       GIGACHAT_BASE_URL: https://api.giga.chat/v1
       BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
-      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '12'
+      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '24'
       BOOKAI_GIGACHAT_BATCH_CHARS: '9000'
       BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
       BOOKAI_GIGACHAT_TIMEOUT: '55'
       BOOKAI_GIGACHAT_RETRIES: '1'
       BOOKAI_V10_BIBLE_BATCH: '45'
       BOOKAI_V10_DEEP_MAX: '8'
+      BOOKAI_V10_RECOVERY_BATCH: '4'
+      BOOKAI_V10_JSON_RECOVERY_BATCH: '3'
       BOOKAI_CHAPTER_NAME: Chapter One
       BOOKAI_V10_BIBLE_CACHE: .bookai-cache-v10/book-bible.json
 
@@ -46,23 +48,28 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src/bookai/v10.py src/bookai/v10_bible.py scripts/chapter_translation_v10.py
+          python -m compileall -q src/bookai/v10.py src/bookai/v10_bible.py src/bookai/v10_transport.py scripts/chapter_translation_v10.py
           pytest -q tests/test_v10_architecture.py
 
       - name: Translate Chapter One with clean v10
         run: |
-          set -euo pipefail
+          set -uo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}"
           test -n "${DEEPSEEK_API_KEY:-}"
           rm -rf .bookai-cache-v10 audit
           rm -f v10-chapter-one-* Devices_and_Desires_RU_V10_chapter-one.fb2
           mkdir -p audit
+          set +e
           /usr/bin/time -f '%e' -o audit/wall_seconds.txt \
             timeout --signal=TERM --kill-after=30s 20m \
             python scripts/chapter_translation_v10.py 2>&1 | tee audit/run.log
+          status=${PIPESTATUS[0]}
+          set -e
           cp -f v10-chapter-one-* audit/ 2>/dev/null || true
           cp -f Devices_and_Desires_RU_V10_chapter-one.fb2 audit/ 2>/dev/null || true
           cp -f .bookai-cache-v10/book-bible.json audit/book-bible.json 2>/dev/null || true
+          echo "$status" > audit/translation_exit_status.txt
+          exit "$status"
 
       - name: Build compact summary
         if: always()
@@ -84,6 +91,7 @@ jobs:
               'wall_seconds_with_bible': wall,
               'timing': report.get('timing'),
               'book_bible': report.get('book_bible'),
+              'primary_transport': report.get('primary_transport'),
               'usage': report.get('usage'),
               'qa_initial': report.get('qa_initial'),
               'patcher': report.get('patcher'),
