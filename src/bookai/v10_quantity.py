@@ -25,6 +25,11 @@ _RU_THOUSAND_PREFIXES = {
     "восемнадцатитысяч": 18000, "девятнадцатитысяч": 19000,
     "двадцатитысяч": 20000,
 }
+_RU_CARDINAL_LABELS = {
+    1: ("один", "одна", "одно"), 2: ("два", "две"), 3: ("три",), 4: ("четыре",),
+    5: ("пять",), 6: ("шесть",), 7: ("семь",), 8: ("восемь",), 9: ("девять",),
+    10: ("десять",), 11: ("одиннадцать",), 12: ("двенадцать",),
+}
 
 
 @dataclass(frozen=True)
@@ -98,6 +103,10 @@ def _numbered_choice_present(value: int, target_ru: str) -> bool:
     low = str(target_ru or "").casefold().replace("ё", "е")
     if re.search(rf"\b(?:номер\s*)?{value}\b", low):
         return True
+    # Labels are often translated cardinally: «копьё номер четыре».
+    for word in _RU_CARDINAL_LABELS.get(value, ()):
+        if re.search(rf"\b(?:номер\s+)?{re.escape(word)}\b", low):
+            return True
     stems = {
         1: "перв", 2: "втор", 3: "трет", 4: "четвер", 5: "пят", 6: "шест",
         7: "седьм", 8: "восьм", 9: "девят", 10: "десят", 11: "одиннадцат",
@@ -114,9 +123,6 @@ def compare_quantity_fidelity_v2(source_en: str, target_ru: str) -> dict[str, An
     target_values = list(base.get("target_values") or []) + _extra_target_values(target_ru)
     target_counts = Counter(target_values)
 
-    # Legacy numeric parsing sees the multiplier in `two dozen` as an independent 2.
-    # It is not: the semantic obligation is one quantity, 24. Remove exactly one
-    # such multiplier mention for each N-dozen phrase before comparing counts.
     dozen_multipliers: list[int] = []
     for obligation in obligations:
         if obligation.kind == "n_dozen":
@@ -134,8 +140,6 @@ def compare_quantity_fidelity_v2(source_en: str, target_ru: str) -> dict[str, An
         if multiplier in base_missing:
             base_missing.remove(multiplier)
 
-    # Productive Russian compounds can satisfy a source value invisible to the
-    # legacy target parser, e.g. 12000 -> двенадцатитысячная.
     base_missing = [value for value in base_missing if target_counts.get(value, 0) <= 0]
 
     for obligation in obligations:
