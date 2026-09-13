@@ -12,8 +12,8 @@ from bookai.pipeline import _chapter_groups, _should_translate
 from bookai.v10 import DeepSeekSemanticSpecialist, GigaSpanPatcher, issue_summary
 from bookai.v10_dialogue import DialogueDiscourseGuard
 from bookai.v10_local_repair import GigaLocalRewriter
+from bookai.v10_name_canon import V9ADSourceOnlyBookBibleBuilder
 from bookai.v10_quality import V10QualityQA
-from bookai.v10_source_bible import SourceOnlyBookBibleBuilder
 from bookai.v10_transport import RobustTaggedPrimaryTransport
 
 
@@ -72,7 +72,7 @@ def main() -> None:
         raise RuntimeError("GIGACHAT_AUTH_KEY is missing")
 
     bible_started = time.perf_counter()
-    memory, bible_stats = SourceOnlyBookBibleBuilder(giga, BIBLE).build(all_targets)
+    memory, bible_stats = V9ADSourceOnlyBookBibleBuilder(giga, BIBLE).build(all_targets)
     bible_seconds = time.perf_counter() - bible_started
     usage_after_bible = giga.usage.as_dict()
 
