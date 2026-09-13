@@ -1,6 +1,7 @@
 from bookai.semantic_fidelity import (
     compare_material_fidelity,
     compare_question_fidelity,
+    compare_short_omission_fidelity,
     lexicalized_technical_compound_preserved,
 )
 
@@ -22,6 +23,33 @@ def test_question_fidelity_accepts_all_questions():
         "Почему сейчас? Тогда ли это было?",
     )
     assert result["ok"] is True
+
+
+def test_short_dialogue_omission_is_hard_failure():
+    result = compare_short_omission_fidelity(
+        "'Woman,' Bosc replied. 'Odd-looking.'",
+        "— Женщина,",
+    )
+    assert result["ok"] is False
+    assert result["applicable"] is True
+    assert result["ratio"] < 0.42
+
+
+def test_complete_short_dialogue_passes():
+    result = compare_short_omission_fidelity(
+        "'Woman,' Bosc replied. 'Odd-looking.'",
+        "— Женщина, — ответил Боск. — Странная на вид.",
+    )
+    assert result["ok"] is True
+
+
+def test_short_plain_sentence_is_not_overconstrained_by_length():
+    result = compare_short_omission_fidelity(
+        "He nodded and left the room.",
+        "Он кивнул и вышел.",
+    )
+    assert result["ok"] is True
+    assert result["applicable"] is False
 
 
 def test_steel_plates_require_material_in_russian():
