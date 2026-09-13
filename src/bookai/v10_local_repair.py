@@ -16,17 +16,29 @@ _EDITORIAL_RESIDUE_RE = re.compile(
 
 
 class GigaLocalRewriter:
-    """Second cheap repair tier for deterministic defects span-patching cannot fix."""
+    """Cheap full-segment repair for proven local fidelity defects."""
 
     _CODES = {
         "numeric", "quantity_obligation", "numbered_choice", "quarter_inch", "question",
         "material", "order", "latin_leak", "character_gender", "glossary_term",
     }
     _SINGLE_FALLBACK_CODES = {
-        "numeric", "quantity_obligation", "numbered_choice", "quarter_inch", "latin_leak",
+        "numeric", "quantity_obligation", "numbered_choice", "quarter_inch", "latin_leak", "question",
+    }
+    _PRIORITY = {
+        "numbered_choice": 100,
+        "quantity_obligation": 95,
+        "numeric": 90,
+        "quarter_inch": 90,
+        "latin_leak": 80,
+        "question": 70,
+        "character_gender": 65,
+        "material": 60,
+        "order": 55,
+        "glossary_term": 50,
     }
 
-    def __init__(self, backend: Any, qa: Any, max_segments: int = 16) -> None:
+    def __init__(self, backend: Any, qa: Any, max_segments: int = 24) -> None:
         self.backend = backend
         self.qa = qa
         self.max_segments = max(1, max_segments)
@@ -37,11 +49,9 @@ class GigaLocalRewriter:
         }
 
     def _accept(self, segment: Segment, current: str, candidate: str, memory: BookMemory) -> bool:
-        if not candidate or candidate == current or "<s " in candidate or "<src " in candidate:
+        low = str(candidate or "").casefold()
+        if not candidate or candidate == current or "<s " in low or "<src" in low or "</src" in low:
             return False
-        # Local repair is final prose, never an editor's note or a list of options.
-        # This specifically prevents a bare gloss such as «шестой» (вариант) from
-        # fooling the numbered-choice detector while the governing action is absent.
         if _EDITORIAL_RESIDUE_RE.search(candidate):
             self.stats["editorial_residue_rejected"] += 1
             return False
@@ -58,9 +68,11 @@ class GigaLocalRewriter:
         system = (
             "Ты точный редактор литературного перевода EN→RU. Дана ОДНА строка с уже доказанными локальными дефектами. "
             "Исправь только их, но верни ПОЛНЫЙ готовый русский перевод SOURCE. Ничего не сокращай и не добавляй. "
-            "Для dozen: a dozen=12, half a dozen=6, two dozen=24. Для number six сохрани сам выбор №6 и весь связанный смысл. "
+            "Для dozen: a dozen=12, half a dozen=6, two dozen=24; НЕЛЬЗЯ переводить two dozen как «два десятка». "
+            "Для number six сохрани сам выбор №6 и весь связанный смысл. "
+            "Если дефект Latin — переведи обычную английскую фразу на русский; имя/название транслитерируй только если это имя. "
             "Не добавляй скобочные пояснения, пометы 'вариант', альтернативы или комментарии переводчика. "
-            "Если дефект Latin — убери латиницу, сохранив имя/значение. Верни только русский текст, без JSON, комментариев и вариантов."
+            "Верни только русский текст, без JSON, тегов и комментариев."
         )
         request = {
             "model": self.backend.model,
@@ -91,8 +103,14 @@ class GigaLocalRewriter:
         for issue in issues:
             if issue.mode == "local" and issue.code in self._CODES:
                 local_by_id.setdefault(issue.id, []).append(issue)
+        ranked_ids = sorted(
+            local_by_id,
+            key=lambda sid: max(self._PRIORITY.get(i.code, 0) for i in local_by_id[sid]),
+            reverse=True,
+        )
         rows = []
-        for sid, defects in local_by_id.items():
+        for sid in ranked_ids[: self.max_segments]:
+            defects = local_by_id[sid]
             segment = by_id.get(sid)
             current = str(translated.get(sid) or "")
             if not segment or not current:
@@ -103,21 +121,18 @@ class GigaLocalRewriter:
                 "current_ru": current,
                 "defects": [{"code": d.code, "reason": d.reason} for d in defects],
             })
-            if len(rows) >= self.max_segments:
-                break
         if not rows:
             return []
 
         self.stats["requested"] = len(rows)
         self.stats["selected_ids"] = [row["id"] for row in rows]
         system = """You are a FAST GigaChat EN→RU local fidelity editor. Every item has a PROVEN local defect.
-Fix ONLY the listed defect(s) while preserving the current Russian wording, literary tone, paragraph structure and all unrelated facts.
-Typical defects: missing/wrong number or unit, repeated/dozen quantity, numbered choice/label, question force/punctuation, physical material/order, raw untranslated Latin, local gender agreement.
-For NUMERIC/QUANTITY defects, restore the COMPLETE proposition attached to every missing quantity. Do not satisfy a later quantity merely because the same number appears earlier in the paragraph.
-Interpret dozen exactly: a dozen=12, half a dozen=6, two dozen=24. For a numbered choice such as "number six", preserve the choice naturally in Russian together with its governing action and surrounding clause.
-For a LATIN defect, remove mixed-script/transliterated residue without changing the referent.
-Never append explanations, alternatives, bracketed glosses, translator notes or words such as «вариант» merely to satisfy a detector.
-Do not add interpretations and do not perform broad stylistic rewriting. corrected_ru MUST be the COMPLETE final Russian translation of exactly source.
+Fix ONLY the listed defect(s) while preserving current Russian wording, literary tone, paragraph structure and all unrelated facts.
+For NUMERIC/QUANTITY defects, restore the COMPLETE proposition attached to every missing quantity. Interpret dozen exactly: a dozen=12, half a dozen=6, two dozen=24; never use «два десятка» for two dozen.
+For a numbered choice such as "number six", preserve the choice naturally in Russian together with its governing action and surrounding clause.
+For LATIN, translate ordinary English residue into Russian; only transliterate a genuine proper name/title.
+For QUESTION, preserve the source interrogative force and punctuation.
+Never append explanations, alternatives, bracketed glosses or translator notes. corrected_ru MUST be the COMPLETE final Russian translation of exactly source.
 Return every supplied id. ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]}.
 """
         changed: list[str] = []
@@ -160,7 +175,11 @@ Return every supplied id. ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]
                     "current_ru": translated.get(sid, ""),
                     "defects": [{"code": i.code, "reason": i.reason} for i in residual if i.mode == "local" and i.severity == "hard"],
                 })
-        for row in fallback_rows[:6]:
+        fallback_rows.sort(
+            key=lambda row: max(self._PRIORITY.get(d["code"], 0) for d in row["defects"]),
+            reverse=True,
+        )
+        for row in fallback_rows[:10]:
             sid = row["id"]
             self.stats["single_ids"].append(sid)
             segment = by_id[sid]
