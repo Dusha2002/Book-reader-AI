@@ -4,6 +4,7 @@ import json
 import re
 
 from .gigachat_mt import GigaChatLightningBackend
+from .gigachat_oauth_cache import ensure_cached_client
 from .models import BookMemory, Segment
 from .quality_v3 import speaker_metadata
 
@@ -34,10 +35,15 @@ class GigaChatLightningV3Backend(GigaChatLightningBackend):
     * chapter headings are deterministic based on text, not fragile XML locator shape;
     * each target may carry first-person speaker/gender metadata inferred from recent
       epistolary salutations, preventing `я уверен` for a female letter writer;
-    * context and speaker metadata remain explicitly non-translatable.
+    * context and speaker metadata remain explicitly non-translatable;
+    * OAuth is single-flight inside the process and can reuse a short-lived access
+      token from the runner-local cache across separate chapter processes.
     """
 
     name = "gigachat-3-lightning-v3"
+
+    def _ensure_client(self):
+        return ensure_cached_client(self)
 
     @staticmethod
     def _deterministic_heading(segment: Segment) -> str | None:
