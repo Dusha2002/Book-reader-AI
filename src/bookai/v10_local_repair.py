@@ -7,16 +7,11 @@ from .v10 import V10Issue, _giga_json, _norm
 
 
 class GigaLocalRewriter:
-    """Second cheap repair tier for deterministic defects span-patching cannot fix.
-
-    It may rewrite a complete segment, but ONLY rows with already-proven local
-    defects are eligible. Deterministic QA must improve before the candidate is
-    accepted. This keeps numbers/Latin/questions/materials away from DeepSeek.
-    """
+    """Second cheap repair tier for deterministic defects span-patching cannot fix."""
 
     _CODES = {
-        "numeric", "quantity_dozen", "quarter_inch", "question", "material", "order",
-        "latin_leak", "character_gender", "glossary_term",
+        "numeric", "quantity_obligation", "numbered_choice", "quarter_inch", "question",
+        "material", "order", "latin_leak", "character_gender", "glossary_term",
     }
 
     def __init__(self, backend: Any, qa: Any, max_segments: int = 16) -> None:
@@ -52,8 +47,9 @@ class GigaLocalRewriter:
         self.stats["selected_ids"] = [row["id"] for row in rows]
         system = """You are a FAST GigaChat EN→RU local fidelity editor. Every item has a PROVEN local defect.
 Fix ONLY the listed defect(s) while preserving the current Russian wording, literary tone, paragraph structure and all unrelated facts.
-Typical defects: missing/wrong number or unit, question force/punctuation, physical material/order, raw untranslated Latin, local gender agreement.
-For a NUMERIC defect, restore the COMPLETE proposition attached to the missing number, not merely the numeral. If English uses a number as a label/choice such as "number six", preserve that meaning naturally in Russian (for example «номер шесть»/«шестой вариант») and never delete the surrounding clause.
+Typical defects: missing/wrong number or unit, repeated/dozen quantity, numbered choice/label, question force/punctuation, physical material/order, raw untranslated Latin, local gender agreement.
+For NUMERIC/QUANTITY defects, restore the COMPLETE proposition attached to every missing quantity. Do not satisfy a later quantity merely because the same number appears earlier in the paragraph.
+Interpret dozen exactly: a dozen=12, half a dozen=6, two dozen=24. For a numbered choice such as "number six", preserve the choice naturally in Russian (e.g. «номер шесть» or «шестой вариант/кандидат») together with its surrounding clause.
 For a LATIN defect, remove mixed-script/transliterated residue without changing the referent.
 Do not add interpretations and do not perform broad stylistic rewriting. corrected_ru MUST be the COMPLETE final Russian translation of exactly source.
 Return every supplied id. ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]}.
