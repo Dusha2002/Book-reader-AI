@@ -3,21 +3,21 @@ from __future__ import annotations
 from typing import Any
 
 
-# Exact model id used by the direct DeepSeek API.
-CONFIGURED_FLASH_MODEL = "deepseek-v4.1-flash"
-DIRECT_FLASH_MODEL = "deepseek-v4.1-flash"
+# Official model id accepted by https://api.deepseek.com.
+CONFIGURED_FLASH_MODEL = "deepseek-v4-flash"
+DIRECT_FLASH_MODEL = "deepseek-v4-flash"
 
 
 def direct_model_id(configured_model: str, base_url: str) -> str:
-    """Normalize legacy/OpenRouter-style aliases to the exact direct DeepSeek id."""
+    """Normalize legacy/OpenRouter-style aliases to the official direct DeepSeek id."""
     if "api.deepseek.com" not in (base_url or ""):
         return configured_model
     aliases = {
+        "deepseek-v4-flash": DIRECT_FLASH_MODEL,
         "deepseek-v4.1-flash": DIRECT_FLASH_MODEL,
         "deepseek/deepseek-v4.1-flash": DIRECT_FLASH_MODEL,
         "deepseek/deepseek-v4-flash-0731": DIRECT_FLASH_MODEL,
         "deepseek/deepseek-v4.1-flash-0731": DIRECT_FLASH_MODEL,
-        "deepseek-v4-flash": DIRECT_FLASH_MODEL,
     }
     return aliases.get(configured_model, configured_model)
 
@@ -30,7 +30,7 @@ def adapt_provider(provider: Any) -> Any:
     base_url = str(getattr(provider, "base_url", "") or "")
     wire = direct_model_id(configured, base_url)
     if wire != configured:
-        provider.configured_model = wire
+        provider.configured_model = configured
         provider.model = wire
     return provider
 
