@@ -111,6 +111,26 @@ def test_seven_storey_does_not_accept_seventeen_storey():
     assert 6 not in result["missing"]
 
 
+def test_seven_storey_accepts_compound_russian_adjective():
+    result = compare_numeric_fidelity(
+        "It was a seven-storey block on the sixth floor.",
+        "Это был семиэтажный дом на шестом этаже.",
+    )
+    assert result["ok"] is True
+    assert 7 in result["target_values"]
+    assert 6 in result["target_values"]
+
+
+def test_seven_year_old_accepts_semiletney_compound():
+    result = compare_numeric_fidelity(
+        "the last seven-year-old cousin",
+        "последняя семилетняя кузина",
+    )
+    assert result["ok"] is True
+    assert result["source_values"] == [7]
+    assert result["target_values"] == [7]
+
+
 def test_thirty_thousandths_preserves_numerator_without_becoming_30000():
     result = compare_numeric_fidelity(
         "The gap never varied by more than thirty thousandths of an inch.",
@@ -130,3 +150,13 @@ def test_small_cardinal_quantity_is_strict_and_collective_russian_counts():
     assert result["ok"] is True
     assert result["source_values"] == [4]
     assert 4 in result["target_values"]
+
+
+def test_repeated_same_quantity_need_not_be_repeated_in_target():
+    result = compare_numeric_fidelity(
+        "Three men came. Two were older, and the other two obeyed the younger man.",
+        "Пришли трое мужчин. Двое были постарше и слушались молодого.",
+    )
+    assert result["ok"] is True
+    assert result["source_values"].count(2) == 2
+    assert result["target_values"].count(2) == 1
