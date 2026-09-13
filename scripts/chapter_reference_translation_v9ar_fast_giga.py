@@ -34,9 +34,6 @@ def _medium_omission(source: str, target: str) -> bool:
     if src_beats < 3:
         return False
     ratio = len(ru) / max(1, len(src))
-    # High-precision middle band: a multi-sentence source losing roughly a third
-    # of its surface text is much more likely to have dropped a proposition than
-    # to be ordinary EN->RU compression.
     return ratio < 0.67
 
 
@@ -47,7 +44,6 @@ def _dozen_mistranslation(source: str, target: str) -> bool:
         return False
     if re.search(r"\bhalf[ -](?:a[ -])?dozen\b", src, re.I):
         return False
-    # полдюжины is explicitly six and must never satisfy a source dozen=12.
     return bool(re.search(r"\bполдюжин", ru))
 
 
@@ -82,24 +78,17 @@ def _bad_repair_fluency(text: str) -> bool:
     low = value.casefold().replace("ё", "е")
     if not value:
         return True
-    # Common model-output residue: alternatives instead of a final literary choice.
     if re.search(r"\([^()]{0,70}/[^()]{0,70}\)", value):
         return True
     if re.search(r"\b(?:или|вариант|буквально|прим\.?\s*перев)\s*[:—-]", low):
         return True
-    # Broken salvage/continuation fragments observed in live Giga repairs.
     if re.search(r"\bпосле\s+а\s+за\b|\bа\s+за\s*\(", low):
         return True
-    # Do not accept obvious mixed-language prose from a repair candidate.
     latin_words = re.findall(r"\b[A-Za-z]{3,}\b", value)
-    if len(latin_words) >= 2:
-        return True
-    return False
+    return len(latin_words) >= 2
 
 
 def _repair_with_fluency(targets, translated, memory, issues, *, strict: bool = False):
-    # v9ar never asks for a second strict pass; this function is called once per
-    # stage and validates the candidate after the existing deterministic gates.
     before = {str(segment.id): str(translated.get(str(segment.id)) or "") for segment in targets}
     changed, calls = _BASE_REPAIR(targets, translated, memory, issues, strict=False)
     accepted: list[str] = []
@@ -179,21 +168,25 @@ def _annotate_report() -> None:
 
 
 def main() -> None:
+    global _PRE_DONE
+    _PRE_DONE = False
     old_simple_pass = _V9AO._giga_simple_pass
-    old_enhanced = _V9AP._enhanced_simple_failures
-    old_obligations = _V9AP._issue_obligations
+    old_v9aq_enhanced = v9aq._enhanced_v9aq
+    old_v9aq_obligations = v9aq._obligations_v9aq
     old_repair = _V9AP._giga_repair_resilient
 
+    # v9aq.main installs v9aq._enhanced_v9aq and _obligations_v9aq into v9ap,
+    # so patch the v9aq entry points themselves before delegating.
     _V9AO._giga_simple_pass = _single_pass
-    _V9AP._enhanced_simple_failures = _enhanced_v9ar
-    _V9AP._issue_obligations = _obligations_v9ar
+    v9aq._enhanced_v9aq = _enhanced_v9ar
+    v9aq._obligations_v9aq = _obligations_v9ar
     _V9AP._giga_repair_resilient = _repair_with_fluency
     try:
         v9aq.main()
     finally:
         _V9AO._giga_simple_pass = old_simple_pass
-        _V9AP._enhanced_simple_failures = old_enhanced
-        _V9AP._issue_obligations = old_obligations
+        v9aq._enhanced_v9aq = old_v9aq_enhanced
+        v9aq._obligations_v9aq = old_v9aq_obligations
         _V9AP._giga_repair_resilient = old_repair
         _annotate_report()
 
