@@ -1,0 +1,106 @@
+name: v10-chapter-one-audit
+
+on:
+  push:
+    branches: [experiment/v9ah-fast-deepseek]
+    paths: [.github/workflows/v10-chapter-one-audit.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_BASE_URL: https://api.deepseek.com
+      BOOKAI_GATE_MODEL: deepseek-flash
+      BOOKAI_REASONING: none
+      BOOKAI_RETRY_ATTEMPTS: '3'
+      BOOKAI_REQUEST_TIMEOUT: '60'
+      GIGACHAT_AUTH_KEY: ${{ secrets.GIGACHAT_AUTH_KEY }}
+      GIGACHAT_SCOPE: GIGACHAT_API_PERS
+      GIGACHAT_BASE_URL: https://api.giga.chat/v1
+      BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
+      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '12'
+      BOOKAI_GIGACHAT_BATCH_CHARS: '9000'
+      BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
+      BOOKAI_GIGACHAT_TIMEOUT: '55'
+      BOOKAI_GIGACHAT_RETRIES: '1'
+      BOOKAI_V10_BIBLE_BATCH: '45'
+      BOOKAI_V10_DEEP_MAX: '8'
+      BOOKAI_CHAPTER_NAME: Chapter One
+      BOOKAI_V10_BIBLE_CACHE: .bookai-cache-v10/book-bible.json
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install and validate clean v10
+        run: |
+          set -euo pipefail
+          pip install -e '.[dev]' gigachat
+          python -m compileall -q src/bookai/v10.py src/bookai/v10_bible.py scripts/chapter_translation_v10.py
+          pytest -q tests/test_v10_architecture.py
+
+      - name: Translate Chapter One with clean v10
+        run: |
+          set -euo pipefail
+          test -n "${GIGACHAT_AUTH_KEY:-}"
+          test -n "${DEEPSEEK_API_KEY:-}"
+          rm -rf .bookai-cache-v10 audit
+          rm -f v10-chapter-one-* Devices_and_Desires_RU_V10_chapter-one.fb2
+          mkdir -p audit
+          /usr/bin/time -f '%e' -o audit/wall_seconds.txt \
+            timeout --signal=TERM --kill-after=30s 20m \
+            python scripts/chapter_translation_v10.py 2>&1 | tee audit/run.log
+          cp -f v10-chapter-one-* audit/ 2>/dev/null || true
+          cp -f Devices_and_Desires_RU_V10_chapter-one.fb2 audit/ 2>/dev/null || true
+          cp -f .bookai-cache-v10/book-bible.json audit/book-bible.json 2>/dev/null || true
+
+      - name: Build compact summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('audit')
+          report_path = root / 'v10-chapter-one-report.json'
+          report = json.loads(report_path.read_text('utf-8')) if report_path.exists() else {}
+          try:
+              wall = float((root / 'wall_seconds.txt').read_text().strip())
+          except Exception:
+              wall = None
+          summary = {
+              'chapter': report.get('chapter'),
+              'segments': report.get('segments'),
+              'source_chars': report.get('source_chars'),
+              'wall_seconds_with_bible': wall,
+              'timing': report.get('timing'),
+              'book_bible': report.get('book_bible'),
+              'usage': report.get('usage'),
+              'qa_initial': report.get('qa_initial'),
+              'patcher': report.get('patcher'),
+              'deepseek_specialist': report.get('deepseek_specialist'),
+              'qa_final': report.get('qa_final'),
+              'primary_errors': report.get('primary_errors'),
+              'architecture': report.get('architecture'),
+          }
+          (root / 'audit-summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), 'utf-8')
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
+          PY
+
+      - name: Upload clean v10 Chapter One audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: v10-chapter-one-audit
+          path: audit
+          if-no-files-found: warn
+          retention-days: 7
