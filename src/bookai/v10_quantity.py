@@ -114,14 +114,30 @@ def compare_quantity_fidelity_v2(source_en: str, target_ru: str) -> dict[str, An
     target_values = list(base.get("target_values") or []) + _extra_target_values(target_ru)
     target_counts = Counter(target_values)
 
-    # Russian productive compounds can satisfy a legacy base-number obligation that
-    # the old parser could not see (e.g. twelve-thousand-line -> двенадцатитысячная).
-    base_missing = [
-        value for value in (base.get("missing") or [])
-        if target_counts.get(value, 0) <= 0
-    ]
+    # Legacy numeric parsing sees the multiplier in `two dozen` as an independent 2.
+    # It is not: the semantic obligation is one quantity, 24. Remove exactly one
+    # such multiplier mention for each N-dozen phrase before comparing counts.
+    dozen_multipliers: list[int] = []
+    for obligation in obligations:
+        if obligation.kind == "n_dozen":
+            multiplier = obligation.value // 12
+            if multiplier > 0:
+                dozen_multipliers.append(multiplier)
 
+    base_missing = list(base.get("missing") or [])
     source_counts = Counter(base.get("source_values") or [])
+    for multiplier in dozen_multipliers:
+        if source_counts.get(multiplier, 0) > 0:
+            source_counts[multiplier] -= 1
+            if source_counts[multiplier] <= 0:
+                source_counts.pop(multiplier, None)
+        if multiplier in base_missing:
+            base_missing.remove(multiplier)
+
+    # Productive Russian compounds can satisfy a source value invisible to the
+    # legacy target parser, e.g. 12000 -> двенадцатитысячная.
+    base_missing = [value for value in base_missing if target_counts.get(value, 0) <= 0]
+
     for obligation in obligations:
         if obligation.kind != "numbered_choice":
             source_counts[obligation.value] += 1
