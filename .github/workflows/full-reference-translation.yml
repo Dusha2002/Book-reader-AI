@@ -17,8 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      BOOKAI_BASE_URL: https://openrouter.ai/api/v1
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_BASE_URL: https://api.deepseek.com
       GIGACHAT_AUTH_KEY: ${{ secrets.GIGACHAT_AUTH_KEY }}
       GIGACHAT_SCOPE: GIGACHAT_API_PERS
       GIGACHAT_BASE_URL: https://api.giga.chat/v1
@@ -61,7 +62,7 @@ jobs:
       BOOKAI_V9T_TAIL_WORKERS: '3'
       BOOKAI_V9X_RETRANSLATE_MAX: '8'
       BOOKAI_V9X_RETRANSLATE_WORKERS: '2'
-      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first-three-v9x-resilient'
+      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first-three-v9y-deepseek-direct'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -74,16 +75,16 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/chapter_reference_translation_v9e.py scripts/chapter_reference_translation_v9f.py scripts/chapter_reference_translation_v9g.py scripts/chapter_reference_translation_v9h.py scripts/chapter_reference_translation_v9i.py scripts/chapter_reference_translation_v9j.py scripts/chapter_reference_translation_v9k.py scripts/chapter_reference_translation_v9l.py scripts/chapter_reference_translation_v9m.py scripts/chapter_reference_translation_v9n.py scripts/chapter_reference_translation_v9o.py scripts/chapter_reference_translation_v9p.py scripts/chapter_reference_translation_v9q.py scripts/chapter_reference_translation_v9r.py scripts/chapter_reference_translation_v9s.py scripts/chapter_reference_translation_v9t.py scripts/chapter_reference_translation_v9u.py scripts/chapter_reference_translation_v9v.py scripts/chapter_reference_translation_v9w.py scripts/chapter_reference_translation_v9x.py scripts/hybrid_reference_translation.py
+          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/chapter_reference_translation_v9e.py scripts/chapter_reference_translation_v9f.py scripts/chapter_reference_translation_v9g.py scripts/chapter_reference_translation_v9h.py scripts/chapter_reference_translation_v9i.py scripts/chapter_reference_translation_v9j.py scripts/chapter_reference_translation_v9k.py scripts/chapter_reference_translation_v9l.py scripts/chapter_reference_translation_v9m.py scripts/chapter_reference_translation_v9n.py scripts/chapter_reference_translation_v9o.py scripts/chapter_reference_translation_v9p.py scripts/chapter_reference_translation_v9q.py scripts/chapter_reference_translation_v9r.py scripts/chapter_reference_translation_v9s.py scripts/chapter_reference_translation_v9t.py scripts/chapter_reference_translation_v9u.py scripts/chapter_reference_translation_v9v.py scripts/chapter_reference_translation_v9w.py scripts/chapter_reference_translation_v9x.py scripts/chapter_reference_translation_v9y.py scripts/hybrid_reference_translation.py
           pytest -q
       - name: Verify API secrets without exposing them
         shell: bash
         run: |
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
-          test -n "${OPENROUTER_API_KEY:-}" || { echo 'OPENROUTER_API_KEY is not configured' >&2; exit 1; }
-          echo '[bookai] architecture=v9x chapters=one,two,three deterministic-router=yes llm-scanner=no legacy-priority-retries=no provider-retries=3 repair-workers=2 source-canonical-lock=yes gold-reference=no'
-      - name: Translate Chapters One through Three with resilient deterministic-router v9x
+          test -n "${DEEPSEEK_API_KEY:-}" || { echo 'DEEPSEEK_API_KEY is not configured' >&2; exit 1; }
+          echo '[bookai] architecture=v9x transport=deepseek-direct configured-model=deepseek/deepseek-v4.1-flash wire-model=deepseek-v4-flash chapters=one,two,three deterministic-router=yes llm-scanner=no legacy-priority-retries=no gold-reference=no'
+      - name: Translate Chapters One through Three with v9x over direct DeepSeek API
         shell: bash
         run: |
           set -euo pipefail
@@ -92,14 +93,14 @@ jobs:
             slug=$(printf '%s' "$word" | tr '[:upper:]' '[:lower:]')
             echo "[bookai] ===== START Chapter ${word} ====="
             BOOKAI_CHAPTER_NAME="Chapter ${word}" timeout --signal=TERM --kill-after=30s 15m \
-              python scripts/chapter_reference_translation_v9x.py 2>&1 | tee "chapter-v9-full-${slug}.log"
+              python scripts/chapter_reference_translation_v9y.py 2>&1 | tee "chapter-v9-full-${slug}.log"
             echo "[bookai] ===== DONE Chapter ${word} ====="
           done
-      - name: Upload first three chapters v9x resilient deterministic-router evaluation
+      - name: Upload first three chapters v9x direct-DeepSeek evaluation
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: first-three-chapters-v9x-resilient-deterministic-router-source-only-evaluation
+          name: first-three-chapters-v9x-deepseek-direct-source-only-evaluation
           path: |
             Devices_and_Desires_RU_*_EVAL_V9.fb2
             chapter-v9-*.txt
