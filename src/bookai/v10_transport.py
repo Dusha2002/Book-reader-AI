@@ -32,10 +32,10 @@ def _looks_like_prompt_leak(value: str) -> bool:
 class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
     """Complete tagged transport with bounded Giga-only recovery.
 
-    A malformed tagged response must never contaminate a neighboring segment. Each
-    block is accepted only when its closing </s> occurs before the next opening <s>.
-    Corrupt/truncated ids and prompt echoes are treated as missing and recovered
-    with Giga. DeepSeek is never a transport fallback.
+    Opening tags themselves are reliable boundaries. If a block forgets its closing
+    `</s>` but the next opening `<s id=...>` is present, the body can be salvaged up
+    to that boundary without swallowing the neighbor. Only the final unclosed block
+    remains missing/recoverable. Prompt/protocol residue is still rejected.
     """
 
     name = "gigachat-3-lightning-v10-tagged-complete"
@@ -51,11 +51,18 @@ class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
             "first_pass_missing": 0,
             "corrupt_tag_blocks": 0,
             "final_missing": 0,
+            "boundary_salvage": True,
         }
 
     @staticmethod
     def parse_tagged(text: str, expected: set[str]) -> dict[str, str]:
-        """Parse only independently well-formed blocks; never span into a next block."""
+        """Parse independently bounded blocks without allowing cross-id swallowing.
+
+        Preferred form is `<s id=...>...</s>`. When the close tag is missing but a
+        subsequent opening tag exists, that next opening tag safely terminates the
+        current body. We deliberately do NOT salvage the final unclosed block because
+        response truncation there is indistinguishable from an incomplete translation.
+        """
         raw = str(text or "")
         starts = list(_START_TAG_RE.finditer(raw))
         out: dict[str, str] = {}
@@ -64,12 +71,17 @@ class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
             if sid not in expected:
                 continue
             body_start = match.end()
-            next_start = starts[pos + 1].start() if pos + 1 < len(starts) else len(raw)
+            has_next = pos + 1 < len(starts)
+            next_start = starts[pos + 1].start() if has_next else len(raw)
             close = _CLOSE_TAG_RE.search(raw, body_start, next_start)
-            if close is None:
+            if close is not None:
+                body_end = close.start()
+            elif has_next:
+                body_end = next_start
+            else:
                 continue
-            value = raw[body_start:close.start()].strip()
-            # Reject protocol residue and prompt echoes even if the outer block closed.
+            value = raw[body_start:body_end].strip()
+            value = re.sub(r"\s*</?s\s*>\s*$", "", value, flags=re.I).strip()
             if not value or _ANY_S_TAG_RE.search(value) or _looks_like_prompt_leak(value):
                 continue
             out[sid] = value
