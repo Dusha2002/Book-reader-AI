@@ -3,7 +3,11 @@ name: v10-chapters-one-three-audit
 on:
   push:
     branches: [experiment/v9ah-fast-deepseek]
-    paths: [.github/workflows/v10-chapters-one-three-audit.yml]
+    paths:
+      - .github/workflows/v10-chapters-one-three-audit.yml
+      - src/bookai/v10*.py
+      - scripts/chapter_translation_v10_release.py
+      - tests/test_v10*.py
   workflow_dispatch:
 
 permissions:
@@ -34,6 +38,7 @@ jobs:
       BOOKAI_V10_NAME_BATCH: '20'
       BOOKAI_V10_TERM_BATCH: '16'
       BOOKAI_V10_DEEP_MAX: '8'
+      BOOKAI_V10_RELEASE_DEEP_MAX: '8'
       BOOKAI_V10_RECOVERY_BATCH: '4'
       BOOKAI_V10_JSON_RECOVERY_BATCH: '3'
       BOOKAI_V10_BIBLE_CACHE: .bookai-cache-v10/book-bible.json
@@ -44,18 +49,19 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install and validate clean v10
+      - name: Install and validate clean v10 release hardening
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src/bookai/v10*.py scripts/chapter_translation_v10.py
+          python -m compileall -q src/bookai/v10*.py scripts/chapter_translation_v10.py scripts/chapter_translation_v10_release.py
           pytest -q \
             tests/test_v10_architecture.py \
             tests/test_v10_source_only.py \
             tests/test_v10_discourse_quality.py \
             tests/test_v10_integrity_quantity.py \
             tests/test_v10_clause_fidelity.py \
-            tests/test_v10_deepseek_routing.py
+            tests/test_v10_deepseek_routing.py \
+            tests/test_v10_release_hardening.py
 
       - name: Translate Chapters One to Three
         run: |
@@ -73,7 +79,7 @@ jobs:
             BOOKAI_CHAPTER_NAME="$chapter" \
               /usr/bin/time -f '%e' -o "audit-three/$slug/wall_seconds.txt" \
               timeout --signal=TERM --kill-after=30s 20m \
-              python scripts/chapter_translation_v10.py 2>&1 | tee "audit-three/$slug/run.log"
+              python scripts/chapter_translation_v10_release.py 2>&1 | tee "audit-three/$slug/run.log"
             status=${PIPESTATUS[0]}
             set -e
             echo "$status" > "audit-three/$slug/translation_exit_status.txt"
@@ -115,6 +121,7 @@ jobs:
               r = json.loads(p.read_text('utf-8'))
               row = {
                   'chapter': r.get('chapter'),
+                  'chapter_selection': r.get('chapter_selection'),
                   'segments': r.get('segments'),
                   'source_chars': r.get('source_chars'),
                   'timing': r.get('timing'),
@@ -124,7 +131,12 @@ jobs:
                   'qa_initial': r.get('qa_initial'),
                   'qa_after_local': r.get('qa_after_local'),
                   'deepseek_specialist': r.get('deepseek_specialist'),
+                  'qa_release_pre': r.get('qa_release_pre'),
+                  'release_local_rewriter': r.get('release_local_rewriter'),
+                  'qa_release_mid': r.get('qa_release_mid'),
+                  'release_deepseek_specialist': r.get('release_deepseek_specialist'),
                   'qa_final': r.get('qa_final'),
+                  'final_hard': r.get('final_hard'),
                   'final_integrity': r.get('final_integrity'),
                   'segment_integrity': r.get('segment_integrity'),
               }
@@ -148,7 +160,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v10-chapters-one-three-clean7c
+          name: v10-chapters-one-three-clean8-release
           path: audit-three
           if-no-files-found: warn
           retention-days: 7
