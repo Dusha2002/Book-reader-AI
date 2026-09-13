@@ -14,6 +14,7 @@ from bookai.v10_dialogue import DialogueDiscourseGuard
 from bookai.v10_local_repair import GigaLocalRewriter
 from bookai.v10_name_canon import V9ADSourceOnlyBookBibleBuilder
 from bookai.v10_quality import V10QualityQA
+from bookai.v10_speaker import DialogueSpeakerContinuityGuard
 from bookai.v10_transport import RobustTaggedPrimaryTransport
 
 
@@ -64,7 +65,7 @@ def main() -> None:
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
         "whole_book_segments": len(all_targets),
-        "architecture": "clean-v10:source-only+v9d-discourse+v9ad-canon-risk:no-v9-imports",
+        "architecture": "clean-v10:source-only+v9d-dialogue-speaker+v9ad-canon-risk:no-v9-imports",
     }, ensure_ascii=False), flush=True)
 
     giga = RobustTaggedPrimaryTransport()
@@ -82,6 +83,8 @@ def main() -> None:
 
     dialogue_guard = DialogueDiscourseGuard()
     dialogue_after_primary = dialogue_guard.apply(targets, translated)
+    speaker_guard = DialogueSpeakerContinuityGuard()
+    speaker_after_primary = speaker_guard.apply(targets, translated)
 
     # Narrow deterministic QA + two cheap Giga tiers. Span patches are preferred;
     # unresolved proven local defects get one bounded full-segment Giga rewrite.
@@ -98,7 +101,7 @@ def main() -> None:
     post_local_issues = qa.scan(targets, translated, memory)
 
     # Exactly one expensive semantic batch at most. Risk ranking is v9ad-inspired:
-    # spatial direction, kinship/ordinal logic and specialist word sense outrank length.
+    # spatial direction, kinship, specialist hunting/technical word sense outrank length.
     provider = _provider()
     specialist = DeepSeekSemanticSpecialist(
         provider,
@@ -109,6 +112,8 @@ def main() -> None:
     deep_changed = specialist.repair(targets, translated, memory, specialist_issues)
 
     dialogue_after_semantic = dialogue_guard.apply(targets, translated)
+    speaker_guard_final = DialogueSpeakerContinuityGuard()
+    speaker_after_semantic = speaker_guard_final.apply(targets, translated)
     final_issues = qa.scan(targets, translated, memory)
     chapter_seconds = time.perf_counter() - chapter_started
 
@@ -136,7 +141,7 @@ def main() -> None:
     MAP.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), "utf-8")
 
     report = {
-        "version": "v10-clean-4-v9d-v9ad",
+        "version": "v10-clean-5-discourse-risk",
         "chapter": chapter_name,
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
@@ -150,9 +155,9 @@ def main() -> None:
         },
         "architecture": {
             "book_bible": "SOURCE-ONLY high-coverage v9ad-style spelling canon + conservative technical glossary; no reference seed",
-            "primary": "GigaChat tagged batches + bounded Giga-only recovery; strict cross-segment contamination rejection",
-            "discourse_dialogue": "v9d source-structural direct speech vs narrative quotation; deterministic and lexically inert",
-            "qa": "deterministic fidelity + narrow direction/kinship semantic contracts",
+            "primary": "GigaChat tagged batches + bounded Giga-only recovery + prompt-leak rejection",
+            "discourse_dialogue": "v9d source-structural quotation normalization + conservative two-speaker continuity",
+            "qa": "deterministic fidelity + v10 numeric morphology compatibility + direction/kinship/hunting contracts",
             "cheap_repair": "Giga exact-span patch first, then bounded full-segment Giga rewrite only for proven local defects",
             "semantic_repair": "one DeepSeek batch, <=8 v9ad-style risk-ranked semantic segments",
             "final_gate": "deterministic only",
@@ -166,6 +171,10 @@ def main() -> None:
             **dict(dialogue_guard.stats),
             "after_primary_changed_ids": dialogue_after_primary,
             "after_semantic_changed_ids": dialogue_after_semantic,
+        },
+        "speaker_guard": {
+            "after_primary": {**dict(speaker_guard.stats), "changed_ids": speaker_after_primary},
+            "after_semantic": {**dict(speaker_guard_final.stats), "changed_ids": speaker_after_semantic},
         },
         "primary_transport": dict(giga.transport_stats),
         "usage": {
