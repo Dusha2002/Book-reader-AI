@@ -11,6 +11,7 @@ from bookai.parsers.base import load_book, save_book
 from bookai.pipeline import _chapter_groups, _should_translate
 from bookai.v10 import DeepSeekSemanticSpecialist, GigaSpanPatcher, issue_summary
 from bookai.v10_dialogue import DialogueDiscourseGuard
+from bookai.v10_integrity import SegmentIntegrityGate
 from bookai.v10_local_repair import GigaLocalRewriter
 from bookai.v10_name_canon import V9ADSourceOnlyBookBibleBuilder
 from bookai.v10_quality import V10QualityQA
@@ -65,7 +66,7 @@ def main() -> None:
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
         "whole_book_segments": len(all_targets),
-        "architecture": "clean-v10:source-only+v9d-dialogue-speaker+v9ad-canon-risk:no-v9-imports",
+        "architecture": "clean-v10:source-only+integrity+v9d-dialogue-speaker+v9ad-canon-risk+quantity-v2:no-v9-imports",
     }, ensure_ascii=False), flush=True)
 
     giga = RobustTaggedPrimaryTransport()
@@ -81,13 +82,18 @@ def main() -> None:
     translated, primary_errors = giga.translate_many(targets, memory, source_segments=all_targets)
     usage_after_primary = giga.usage.as_dict()
 
+    # Structural fidelity is a prerequisite, not a late QA concern. A segment that
+    # contains prompt residue or the wrong neighboring paragraph is isolated and
+    # retranslated by Giga before dialogue normalization or semantic routing.
+    integrity = SegmentIntegrityGate(giga)
+    integrity_changed = integrity.repair(targets, translated, memory, source_segments=all_targets)
+    usage_after_integrity = giga.usage.as_dict()
+
     dialogue_guard = DialogueDiscourseGuard()
     dialogue_after_primary = dialogue_guard.apply(targets, translated)
     speaker_guard = DialogueSpeakerContinuityGuard()
     speaker_after_primary = speaker_guard.apply(targets, translated)
 
-    # Narrow deterministic QA + two cheap Giga tiers. Span patches are preferred;
-    # unresolved proven local defects get one bounded full-segment Giga rewrite.
     qa = V10QualityQA()
     initial_issues = qa.scan(targets, translated, memory)
     patcher = GigaSpanPatcher(giga, qa)
@@ -100,8 +106,6 @@ def main() -> None:
     usage_after_local = giga.usage.as_dict()
     post_local_issues = qa.scan(targets, translated, memory)
 
-    # Exactly one expensive semantic batch at most. Risk ranking is v9ad-inspired:
-    # spatial direction, kinship, specialist hunting/technical word sense outrank length.
     provider = _provider()
     specialist = DeepSeekSemanticSpecialist(
         provider,
@@ -115,6 +119,7 @@ def main() -> None:
     speaker_guard_final = DialogueSpeakerContinuityGuard()
     speaker_after_semantic = speaker_guard_final.apply(targets, translated)
     final_issues = qa.scan(targets, translated, memory)
+    final_integrity = integrity.scan(targets, translated)
     chapter_seconds = time.perf_counter() - chapter_started
 
     missing = [segment.id for segment in targets if not str(translated.get(segment.id) or "").strip()]
@@ -127,6 +132,9 @@ def main() -> None:
         issue_by_id.setdefault(issue.id, []).append({
             "code": issue.code, "mode": issue.mode, "severity": issue.severity, "reason": issue.reason
         })
+    integrity_by_id: dict[str, list[dict]] = {}
+    for issue in final_integrity:
+        integrity_by_id.setdefault(issue.id, []).append({"code": issue.code, "reason": issue.reason})
     mapping = [
         {
             "id": s.id,
@@ -135,13 +143,14 @@ def main() -> None:
             "translation": translated.get(s.id),
             "length_ratio": round(len(str(translated.get(s.id) or "")) / max(1, len(s.text)), 3),
             "final_issues": issue_by_id.get(s.id, []),
+            "final_integrity": integrity_by_id.get(s.id, []),
         }
         for s in targets
     ]
     MAP.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), "utf-8")
 
     report = {
-        "version": "v10-clean-5-discourse-risk",
+        "version": "v10-clean-6-integrity-quantity-v2",
         "chapter": chapter_name,
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
@@ -156,17 +165,24 @@ def main() -> None:
         "architecture": {
             "book_bible": "SOURCE-ONLY high-coverage v9ad-style spelling canon + conservative technical glossary; no reference seed",
             "primary": "GigaChat tagged batches + bounded Giga-only recovery + prompt-leak rejection",
+            "segment_integrity": "pre-QA extreme ratio/protocol gate + isolated one-segment Giga recovery",
             "discourse_dialogue": "v9d source-structural quotation normalization + conservative two-speaker continuity",
-            "qa": "deterministic fidelity + v10 numeric morphology compatibility + direction/kinship/hunting contracts",
+            "qa": "deterministic fidelity + proposition-aware QuantityFidelity v2 + direction/kinship/hunting contracts",
             "cheap_repair": "Giga exact-span patch first, then bounded full-segment Giga rewrite only for proven local defects",
             "semantic_repair": "one DeepSeek batch, <=8 v9ad-style risk-ranked semantic segments",
-            "final_gate": "deterministic only",
+            "final_gate": "deterministic QA + structural integrity scan",
             "reference_seed": False,
             "legacy_sanitizer": False,
             "deepseek_verifier": False,
             "v9_monkey_patch_chain": False,
         },
         "book_bible": bible_stats,
+        "segment_integrity": {**dict(integrity.stats), "changed_ids": integrity_changed},
+        "final_integrity": {
+            "count": len(final_integrity),
+            "ids": sorted({issue.id for issue in final_integrity}),
+            "issues": [{"id": issue.id, "code": issue.code, "reason": issue.reason} for issue in final_integrity],
+        },
         "dialogue_guard": {
             **dict(dialogue_guard.stats),
             "after_primary_changed_ids": dialogue_after_primary,
@@ -180,7 +196,8 @@ def main() -> None:
         "usage": {
             "gigachat_bible": usage_after_bible,
             "gigachat_primary": _usage_delta(usage_after_primary, usage_after_bible),
-            "gigachat_patcher": _usage_delta(usage_after_patcher, usage_after_primary),
+            "gigachat_integrity": _usage_delta(usage_after_integrity, usage_after_primary),
+            "gigachat_patcher": _usage_delta(usage_after_patcher, usage_after_integrity),
             "gigachat_local_rewriter": _usage_delta(usage_after_local, usage_after_patcher),
             "gigachat_total": usage_after_local,
             "deepseek": dict(provider.usage),
@@ -201,6 +218,8 @@ def main() -> None:
 
     if missing:
         raise RuntimeError(f"v10 left {len(missing)} untranslated segments after Giga-only recovery: {missing[:12]}")
+    if final_integrity:
+        raise RuntimeError(f"v10 structural integrity gate left {len(final_integrity)} suspicious segments: {sorted({i.id for i in final_integrity})[:12]}")
 
 
 if __name__ == "__main__":
