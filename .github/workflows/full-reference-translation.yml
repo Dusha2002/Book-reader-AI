@@ -72,17 +72,17 @@ jobs:
       BOOKAI_V9AA_NAME_MAX: '64'
       BOOKAI_V9AA_VERIFY_EXTRA: '8'
       BOOKAI_V9AA_VERIFY_BATCH: '10'
-      BOOKAI_V9AB_DEEP_REPAIR_MAX: '15'
+      BOOKAI_V9AB_DEEP_REPAIR_MAX: '48'
       BOOKAI_V9AB_GIGA_EXTRA_MAX: '0'
-      BOOKAI_V9AB_DEEP_BATCH: '7'
-      BOOKAI_V9AB_FINAL_VERIFY_MAX: '20'
-      BOOKAI_V9AB_VERIFY_BATCH: '10'
+      BOOKAI_V9AB_DEEP_BATCH: '8'
+      BOOKAI_V9AB_FINAL_VERIFY_MAX: '48'
+      BOOKAI_V9AB_VERIFY_BATCH: '12'
       BOOKAI_V9AD_NAME_MAX: '60'
       BOOKAI_V9AD_NAME_BATCH: '20'
       BOOKAI_V9AF_SANITIZER_MAX: '32'
       BOOKAI_V9AF_SANITIZER_BATCH: '18'
       BOOKAI_V9AG_RETRY_MAX: '16'
-      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first-three-v9ag-source-only'
+      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first-three-v9ah-source-only'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -95,7 +95,7 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/chapter_reference_translation_v9e.py scripts/chapter_reference_translation_v9f.py scripts/chapter_reference_translation_v9g.py scripts/chapter_reference_translation_v9h.py scripts/chapter_reference_translation_v9i.py scripts/chapter_reference_translation_v9j.py scripts/chapter_reference_translation_v9k.py scripts/chapter_reference_translation_v9l.py scripts/chapter_reference_translation_v9m.py scripts/chapter_reference_translation_v9n.py scripts/chapter_reference_translation_v9o.py scripts/chapter_reference_translation_v9p.py scripts/chapter_reference_translation_v9q.py scripts/chapter_reference_translation_v9r.py scripts/chapter_reference_translation_v9s.py scripts/chapter_reference_translation_v9t.py scripts/chapter_reference_translation_v9u.py scripts/chapter_reference_translation_v9v.py scripts/chapter_reference_translation_v9w.py scripts/chapter_reference_translation_v9x.py scripts/chapter_reference_translation_v9y.py scripts/chapter_reference_translation_v9z.py scripts/chapter_reference_translation_v9aa.py scripts/chapter_reference_translation_v9ab.py scripts/chapter_reference_translation_v9ac.py scripts/chapter_reference_translation_v9ad.py scripts/chapter_reference_translation_v9ae.py scripts/chapter_reference_translation_v9af.py scripts/chapter_reference_translation_v9ag.py scripts/hybrid_reference_translation.py
+          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/chapter_reference_translation_v9e.py scripts/chapter_reference_translation_v9f.py scripts/chapter_reference_translation_v9g.py scripts/chapter_reference_translation_v9h.py scripts/chapter_reference_translation_v9i.py scripts/chapter_reference_translation_v9j.py scripts/chapter_reference_translation_v9k.py scripts/chapter_reference_translation_v9l.py scripts/chapter_reference_translation_v9m.py scripts/chapter_reference_translation_v9n.py scripts/chapter_reference_translation_v9o.py scripts/chapter_reference_translation_v9p.py scripts/chapter_reference_translation_v9q.py scripts/chapter_reference_translation_v9r.py scripts/chapter_reference_translation_v9s.py scripts/chapter_reference_translation_v9t.py scripts/chapter_reference_translation_v9u.py scripts/chapter_reference_translation_v9v.py scripts/chapter_reference_translation_v9w.py scripts/chapter_reference_translation_v9x.py scripts/chapter_reference_translation_v9y.py scripts/chapter_reference_translation_v9z.py scripts/chapter_reference_translation_v9aa.py scripts/chapter_reference_translation_v9ab.py scripts/chapter_reference_translation_v9ac.py scripts/chapter_reference_translation_v9ad.py scripts/chapter_reference_translation_v9ae.py scripts/chapter_reference_translation_v9af.py scripts/chapter_reference_translation_v9ag.py scripts/chapter_reference_translation_v9ah.py scripts/hybrid_reference_translation.py
           pytest -q
       - name: Verify API secrets without exposing them
         shell: bash
@@ -103,8 +103,8 @@ jobs:
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
           test -n "${DEEPSEEK_API_KEY:-}" || { echo 'DEEPSEEK_API_KEY is not configured' >&2; exit 1; }
-          echo '[bookai] architecture=v9ag model=deepseek-flash(v4.1) chapters=one,two,three source-only=yes deepseek-bulk-qe=no book-intelligence=gigachat name-canon=gigachat hard-semantic=deepseek-batched final-verifier=deepseek-bounded source-sanitizer=validated-gigachat+deterministic gold-reference=no'
-      - name: Translate Chapters One through Three with v9ag validated source-grounded sanitizer
+          echo '[bookai] architecture=v9ah model=deepseek-flash(v4.1) chapters=one,two,three source-only=yes deepseek-bulk-qe=no deepseek-budget=adaptive-length+risk-density mandatory-high-risk=unbounded repair-batch=8 verify-batch=12 source-sanitizer=validated-gigachat+deterministic gold-reference=no'
+      - name: Translate Chapters One through Three with v9ah adaptive sparse DeepSeek
         shell: bash
         run: |
           set -euo pipefail
@@ -113,14 +113,14 @@ jobs:
             slug=$(printf '%s' "$word" | tr '[:upper:]' '[:lower:]')
             echo "[bookai] ===== START Chapter ${word} ====="
             BOOKAI_CHAPTER_NAME="Chapter ${word}" timeout --signal=TERM --kill-after=30s 15m \
-              python scripts/chapter_reference_translation_v9ag.py 2>&1 | tee "chapter-v9-full-${slug}.log"
+              python scripts/chapter_reference_translation_v9ah.py 2>&1 | tee "chapter-v9-full-${slug}.log"
             echo "[bookai] ===== DONE Chapter ${word} ====="
           done
-      - name: Upload first three chapters v9ag source-grounded evaluation
+      - name: Upload first three chapters v9ah adaptive evaluation
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: first-three-chapters-v9ag-source-grounded-sparse-deepseek-evaluation
+          name: first-three-chapters-v9ah-adaptive-sparse-deepseek-evaluation
           path: |
             Devices_and_Desires_RU_*_EVAL_V9.fb2
             chapter-v9-*.txt
