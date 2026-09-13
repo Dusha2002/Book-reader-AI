@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -68,6 +67,7 @@ _RU_CARDINAL = {
     "девятеро": 9, "девятерых": 9, "десятеро": 10, "десятерых": 10,
 }
 _RU_SCALE = {"тысяча": 1000, "тысячи": 1000, "тысячу": 1000, "тысяч": 1000}
+
 # Do not include "тысячн-": in "тридцать тысячных" it is a fractional
 # denominator, not multiplication by 1000.
 _RU_ORDINAL_STEMS = [
@@ -81,6 +81,25 @@ _RU_ORDINAL_STEMS = [
     ("пят", 5), ("четверт", 4), ("треть", 3), ("трет", 3),
     ("втор", 2), ("перв", 1),
 ]
+
+# Russian frequently absorbs quantities into one adjective/noun token:
+# seven-year-old -> семилетний, seven-storey -> семиэтажный. These are real
+# numeric facts and must count, while ordinary lexical words must not.
+_RU_COMPOUND_PREFIXES = [
+    ("девяноста", 90), ("восьмидесяти", 80), ("семидесяти", 70),
+    ("шестидесяти", 60), ("пятидесяти", 50), ("сорока", 40),
+    ("тридцати", 30), ("двадцати", 20), ("девятнадцати", 19),
+    ("восемнадцати", 18), ("семнадцати", 17), ("шестнадцати", 16),
+    ("пятнадцати", 15), ("четырнадцати", 14), ("тринадцати", 13),
+    ("двенадцати", 12), ("одиннадцати", 11), ("десяти", 10),
+    ("девяти", 9), ("восьми", 8), ("семи", 7), ("шести", 6),
+    ("пяти", 5), ("четырех", 4), ("четырёх", 4),
+    ("трех", 3), ("трёх", 3), ("двух", 2), ("одно", 1),
+]
+_RU_COMPOUND_UNIT_STEMS = (
+    "лет", "год", "этаж", "комнат", "днев", "дн", "недел", "месяч",
+    "час", "минут", "секунд", "метр", "километр", "тонн", "мест", "страниц",
+)
 
 
 @dataclass(frozen=True)
@@ -185,6 +204,23 @@ def _english_values(text: str) -> list[int | float]:
     return out
 
 
+def _ru_compound_value(word: str) -> int | None:
+    normalized = word.replace("ё", "е")
+    for prefix, value in _RU_COMPOUND_PREFIXES:
+        prefix_n = prefix.replace("ё", "е")
+        if not normalized.startswith(prefix_n) or len(normalized) <= len(prefix_n):
+            continue
+        remainder = normalized[len(prefix_n):]
+        if remainder.startswith(_RU_COMPOUND_UNIT_STEMS):
+            return value
+    # Common 100-year / 100-storey compounds use сто- directly.
+    if normalized.startswith("сто") and len(normalized) > 3:
+        remainder = normalized[3:]
+        if remainder.startswith(_RU_COMPOUND_UNIT_STEMS):
+            return 100
+    return None
+
+
 def _ru_word_value(word: str) -> tuple[int, str] | None:
     normalized = word.replace("ё", "е")
     for key, value in _RU_CARDINAL.items():
@@ -193,6 +229,9 @@ def _ru_word_value(word: str) -> tuple[int, str] | None:
     for key, value in _RU_SCALE.items():
         if normalized == key.replace("ё", "е"):
             return value, "scale"
+    compound = _ru_compound_value(word)
+    if compound is not None:
+        return compound, "compound"
     for stem, value in _RU_ORDINAL_STEMS:
         if normalized.startswith(stem.replace("ё", "е")) and len(normalized) >= len(stem) + 1:
             return value, "ordinal"
@@ -228,6 +267,13 @@ def _russian_values(text: str) -> list[int | float]:
             i += 1
             continue
 
+        # A compound token such as семилетний is already complete; never add the
+        # following unrelated numeric token to it.
+        if first[1] == "compound":
+            out.append(first[0])
+            i += 1
+            continue
+
         items = [first]
         seen_ordinal = first[1] == "ordinal"
         j = i + 1
@@ -235,7 +281,7 @@ def _russian_values(text: str) -> list[int | float]:
             if not _joined(text, toks[j - 1], toks[j]):
                 break
             nxt = _ru_word_value(toks[j].text)
-            if nxt is None or seen_ordinal:
+            if nxt is None or seen_ordinal or nxt[1] == "compound":
                 break
             items.append(nxt)
             if nxt[1] == "ordinal":
@@ -249,23 +295,25 @@ def _russian_values(text: str) -> list[int | float]:
 
 
 def compare_numeric_fidelity(source_en: str, target_ru: str) -> dict[str, Any]:
-    """Return deterministic EN→RU numeric-fact preservation diagnostics.
+    """Return conservative EN→RU numeric-fact preservation diagnostics.
 
-    This is deliberately narrower than semantic QA: it locks objective quantities
-    and numbered entities while avoiding generic ordinals that Russian may render
-    idiomatically ("first time"→"впервые"). Punctuation is part of the grammar,
-    so independent expressions separated by commas are never accidentally added.
+    We verify value presence, not mention multiplicity. Russian may replace a
+    repeated "other two" with a pronoun or merge two clauses while preserving the
+    same quantity. Omission/completeness is handled by separate QA; this contract
+    is specifically for substitutions such as 30→31 or seven-storey→seventeen-storey.
     """
     source_values = _english_values(source_en)
     target_values = _russian_values(target_ru)
     if not source_values:
         return {"ok": True, "source_values": [], "target_values": target_values, "missing": []}
 
-    src = Counter(source_values)
-    dst = Counter(target_values)
+    target_set = set(target_values)
     missing: list[int | float] = []
-    for value, count in src.items():
-        missing.extend([value] * max(0, count - dst.get(value, 0)))
+    seen: set[int | float] = set()
+    for value in source_values:
+        if value not in target_set and value not in seen:
+            missing.append(value)
+            seen.add(value)
     return {
         "ok": not missing,
         "source_values": source_values,
