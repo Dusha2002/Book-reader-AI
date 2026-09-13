@@ -30,6 +30,10 @@ _RU_CARDINAL_LABELS = {
     5: ("пять",), 6: ("шесть",), 7: ("семь",), 8: ("восемь",), 9: ("девять",),
     10: ("десять",), 11: ("одиннадцать",), 12: ("двенадцать",),
 }
+_RU_HUNDRED_GENITIVE = {
+    "двух": 200, "трех": 300, "трёх": 300, "четырех": 400, "четырёх": 400,
+    "пяти": 500, "шести": 600, "семи": 700, "восьми": 800, "девяти": 900,
+}
 
 
 @dataclass(frozen=True)
@@ -83,7 +87,8 @@ def extract_quantity_obligations(source_en: str) -> list[QuantityObligation]:
 def _extra_target_values(target_ru: str) -> list[int]:
     text = str(target_ru or "").casefold().replace("ё", "е")
     out: list[int] = []
-    out.extend([6] * len(re.findall(r"\bполдюжин\w*\b", text)))
+    # Both полдюжины and instrumental полудюжиной are idiomatic forms of six.
+    out.extend([6] * len(re.findall(r"\bпол(?:у)?дюжин\w*\b", text)))
     ru_n = {
         "одна": 1, "одну": 1, "одной": 1, "две": 2, "двух": 2, "три": 3,
         "трех": 3, "четыре": 4, "четырех": 4, "пять": 5, "шесть": 6,
@@ -91,11 +96,17 @@ def _extra_target_values(target_ru: str) -> list[int]:
     for match in re.finditer(r"\b(одна|одну|одной|две|двух|три|трех|четыре|четырех|пять|шесть)\s+дюжин\w*\b", text):
         out.append(12 * ru_n[match.group(1)])
     for match in re.finditer(r"\bдюжин\w*\b", text):
-        prefix = text[max(0, match.start() - 4):match.start()]
+        prefix = text[max(0, match.start() - 5):match.start()]
         if "пол" not in prefix:
             out.append(12)
     for prefix, value in _RU_THOUSAND_PREFIXES.items():
         out.extend([value] * len(re.findall(rf"\b{re.escape(prefix)}[а-я]+\b", text)))
+    # Productive century adjectives: двухвековая, трёхвековой, etc.
+    for prefix, value in (("двухвек", 2), ("трехвек", 3), ("трёхвек", 3), ("четырехвек", 4), ("четырёхвек", 4)):
+        out.extend([value] * len(re.findall(rf"\b{prefix}[а-я]+\b", text)))
+    # Inflected hundreds: шести сотен, трёх сотнях, etc.
+    for word, value in _RU_HUNDRED_GENITIVE.items():
+        out.extend([value] * len(re.findall(rf"\b{word}\s+сот(?:ен|ни|ням|нями|нях)?\b", text)))
     return out
 
 
@@ -103,7 +114,6 @@ def _numbered_choice_present(value: int, target_ru: str) -> bool:
     low = str(target_ru or "").casefold().replace("ё", "е")
     if re.search(rf"\b(?:номер\s*)?{value}\b", low):
         return True
-    # Labels are often translated cardinally: «копьё номер четыре».
     for word in _RU_CARDINAL_LABELS.get(value, ()):
         if re.search(rf"\b(?:номер\s+)?{re.escape(word)}\b", low):
             return True
@@ -114,6 +124,19 @@ def _numbered_choice_present(value: int, target_ru: str) -> bool:
     }
     stem = stems.get(value)
     return bool(stem and re.search(rf"\b{stem}[а-я]*\b", low))
+
+
+def _approximate_values(source_en: str) -> set[int]:
+    """Numbers inside explicitly approximate alternatives need not survive literally."""
+    text = str(source_en or "").casefold()
+    values: set[int] = set()
+    if re.search(r"\b(?:a\s+)?(?:word|flight|step|day|minute|hour)\s+or\s+two\b", text):
+        values.add(2)
+    if re.search(r"\bone\s+or\s+two\b", text):
+        values.update({1, 2})
+    if re.search(r"\ba\s+week\s+or\s+ten\s+days\b", text):
+        values.add(10)
+    return values
 
 
 def compare_quantity_fidelity_v2(source_en: str, target_ru: str) -> dict[str, Any]:
@@ -139,6 +162,12 @@ def compare_quantity_fidelity_v2(source_en: str, target_ru: str) -> dict[str, An
                 source_counts.pop(multiplier, None)
         if multiplier in base_missing:
             base_missing.remove(multiplier)
+
+    # Approximate alternatives such as "a word or two" legitimately lexicalize as
+    # «хоть слово», «пару», «несколько» and are not exact arithmetic obligations.
+    for value in _approximate_values(source_en):
+        source_counts.pop(value, None)
+        base_missing = [row for row in base_missing if row != value]
 
     base_missing = [value for value in base_missing if target_counts.get(value, 0) <= 0]
 
