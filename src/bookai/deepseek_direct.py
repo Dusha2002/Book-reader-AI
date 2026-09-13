@@ -3,16 +3,17 @@ from __future__ import annotations
 from typing import Any
 
 
-# Official model id accepted by https://api.deepseek.com.
-CONFIGURED_FLASH_MODEL = "deepseek-v4-flash"
-DIRECT_FLASH_MODEL = "deepseek-v4-flash"
+# Canonical API id for DeepSeek V4.1 Flash (released 2026-09-10).
+CONFIGURED_FLASH_MODEL = "deepseek-flash"
+DIRECT_FLASH_MODEL = "deepseek-flash"
 
 
 def direct_model_id(configured_model: str, base_url: str) -> str:
-    """Normalize legacy/OpenRouter-style aliases to the official direct DeepSeek id."""
+    """Normalize legacy aliases to the canonical direct DeepSeek V4.1 Flash id."""
     if "api.deepseek.com" not in (base_url or ""):
         return configured_model
     aliases = {
+        "deepseek-flash": DIRECT_FLASH_MODEL,
         "deepseek-v4-flash": DIRECT_FLASH_MODEL,
         "deepseek-v4.1-flash": DIRECT_FLASH_MODEL,
         "deepseek/deepseek-v4.1-flash": DIRECT_FLASH_MODEL,
@@ -36,7 +37,7 @@ def adapt_provider(provider: Any) -> Any:
 
 
 def adapt_harness(harness: Any) -> Any:
-    """Normalize every API role in a TranslationHarness to direct DeepSeek."""
+    """Normalize every API role in a TranslationHarness to direct DeepSeek V4.1 Flash."""
     providers = [
         getattr(harness, "analyzer", None),
         getattr(harness, "gate", None),
