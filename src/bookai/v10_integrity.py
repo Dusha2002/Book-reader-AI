@@ -10,7 +10,8 @@ from .v10_transport import RobustTaggedPrimaryTransport, _looks_like_prompt_leak
 
 
 _PROTOCOL_RE = re.compile(
-    r"(?:\b(?:characters?|glossary|context_only|targets?|source|translation)\s*:|"
+    r"(?:</?src(?:\s+id=[^>]+)?>|</?s(?:\s+id=[^>]+)?>|"
+    r"\b(?:characters?|glossary|context_only|targets?|source|translation)\s*:|"
     r"\b(?:персонажи|глоссарий|контекст|источник|перевод)\s*:)",
     re.I,
 )
@@ -65,12 +66,6 @@ class SegmentIntegrityGate:
         return out
 
     def _source_only_recover(self, segment: Segment) -> str:
-        """Retranslate one exact source segment with zero neighboring prose.
-
-        The previous fallback reused CONTEXT_ONLY, which is precisely dangerous after
-        detecting a boundary shift: the model can copy the neighboring paragraph again.
-        Structural recovery therefore receives only the suspect source itself.
-        """
         client = self.backend._ensure_client()
         request = {
             "model": self.backend.model,
@@ -80,7 +75,7 @@ class SegmentIntegrityGate:
                     "content": (
                         "Переведи РОВНО один английский фрагмент литературной прозы на русский. "
                         "SOURCE ниже — единственный текст, который разрешено переводить. "
-                        "Не продолжай сцену, не добавляй соседний контекст, служебные подписи или комментарии. "
+                        "Не продолжай сцену, не добавляй соседний контекст, служебные подписи, XML/HTML-теги или комментарии. "
                         "Сохрани все предложения, реплики, числа, имена, причинность и порядок. "
                         "Верни только полный готовый русский перевод этого SOURCE."
                     ),
@@ -111,7 +106,7 @@ class SegmentIntegrityGate:
         *,
         source_segments: list[Segment] | None = None,
     ) -> list[str]:
-        del memory, source_segments  # integrity recovery intentionally ignores both
+        del memory, source_segments
         issues = self.scan(segments, translated)
         suspect_ids = list(dict.fromkeys(issue.id for issue in issues))
         self.stats["detected"] = len(suspect_ids)
