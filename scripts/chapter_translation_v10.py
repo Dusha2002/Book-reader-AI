@@ -12,11 +12,11 @@ from bookai.pipeline import _chapter_groups, _should_translate
 from bookai.v10 import (
     DeepSeekSemanticSpecialist,
     DeterministicQA,
-    GigaPrimaryTransport,
     GigaSpanPatcher,
     issue_summary,
 )
 from bookai.v10_bible import AtomicBookBibleBuilder
+from bookai.v10_transport import RobustTaggedPrimaryTransport
 
 
 SOURCE = Path(os.getenv("BOOKAI_SOURCE") or "Devices_and_Desires.fb2")
@@ -69,7 +69,7 @@ def main() -> None:
         "architecture": "clean-v10:no-v9-imports",
     }, ensure_ascii=False), flush=True)
 
-    giga = GigaPrimaryTransport()
+    giga = RobustTaggedPrimaryTransport()
     if not giga.available():
         raise RuntimeError("GIGACHAT_AUTH_KEY is missing")
 
@@ -84,6 +84,9 @@ def main() -> None:
     translated, primary_errors = giga.translate_many(targets, memory, source_segments=all_targets)
     usage_after_primary = giga.usage.as_dict()
 
+    # DeepSeek must never serve as a transport fallback. If primary still has
+    # missing ids after bounded Giga-only recovery, preserve the diagnostic but
+    # do not route an empty current_ru to the semantic specialist.
     qa = DeterministicQA()
     initial_issues = qa.scan(targets, translated, memory)
     patcher = GigaSpanPatcher(giga, qa)
@@ -97,7 +100,8 @@ def main() -> None:
         qa,
         max_segments=max(4, int(os.getenv("BOOKAI_V10_DEEP_MAX") or "8")),
     )
-    deep_changed = specialist.repair(targets, translated, memory, post_patch_issues)
+    specialist_issues = [issue for issue in post_patch_issues if issue.code != "missing"]
+    deep_changed = specialist.repair(targets, translated, memory, specialist_issues)
     final_issues = qa.scan(targets, translated, memory)
     chapter_seconds = time.perf_counter() - chapter_started
 
@@ -125,7 +129,7 @@ def main() -> None:
     MAP.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), "utf-8")
 
     report = {
-        "version": "v10-clean-1",
+        "version": "v10-clean-2",
         "chapter": chapter_name,
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
@@ -139,16 +143,17 @@ def main() -> None:
         },
         "architecture": {
             "book_bible": "whole-book deterministic candidate scan + distributed GigaChat source intelligence",
-            "primary": "GigaChat-3-Lightning tagged batches; no JSON schema; one missing-only retry",
+            "primary": "GigaChat tagged batches + fixed micro-recovery + tiny JSON residual recovery; no recursive split",
             "qa": "single deterministic fidelity scan before/after repair",
             "cheap_repair": "GigaChat exact span patches; never full paragraph rewrite",
-            "semantic_repair": "one DeepSeek batch, <=8 high-risk segments",
+            "semantic_repair": "one DeepSeek batch, <=8 high-risk segments; never transport recovery",
             "final_gate": "deterministic only",
             "legacy_sanitizer": False,
             "deepseek_verifier": False,
             "v9_monkey_patch_chain": False,
         },
         "book_bible": bible_stats,
+        "primary_transport": dict(giga.transport_stats),
         "usage": {
             "gigachat_bible": usage_after_bible,
             "gigachat_primary": _usage_delta(usage_after_primary, usage_after_bible),
@@ -169,7 +174,7 @@ def main() -> None:
     print("[v10-done] " + json.dumps(report, ensure_ascii=False), flush=True)
 
     if missing:
-        raise RuntimeError(f"v10 left {len(missing)} untranslated segments: {missing[:12]}")
+        raise RuntimeError(f"v10 left {len(missing)} untranslated segments after Giga-only recovery: {missing[:12]}")
 
 
 if __name__ == "__main__":
