@@ -160,3 +160,13 @@ def test_repeated_same_quantity_need_not_be_repeated_in_target():
     assert result["ok"] is True
     assert result["source_values"].count(2) == 2
     assert result["target_values"].count(2) == 1
+
+
+def test_two_or_three_accepts_hyphenated_russian_range():
+    result = compare_numeric_fidelity(
+        "Two or three times a day, a memo came round.",
+        "Два-три раза в день приходила записка.",
+    )
+    assert result["ok"] is True
+    assert result["source_values"] == [2, 3]
+    assert result["target_values"] == [2, 3]
