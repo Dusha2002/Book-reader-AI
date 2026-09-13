@@ -30,7 +30,8 @@ jobs:
       BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
       BOOKAI_GIGACHAT_TIMEOUT: '55'
       BOOKAI_GIGACHAT_RETRIES: '1'
-      BOOKAI_V10_BIBLE_BATCH: '45'
+      BOOKAI_V10_NAME_BATCH: '24'
+      BOOKAI_V10_TERM_BATCH: '24'
       BOOKAI_V10_DEEP_MAX: '8'
       BOOKAI_V10_RECOVERY_BATCH: '4'
       BOOKAI_V10_JSON_RECOVERY_BATCH: '3'
@@ -48,8 +49,8 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src/bookai/v10.py src/bookai/v10_bible.py src/bookai/v10_transport.py scripts/chapter_translation_v10.py
-          pytest -q tests/test_v10_architecture.py
+          python -m compileall -q src/bookai/v10.py src/bookai/v10_source_bible.py src/bookai/v10_dialogue.py src/bookai/v10_transport.py scripts/chapter_translation_v10.py
+          pytest -q tests/test_v10_architecture.py tests/test_v10_source_only.py
 
       - name: Translate Chapter One with clean v10
         run: |
@@ -91,6 +92,7 @@ jobs:
               'wall_seconds_with_bible': wall,
               'timing': report.get('timing'),
               'book_bible': report.get('book_bible'),
+              'dialogue_guard': report.get('dialogue_guard'),
               'primary_transport': report.get('primary_transport'),
               'usage': report.get('usage'),
               'qa_initial': report.get('qa_initial'),
@@ -108,7 +110,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v10-chapter-one-audit
+          name: v10-chapter-one-audit-source-only-v9d
           path: audit
           if-no-files-found: warn
           retention-days: 7
