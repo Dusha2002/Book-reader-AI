@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from .models import BookMemory, Segment
-from .v10 import V10Issue, _giga_json, _norm
+from .v10 import V10Issue, _giga_json, _norm, _usage
 
 
 class GigaLocalRewriter:
@@ -13,12 +15,63 @@ class GigaLocalRewriter:
         "numeric", "quantity_obligation", "numbered_choice", "quarter_inch", "question",
         "material", "order", "latin_leak", "character_gender", "glossary_term",
     }
+    # Single-row recovery is reserved for objective high-value defects where the
+    # batched JSON editor is known to truncate or omit rows. It is still Giga-first.
+    _SINGLE_FALLBACK_CODES = {
+        "numeric", "quantity_obligation", "numbered_choice", "quarter_inch", "latin_leak",
+    }
 
     def __init__(self, backend: Any, qa: Any, max_segments: int = 16) -> None:
         self.backend = backend
         self.qa = qa
         self.max_segments = max(1, max_segments)
-        self.stats: dict[str, Any] = {"calls": 0, "requested": 0, "accepted": 0, "rejected": 0, "missing_rows": 0, "selected_ids": []}
+        self.stats: dict[str, Any] = {
+            "calls": 0, "requested": 0, "accepted": 0, "rejected": 0,
+            "missing_rows": 0, "single_calls": 0, "single_accepted": 0,
+            "selected_ids": [], "single_ids": [],
+        }
+
+    def _accept(self, segment: Segment, current: str, candidate: str, memory: BookMemory) -> bool:
+        if not candidate or candidate == current or "<s " in candidate or "<src " in candidate:
+            return False
+        before = self.qa.scan_segment(segment, current, memory)
+        after = self.qa.scan_segment(segment, candidate, memory)
+        before_local = sum(i.mode == "local" and i.severity == "hard" for i in before)
+        after_local = sum(i.mode == "local" and i.severity == "hard" for i in after)
+        before_sem = sum(i.mode == "semantic" and i.severity == "hard" for i in before)
+        after_sem = sum(i.mode == "semantic" and i.severity == "hard" for i in after)
+        return after_local < before_local and after_sem <= before_sem
+
+    def _single_repair(self, row: dict[str, Any]) -> str:
+        client = self.backend._ensure_client()
+        system = (
+            "Ты точный редактор литературного перевода EN→RU. Дана ОДНА строка с уже доказанными локальными дефектами. "
+            "Исправь только их, но верни ПОЛНЫЙ готовый русский перевод SOURCE. Ничего не сокращай и не добавляй. "
+            "Для dozen: a dozen=12, half a dozen=6, two dozen=24. Для number six сохрани сам выбор №6 и весь связанный смысл. "
+            "Если дефект Latin — убери латиницу, сохранив имя/значение. Верни только русский текст, без JSON, комментариев и вариантов."
+        )
+        request = {
+            "model": self.backend.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(row, ensure_ascii=False)},
+            ],
+            "temperature": 0.0,
+            "top_p": 0.9,
+            "max_tokens": max(1400, min(6000, int(self.backend.max_tokens))),
+        }
+        self.stats["single_calls"] += 1
+        try:
+            response = client.chat(request)
+            self.backend.usage.add(_usage(response), calls=1)
+        except Exception as exc:
+            print(f"[v10-local-single] id={row['id']} error={type(exc).__name__}", flush=True)
+            return ""
+        text = str(response.choices[0].message.content or "").strip()
+        text = re.sub(r"^```(?:text|markdown)?\s*", "", text, flags=re.I)
+        text = re.sub(r"\s*```$", "", text)
+        text = re.sub(r"^\s*(?:перевод|исправленный перевод|translation)\s*:\s*", "", text, flags=re.I)
+        return _norm(text)
 
     def repair(self, targets: list[Segment], translated: dict[str, str], memory: BookMemory, issues: list[V10Issue]) -> list[str]:
         by_id = {s.id: s for s in targets}
@@ -55,7 +108,7 @@ Do not add interpretations and do not perform broad stylistic rewriting. correct
 Return every supplied id. ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]}.
 """
         changed: list[str] = []
-        batch_size = 4  # full-segment JSON for 8 rows truncated in real Chapter One
+        batch_size = 4
         for start in range(0, len(rows), batch_size):
             batch = rows[start:start + batch_size]
             try:
@@ -72,23 +125,42 @@ Return every supplied id. ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]
                     self.stats["missing_rows"] += 1
                     self.stats["rejected"] += 1
                     continue
-                item = parsed[sid]
-                candidate = _norm(item.get("corrected_ru") or "")
+                candidate = _norm((parsed[sid] or {}).get("corrected_ru") or "")
                 current = str(translated.get(sid) or "")
-                if not candidate or candidate == current or "<s " in candidate or "<src " in candidate:
-                    self.stats["rejected"] += 1
-                    continue
                 segment = by_id[sid]
-                before = self.qa.scan_segment(segment, current, memory)
-                after = self.qa.scan_segment(segment, candidate, memory)
-                before_local = sum(i.mode == "local" and i.severity == "hard" for i in before)
-                after_local = sum(i.mode == "local" and i.severity == "hard" for i in after)
-                before_sem = sum(i.mode == "semantic" and i.severity == "hard" for i in before)
-                after_sem = sum(i.mode == "semantic" and i.severity == "hard" for i in after)
-                if after_local < before_local and after_sem <= before_sem:
+                if self._accept(segment, current, candidate, memory):
                     translated[sid] = candidate
                     changed.append(sid)
                     self.stats["accepted"] += 1
                 else:
                     self.stats["rejected"] += 1
+
+        # Robust fallback: only objective local defects still present after the
+        # batched editor are retried one row at a time, without JSON transport.
+        fallback_rows: list[dict[str, Any]] = []
+        for row in rows:
+            sid = row["id"]
+            segment = by_id[sid]
+            residual = self.qa.scan_segment(segment, translated.get(sid, ""), memory)
+            if any(i.mode == "local" and i.severity == "hard" and i.code in self._SINGLE_FALLBACK_CODES for i in residual):
+                fallback_rows.append({
+                    "id": sid,
+                    "source": segment.text,
+                    "current_ru": translated.get(sid, ""),
+                    "defects": [{"code": i.code, "reason": i.reason} for i in residual if i.mode == "local" and i.severity == "hard"],
+                })
+        for row in fallback_rows[:6]:
+            sid = row["id"]
+            self.stats["single_ids"].append(sid)
+            segment = by_id[sid]
+            current = str(translated.get(sid) or "")
+            candidate = self._single_repair(row)
+            if self._accept(segment, current, candidate, memory):
+                translated[sid] = candidate
+                if sid not in changed:
+                    changed.append(sid)
+                self.stats["accepted"] += 1
+                self.stats["single_accepted"] += 1
+            else:
+                self.stats["rejected"] += 1
         return changed
