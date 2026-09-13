@@ -66,7 +66,7 @@ def main() -> None:
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
         "whole_book_segments": len(all_targets),
-        "architecture": "clean-v10:source-only+integrity+v9d-dialogue-speaker+v9ad-canon-risk+quantity-v2:no-v9-imports",
+        "architecture": "clean-v10:source-only+two-stage-integrity+v9d-dialogue-speaker+v9ad-canon-risk+quantity-v2:no-v9-imports",
     }, ensure_ascii=False), flush=True)
 
     giga = RobustTaggedPrimaryTransport()
@@ -82,9 +82,8 @@ def main() -> None:
     translated, primary_errors = giga.translate_many(targets, memory, source_segments=all_targets)
     usage_after_primary = giga.usage.as_dict()
 
-    # Structural fidelity is a prerequisite, not a late QA concern. A segment that
-    # contains prompt residue or the wrong neighboring paragraph is isolated and
-    # retranslated by Giga before dialogue normalization or semantic routing.
+    # First structural gate: wrong-neighbor/prompt-contaminated segments never enter
+    # dialogue or semantic QA. Recovery is one-segment SOURCE-only Giga.
     integrity = SegmentIntegrityGate(giga)
     integrity_changed = integrity.repair(targets, translated, memory, source_segments=all_targets)
     usage_after_integrity = giga.usage.as_dict()
@@ -118,8 +117,22 @@ def main() -> None:
     dialogue_after_semantic = dialogue_guard.apply(targets, translated)
     speaker_guard_final = DialogueSpeakerContinuityGuard()
     speaker_after_semantic = speaker_guard_final.apply(targets, translated)
+
+    # Second structural gate: a later repair must not be allowed to introduce a
+    # boundary/prompt failure that the primary gate could not see. Any such row is
+    # restored source-only by Giga before publication.
+    final_integrity_guard = SegmentIntegrityGate(giga)
+    final_integrity_changed = final_integrity_guard.repair(targets, translated, memory, source_segments=all_targets)
+    usage_after_final_integrity = giga.usage.as_dict()
+    dialogue_after_integrity: list[str] = []
+    speaker_after_integrity: list[str] = []
+    speaker_guard_post_integrity = DialogueSpeakerContinuityGuard()
+    if final_integrity_changed:
+        dialogue_after_integrity = dialogue_guard.apply(targets, translated)
+        speaker_after_integrity = speaker_guard_post_integrity.apply(targets, translated)
+
     final_issues = qa.scan(targets, translated, memory)
-    final_integrity = integrity.scan(targets, translated)
+    final_integrity = final_integrity_guard.scan(targets, translated)
     chapter_seconds = time.perf_counter() - chapter_started
 
     missing = [segment.id for segment in targets if not str(translated.get(segment.id) or "").strip()]
@@ -150,7 +163,7 @@ def main() -> None:
     MAP.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), "utf-8")
 
     report = {
-        "version": "v10-clean-6-integrity-quantity-v2",
+        "version": "v10-clean-6c-two-stage-integrity-quantity-v2",
         "chapter": chapter_name,
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
@@ -165,12 +178,12 @@ def main() -> None:
         "architecture": {
             "book_bible": "SOURCE-ONLY high-coverage v9ad-style spelling canon + conservative technical glossary; no reference seed",
             "primary": "GigaChat tagged batches + bounded Giga-only recovery + prompt-leak rejection",
-            "segment_integrity": "pre-QA extreme ratio/protocol gate + isolated one-segment Giga recovery",
+            "segment_integrity": "pre-QA and pre-export structural gates; isolated SOURCE-only Giga recovery",
             "discourse_dialogue": "v9d source-structural quotation normalization + conservative two-speaker continuity",
             "qa": "deterministic fidelity + proposition-aware QuantityFidelity v2 + direction/kinship/hunting contracts",
-            "cheap_repair": "Giga exact-span patch first, then bounded full-segment Giga rewrite only for proven local defects",
+            "cheap_repair": "Giga exact-span patch, bounded batch rewrite, then single-row Giga fallback for objective local defects",
             "semantic_repair": "one DeepSeek batch, <=8 v9ad-style risk-ranked semantic segments",
-            "final_gate": "deterministic QA + structural integrity scan",
+            "final_gate": "deterministic QA + zero-residual structural integrity",
             "reference_seed": False,
             "legacy_sanitizer": False,
             "deepseek_verifier": False,
@@ -178,6 +191,7 @@ def main() -> None:
         },
         "book_bible": bible_stats,
         "segment_integrity": {**dict(integrity.stats), "changed_ids": integrity_changed},
+        "final_integrity_repair": {**dict(final_integrity_guard.stats), "changed_ids": final_integrity_changed},
         "final_integrity": {
             "count": len(final_integrity),
             "ids": sorted({issue.id for issue in final_integrity}),
@@ -187,10 +201,12 @@ def main() -> None:
             **dict(dialogue_guard.stats),
             "after_primary_changed_ids": dialogue_after_primary,
             "after_semantic_changed_ids": dialogue_after_semantic,
+            "after_integrity_changed_ids": dialogue_after_integrity,
         },
         "speaker_guard": {
             "after_primary": {**dict(speaker_guard.stats), "changed_ids": speaker_after_primary},
             "after_semantic": {**dict(speaker_guard_final.stats), "changed_ids": speaker_after_semantic},
+            "after_integrity": {**dict(speaker_guard_post_integrity.stats), "changed_ids": speaker_after_integrity},
         },
         "primary_transport": dict(giga.transport_stats),
         "usage": {
@@ -199,7 +215,8 @@ def main() -> None:
             "gigachat_integrity": _usage_delta(usage_after_integrity, usage_after_primary),
             "gigachat_patcher": _usage_delta(usage_after_patcher, usage_after_integrity),
             "gigachat_local_rewriter": _usage_delta(usage_after_local, usage_after_patcher),
-            "gigachat_total": usage_after_local,
+            "gigachat_final_integrity": _usage_delta(usage_after_final_integrity, usage_after_local),
+            "gigachat_total": usage_after_final_integrity,
             "deepseek": dict(provider.usage),
         },
         "primary_errors": primary_errors,
