@@ -4,6 +4,7 @@ import re
 
 from .models import BookMemory, Segment
 from .v10 import DeterministicQA, V10Issue
+from .v10_numeric import compare_numeric_fidelity_v10
 
 
 class V10QualityQA(DeterministicQA):
@@ -13,10 +14,34 @@ class V10QualityQA(DeterministicQA):
     influence which <=8 rows reach the single DeepSeek semantic batch.
     """
 
+    @staticmethod
+    def _mixed_script_tokens(target: str) -> list[str]:
+        tokens = re.findall(r"[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё-]*", str(target or ""))
+        return [
+            token for token in tokens
+            if re.search(r"[A-Za-z]", token) and re.search(r"[А-Яа-яЁё]", token)
+        ]
+
     def scan_segment(self, segment: Segment, target: str, memory: BookMemory) -> list[V10Issue]:
         out = list(super().scan_segment(segment, target, memory))
         source = str(segment.text or "")
         low = str(target or "").casefold().replace("ё", "е")
+
+        # The legacy numeric detector intentionally remains untouched. v10 only
+        # suppresses its known Russian-morphology false positives when an equivalent
+        # source number is demonstrably present in the target.
+        numeric_v10 = compare_numeric_fidelity_v10(source, target)
+        if numeric_v10.get("ok", True):
+            out = [row for row in out if row.code != "numeric"]
+        else:
+            out = [row for row in out if row.code != "numeric"]
+            out.append(V10Issue(
+                segment.id,
+                "numeric",
+                "local",
+                "hard",
+                f"missing source numeric values {numeric_v10.get('missing')}",
+            ))
 
         # High-confidence physical direction reversal. This catches errors such as
         # "trudged up the stairs" -> "спускаясь", without trying to solve all motion.
@@ -38,6 +63,38 @@ class V10QualityQA(DeterministicQA):
         if (sister_daughter or brother_daughter) and not ("племян" in low or re.search(r"доч\w*.*(?:сестр|брат)", low)):
             out.append(V10Issue(segment.id, "kinship_relation", "semantic", "hard", "niece/parent-sibling relation may be lost"))
 
+        # Hunting vocabulary is highly polysemous. Route only concrete suspicious
+        # realizations, not every occurrence of the words, to the semantic specialist.
+        if re.search(r"\bdraw\s+the\s+(?:home\s+)?coverts\b", source, re.I):
+            if re.search(r"\b(?:домашн\w*\s+птиц\w*|птиц\w*)\b", low):
+                out.append(V10Issue(
+                    segment.id,
+                    "hunting_collocation",
+                    "semantic",
+                    "hard",
+                    "hunting 'draw the coverts' was rendered as birds/domestic animals instead of working through cover",
+                ))
+        if re.search(r"\bmill-stream\b", source, re.I) and re.search(r"\bзапруд\w*\b", low):
+            out.append(V10Issue(
+                segment.id,
+                "hunting_collocation",
+                "semantic",
+                "hard",
+                "mill-stream is a stream/watercourse in the hunt, not a dam",
+            ))
+
+        # Base latin_leak catches standalone Latin tokens but not mixed-script words
+        # such as Ветраниio. Treat those as a local publication defect.
+        mixed = self._mixed_script_tokens(target)
+        if mixed:
+            out.append(V10Issue(
+                segment.id,
+                "latin_leak",
+                "local",
+                "hard",
+                "mixed Cyrillic/Latin token remains: " + ", ".join(mixed[:4]),
+            ))
+
         unique = {(row.code, row.mode, row.reason): row for row in out}
         return list(unique.values())
 
@@ -51,6 +108,8 @@ class V10QualityQA(DeterministicQA):
             (r"\b(?:ahead|behind|before|after|towards?|away\s+from|into|out\s+of)\b", 2),
             (r"\b(?:sister|brother|daughter|son|cousin|nephew|niece|marry|married|marriage)\b", 3),
             (r"\b(?:first|second|third|fourth|fifth|sixth|eldest|oldest|youngest)\b", 2),
+            (r"\bdraw\s+the\s+(?:home\s+)?coverts\b", 9),
+            (r"\bmill-stream\b", 5),
             (r"\b(?:hunt|hunting|boar|spinney|covert|coverts|wood|woodland|grove)\b", 4),
             (r"\b(?:draw|drive|drove|driven)\b", 1),
             (r"\b(?:elector|chancellor|advocate|counsel|prosecutor|defender)\b", 3),
