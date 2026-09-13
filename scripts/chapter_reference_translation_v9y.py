@@ -6,9 +6,8 @@ from bookai.deepseek_direct import adapt_harness
 
 def main() -> None:
     # v9x remains the translation architecture. v9y only swaps transport from
-    # OpenRouter to DeepSeek's direct OpenAI-compatible API. The configured
-    # project model id remains deepseek/deepseek-v4.1-flash; adapt_harness maps
-    # it to DeepSeek's official wire id only after the harness is constructed.
+    # OpenRouter to DeepSeek's direct OpenAI-compatible API and normalizes any
+    # legacy model alias to the exact direct model id: deepseek-v4.1-flash.
     original_builder = v9x.v3.hybrid.build_reference_harness
 
     def build_direct_harness():
