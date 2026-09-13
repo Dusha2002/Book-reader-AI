@@ -3,20 +3,21 @@ from __future__ import annotations
 from typing import Any
 
 
-# Keep the project's public/configured model id unchanged. DeepSeek's direct
-# OpenAI-compatible API uses a shorter wire id for the same Flash service.
-CONFIGURED_FLASH_MODEL = "deepseek/deepseek-v4.1-flash"
-DIRECT_FLASH_MODEL = "deepseek-v4-flash"
+# Exact model id used by the direct DeepSeek API.
+CONFIGURED_FLASH_MODEL = "deepseek-v4.1-flash"
+DIRECT_FLASH_MODEL = "deepseek-v4.1-flash"
 
 
 def direct_model_id(configured_model: str, base_url: str) -> str:
-    """Return the provider wire id without changing the project model identity."""
+    """Normalize legacy/OpenRouter-style aliases to the exact direct DeepSeek id."""
     if "api.deepseek.com" not in (base_url or ""):
         return configured_model
     aliases = {
+        "deepseek-v4.1-flash": DIRECT_FLASH_MODEL,
         "deepseek/deepseek-v4.1-flash": DIRECT_FLASH_MODEL,
         "deepseek/deepseek-v4-flash-0731": DIRECT_FLASH_MODEL,
         "deepseek/deepseek-v4.1-flash-0731": DIRECT_FLASH_MODEL,
+        "deepseek-v4-flash": DIRECT_FLASH_MODEL,
     }
     return aliases.get(configured_model, configured_model)
 
@@ -29,15 +30,13 @@ def adapt_provider(provider: Any) -> Any:
     base_url = str(getattr(provider, "base_url", "") or "")
     wire = direct_model_id(configured, base_url)
     if wire != configured:
-        # Preserve the configured identity for diagnostics/UI while the existing
-        # provider sends the official DeepSeek wire id through its `model` field.
-        provider.configured_model = configured
+        provider.configured_model = wire
         provider.model = wire
     return provider
 
 
 def adapt_harness(harness: Any) -> Any:
-    """Adapt every API role in a TranslationHarness to direct DeepSeek."""
+    """Normalize every API role in a TranslationHarness to direct DeepSeek."""
     providers = [
         getattr(harness, "analyzer", None),
         getattr(harness, "gate", None),
@@ -57,10 +56,6 @@ def adapt_harness(harness: Any) -> Any:
         seen.add(id(provider))
         adapt_provider(provider)
 
-    # Keep human-facing architecture reports on the user's configured id.
     if translator is not None and translator_provider is not None:
-        translator.name = str(
-            getattr(translator_provider, "configured_model", None)
-            or getattr(translator_provider, "model", CONFIGURED_FLASH_MODEL)
-        )
+        translator.name = str(getattr(translator_provider, "model", CONFIGURED_FLASH_MODEL))
     return harness
