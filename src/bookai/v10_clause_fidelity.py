@@ -28,12 +28,6 @@ def _norm_words(text: str) -> list[str]:
 
 
 def _repeated_ngram(text: str) -> tuple[str, int] | None:
-    """Return a suspicious long repeated Russian phrase, if any.
-
-    The contract is deliberately narrow: at least three words, at least 18 visible
-    characters, at least one substantial content word, and non-overlapping repeats.
-    This catches accidental clause duplication while avoiding tiny discourse phrases.
-    """
     words = _norm_words(text)
     if len(words) < 9:
         return None
@@ -58,10 +52,6 @@ def compare_duplicate_content_fidelity(source_en: str, target_ru: str) -> dict[s
     target_repeat = _repeated_ngram(target_ru)
     if not target_repeat:
         return {"ok": True, "repeated_phrase": None}
-
-    # If the English source itself contains an obvious exact repeated multiword
-    # phrase, do not call Russian repetition invented. This is conservative rather
-    # than trying to align arbitrary paraphrases across languages.
     source_repeat = _repeated_ngram(source_en)
     if source_repeat:
         return {"ok": True, "repeated_phrase": target_repeat[0], "source_repetition": source_repeat[0]}
@@ -81,6 +71,23 @@ def _find_once(text: str, needle: str) -> int | None:
     if first < 0 or hay.find(ndl, first + max(1, len(ndl))) >= 0:
         return None
     return first
+
+
+def _find_proper_once(text: str, canonical: str) -> int | None:
+    exact = _find_once(text, canonical)
+    if exact is not None:
+        return exact
+    low = str(text or "").casefold().replace("ё", "е")
+    word = re.sub(r"[^а-я]", "", str(canonical or "").casefold().replace("ё", "е"))
+    if len(word) < 4:
+        return None
+    stem = word
+    if stem[-1:] in {"ь", "й", "а", "я"} and len(stem) >= 5:
+        stem = stem[:-1]
+    if len(stem) < 4:
+        return None
+    hits = [m.start() for m in re.finditer(rf"\b{re.escape(stem)}[а-я]*\b", low)]
+    return hits[0] if len(hits) == 1 else None
 
 
 def _quantity_target_position(value: int, target_ru: str) -> int | None:
@@ -103,27 +110,22 @@ def _quantity_target_position(value: int, target_ru: str) -> int | None:
     return hits[0] if len(hits) == 1 else None
 
 
-def _canon_from_memory(memory: BookMemory) -> list[tuple[str, str]]:
-    rows: list[tuple[str, str]] = []
+def _canon_from_memory(memory: BookMemory) -> list[tuple[str, str, bool]]:
+    rows: list[tuple[str, str, bool]] = []
+    character_names = {str(name or "").strip() for name in memory.characters}
     for source, ru in memory.glossary.items():
         src = str(source or "").strip()
         dst = str(ru or "").strip()
         if src and dst and len(src) >= 3 and len(dst) >= 2:
-            rows.append((src, dst))
+            rows.append((src, dst, bool(src[:1].isupper() or src in character_names)))
     for source, desc in memory.characters.items():
         match = re.search(r"(?:^|;)ru=([^;]+)", str(desc or ""), re.I)
         if match:
-            rows.append((str(source or "").strip(), match.group(1).strip()))
+            rows.append((str(source or "").strip(), match.group(1).strip(), True))
     return rows
 
 
 def compare_clause_order_fidelity(source_en: str, target_ru: str, memory: BookMemory) -> dict[str, Any]:
-    """Check order only for uniquely alignable, source-grounded anchors.
-
-    Anchors are exact quantities plus confirmed Book Bible names/glossary entries.
-    We require unique occurrences on both sides; ambiguous/repeated anchors are ignored.
-    This makes the contract sparse but high precision.
-    """
     source = str(source_en or "")
     target = str(target_ru or "")
     anchors: list[tuple[str, int, int]] = []
@@ -137,16 +139,15 @@ def compare_clause_order_fidelity(source_en: str, target_ru: str, memory: BookMe
             anchors.append((f"quantity:{obligation.value}:{obligation.kind}", src_match.start(), target_pos))
 
     source_low = source.casefold()
-    for src, ru in _canon_from_memory(memory):
+    for src, ru, proper in _canon_from_memory(memory):
         src_low = src.casefold()
         if source_low.count(src_low) != 1:
             continue
-        target_pos = _find_once(target, ru)
+        target_pos = _find_proper_once(target, ru) if proper else _find_once(target, ru)
         if target_pos is None:
             continue
         anchors.append((f"canon:{src}", source_low.find(src_low), target_pos))
 
-    # Collapse exact duplicate positions/keys and keep source order.
     unique: dict[str, tuple[str, int, int]] = {}
     for row in anchors:
         unique.setdefault(row[0], row)
