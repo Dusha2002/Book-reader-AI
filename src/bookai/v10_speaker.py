@@ -9,9 +9,12 @@ from .models import Segment
 _NAME = r"[A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+){0,2}"
 _SPEECH_VERB = r"(?:said|asked|replied|answered|added|continued|murmured|whispered|shouted|called|cut\s+him\s+off|cut\s+her\s+off)"
 _ACTION_BEAT = r"(?:took\s+a\s+deep\s+breath|smiled|sighed|laughed|nodded|shrugged|frowned|grinned|paused|hesitated)"
-_EXPLICIT_AFTER = re.compile(rf"['\"”’][,!?….]?\s*({_NAME})\s+{_SPEECH_VERB}\b", re.I)
-_EXPLICIT_BEFORE = re.compile(rf"\b({_NAME})\s+{_SPEECH_VERB}\b", re.I)
-_ACTION_AFTER = re.compile(rf"['\"”’][.!?…]?\s*({_NAME})\s+{_ACTION_BEAT}\b", re.I)
+# Keep the proper-name capture case-sensitive. Only verbs/action beats are
+# case-insensitive; otherwise contractions such as "I've already said" can be
+# misread as a capitalized speaker name because of the apostrophe.
+_EXPLICIT_AFTER = re.compile(rf"['\"”’][,!?….]?\s*({_NAME})\s+(?i:{_SPEECH_VERB})\b")
+_EXPLICIT_BEFORE = re.compile(rf"\b({_NAME})\s+(?i:{_SPEECH_VERB})\b")
+_ACTION_AFTER = re.compile(rf"['\"”’][.!?…]?\s*({_NAME})\s+(?i:{_ACTION_BEAT})\b")
 _QUOTE_ONLY = re.compile(r"^\s*['\"“‘].*['\"”’]?\s*$", re.S)
 
 _MALE_EVIDENCE = re.compile(
@@ -39,9 +42,6 @@ _FEMALE_TO_MALE = {v: k for k, v in _MALE_TO_FEMALE.items()}
 
 def _explicit_speaker(source: str) -> str:
     text = str(source or "")
-    # Attribution or a classic immediate dialogue action beat is much stronger than
-    # a merely nearby capitalized token. We intentionally do not guess from general
-    # narration such as "X entered the room".
     for pattern in (_EXPLICIT_AFTER, _EXPLICIT_BEFORE, _ACTION_AFTER):
         match = pattern.search(text)
         if match:
@@ -74,28 +74,17 @@ def _gender_evidence(target: str) -> str:
 def _replace_first_person_gender(text: str, gender: str) -> str:
     value = str(text or "")
     pairs = _FEMALE_TO_MALE if gender == "male" else _MALE_TO_FEMALE
-    # Only touch a gendered form inside an explicit first-person phrase. This avoids
-    # changing references to third parties elsewhere in the reply.
     for old, new in pairs.items():
         pattern = re.compile(rf"(\b[Яя](?:\s+[А-Яа-яЁё]+){{0,3}}\s+)\b{re.escape(old)}\b", re.I)
         match = pattern.search(value)
         if match:
             start, end = match.span()
-            prefix = match.group(1)
-            replacement = prefix + new
-            value = value[:start] + replacement + value[end:]
+            value = value[:start] + match.group(1) + new + value[end:]
     return value
 
 
 class DialogueSpeakerContinuityGuard:
-    """Conservative two-speaker continuity for short unattributed replies.
-
-    v9d's structural insight is extended one step: when a dialogue has already
-    established exactly two named speakers, and an unattributed short quote is
-    sandwiched between turns by the same speaker, infer that the middle reply is
-    the other participant. The layer never invents a name in the translation; it
-    only uses that inference to fix demonstrably contradictory first-person gender.
-    """
+    """Conservative two-speaker continuity for short unattributed replies."""
 
     def __init__(self) -> None:
         self.stats: dict[str, Any] = {
@@ -111,7 +100,6 @@ class DialogueSpeakerContinuityGuard:
         assigned = list(explicit)
         self.stats["explicit_speakers"] += sum(bool(x) for x in explicit)
 
-        # Learn gender only from Russian turns already attributable to a named speaker.
         gender_by_speaker: dict[str, str] = {}
         for idx, speaker in enumerate(assigned):
             if not speaker:
@@ -120,8 +108,6 @@ class DialogueSpeakerContinuityGuard:
             if evidence:
                 gender_by_speaker[speaker] = evidence
 
-        # Process sequentially so a confidently inferred alternating turn can help
-        # establish the local two-speaker pair for the next turn.
         recent: list[str] = []
         for i, segment in enumerate(segments):
             speaker = assigned[i]
@@ -137,8 +123,6 @@ class DialogueSpeakerContinuityGuard:
             previous = assigned[i - 1] if i > 0 else ""
             if not previous:
                 continue
-            # Strong look-ahead confirmation: the next explicit attribution/action
-            # beat repeats the previous speaker, so this middle reply is the other.
             next_explicit = ""
             for j in range(i + 1, min(len(segments), i + 3)):
                 if explicit[j]:
