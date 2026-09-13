@@ -132,7 +132,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v10-chapter-one-clean6-integrity-quantity
+          name: v10-chapter-one-clean6b-sourceonly-integrity
           path: audit
           if-no-files-found: warn
           retention-days: 7
