@@ -59,6 +59,12 @@ def test_quantity_v2_half_dozen_means_six():
     assert compare_quantity_fidelity_v2(source, good)["ok"]
 
 
+def test_quantity_v2_accepts_instrumental_poluduzhinoi():
+    source = "He weakened it with half a dozen hits."
+    target = "Он ослабил его полудюжиной ударов."
+    assert compare_quantity_fidelity_v2(source, target)["ok"]
+
+
 def test_quantity_v2_preserves_numbered_choice():
     source = "If that's all right, I'll just marry number six."
     bad = "Если этого достаточно, я просто женюсь."
@@ -76,6 +82,30 @@ def test_quantity_v2_accepts_cardinal_numbered_label():
 def test_quantity_v2_accepts_twelve_thousand_compound():
     source = "It was a twelve-thousand-line didactic poem."
     target = "Это была двенадцатитысячная дидактическая поэма."
+    assert compare_quantity_fidelity_v2(source, target)["ok"]
+
+
+def test_quantity_v2_accepts_inflected_six_hundred():
+    source = "Licinius had six hundred Guards."
+    target = "У Лициния было шесть сотен гвардейцев."
+    assert compare_quantity_fidelity_v2(source, target)["ok"]
+
+
+def test_quantity_v2_accepts_two_century_compound():
+    source = "The war between the two dukedoms, two centuries old, continued."
+    target = "Двухвековая война между герцогствами продолжалась."
+    assert compare_quantity_fidelity_v2(source, target)["ok"]
+
+
+def test_quantity_v2_does_not_lock_approximate_word_or_two():
+    source = "He strained to catch a word or two."
+    target = "Он старался уловить хоть слово."
+    assert compare_quantity_fidelity_v2(source, target)["ok"]
+
+
+def test_quantity_v2_does_not_lock_week_or_ten_days():
+    source = "Would it disrupt the talks for a week or ten days?"
+    target = "Сорвёт ли это переговоры на неделю-другую?"
     assert compare_quantity_fidelity_v2(source, target)["ok"]
 
 
