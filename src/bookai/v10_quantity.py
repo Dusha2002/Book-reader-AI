@@ -1,0 +1,163 @@
+from __future__ import annotations
+
+import re
+from collections import Counter
+from dataclasses import dataclass
+from typing import Any
+
+from .v10_numeric import compare_numeric_fidelity_v10
+
+
+_EN_SMALL = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+}
+_RU_THOUSAND_PREFIXES = {
+    "двухтысяч": 2000, "трехтысяч": 3000, "трёхтысяч": 3000,
+    "четырехтысяч": 4000, "четырёхтысяч": 4000, "пятитысяч": 5000,
+    "шеститысяч": 6000, "семитысяч": 7000, "восьмитысяч": 8000,
+    "девятитысяч": 9000, "десятитысяч": 10000, "одиннадцатитысяч": 11000,
+    "двенадцатитысяч": 12000, "тринадцатитысяч": 13000,
+    "четырнадцатитысяч": 14000, "пятнадцатитысяч": 15000,
+    "шестнадцатитысяч": 16000, "семнадцатитысяч": 17000,
+    "восемнадцатитысяч": 18000, "девятнадцатитысяч": 19000,
+    "двадцатитысяч": 20000,
+}
+
+
+@dataclass(frozen=True)
+class QuantityObligation:
+    kind: str
+    value: int
+    source_phrase: str
+
+
+def _small_value(token: str) -> int | None:
+    value = str(token or "").casefold().strip()
+    if value.isdigit():
+        return int(value)
+    return _EN_SMALL.get(value)
+
+
+def extract_quantity_obligations(source_en: str) -> list[QuantityObligation]:
+    text = str(source_en or "")
+    out: list[QuantityObligation] = []
+    occupied: list[tuple[int, int]] = []
+
+    # Longest/more specific forms first so `half a dozen` is not also counted as
+    # a generic `a dozen` obligation.
+    patterns: list[tuple[re.Pattern[str], str]] = [
+        (re.compile(r"\bhalf\s+(?:a\s+)?dozen\b", re.I), "half_dozen"),
+        (re.compile(r"\b(?P<n>one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+)\s+dozen\b", re.I), "n_dozen"),
+        (re.compile(r"\b(?:a|one)\s+dozen\b", re.I), "dozen"),
+        (re.compile(r"\bnumber\s+(?P<n>one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+)\b", re.I), "numbered_choice"),
+    ]
+    for pattern, kind in patterns:
+        for match in pattern.finditer(text):
+            if any(not (match.end() <= left or match.start() >= right) for left, right in occupied):
+                continue
+            phrase = match.group(0)
+            if kind == "half_dozen":
+                value = 6
+            elif kind == "dozen":
+                value = 12
+            elif kind == "n_dozen":
+                n = _small_value(match.group("n"))
+                if n is None:
+                    continue
+                value = 12 * n
+            else:
+                n = _small_value(match.group("n"))
+                if n is None:
+                    continue
+                value = n
+            out.append(QuantityObligation(kind, value, phrase))
+            occupied.append((match.start(), match.end()))
+    return out
+
+
+def _extra_target_values(target_ru: str) -> list[int]:
+    text = str(target_ru or "").casefold().replace("ё", "е")
+    out: list[int] = []
+
+    # Russian lexicalized dozen forms.
+    out.extend([6] * len(re.findall(r"\bполдюжин\w*\b", text)))
+    # `две/три дюжины` etc. — count the combined value, not merely the multiplier.
+    ru_n = {
+        "одна": 1, "одну": 1, "одной": 1, "две": 2, "двух": 2, "три": 3,
+        "трех": 3, "четыре": 4, "четырех": 4, "пять": 5, "шесть": 6,
+    }
+    for match in re.finditer(r"\b(одна|одну|одной|две|двух|три|трех|четыре|четырех|пять|шесть)\s+дюжин\w*\b", text):
+        out.append(12 * ru_n[match.group(1)])
+    # Bare дюжина/дюжину/дюжины etc., excluding the полдюжины token already handled.
+    for match in re.finditer(r"\bдюжин\w*\b", text):
+        prefix = text[max(0, match.start() - 4):match.start()]
+        if "пол" not in prefix:
+            out.append(12)
+
+    # Productive compounds such as двенадцатитысячный/двенадцатитысячное.
+    for prefix, value in _RU_THOUSAND_PREFIXES.items():
+        out.extend([value] * len(re.findall(rf"\b{re.escape(prefix)}[а-я]+\b", text)))
+    return out
+
+
+def _numbered_choice_present(value: int, target_ru: str) -> bool:
+    low = str(target_ru or "").casefold().replace("ё", "е")
+    if re.search(rf"\b(?:номер\s*)?{value}\b", low):
+        return True
+    stems = {
+        1: "перв", 2: "втор", 3: "трет", 4: "четвер", 5: "пят", 6: "шест",
+        7: "седьм", 8: "восьм", 9: "девят", 10: "десят", 11: "одиннадцат",
+        12: "двенадцат",
+    }
+    stem = stems.get(value)
+    return bool(stem and re.search(rf"\b{stem}[а-я]*\b", low))
+
+
+def compare_quantity_fidelity_v2(source_en: str, target_ru: str) -> dict[str, Any]:
+    """Proposition-aware quantity fidelity layered on top of numeric_fidelity.
+
+    The legacy contract intentionally ignores multiplicity. v2 keeps that behavior
+    for generic numbers, but adds multiplicity for explicit lexical quantity
+    obligations (dozen/half-dozen/N dozen) and preserves numbered choices such as
+    `number six`. This catches `twelve ... a dozen` -> one surviving 12 without
+    making every repeated pronoun-like number globally strict.
+    """
+    base = compare_numeric_fidelity_v10(source_en, target_ru)
+    obligations = extract_quantity_obligations(source_en)
+    target_values = list(base.get("target_values") or []) + _extra_target_values(target_ru)
+    target_counts = Counter(target_values)
+
+    # Base source numeric mentions plus lexical obligations. If source says `twelve`
+    # and later `a dozen`, value 12 must survive twice, not merely somewhere once.
+    source_counts = Counter(base.get("source_values") or [])
+    for obligation in obligations:
+        if obligation.kind != "numbered_choice":
+            source_counts[obligation.value] += 1
+
+    missing_mentions: list[dict[str, Any]] = []
+    for value, required in source_counts.items():
+        present = target_counts.get(value, 0)
+        if present < required:
+            # Only elevate multiplicity beyond the base contract when a lexical
+            # quantity obligation accounts for the extra required mention.
+            lexical_for_value = [o for o in obligations if o.value == value and o.kind != "numbered_choice"]
+            base_missing = value in set(base.get("missing") or [])
+            if base_missing or lexical_for_value:
+                missing_mentions.append({"value": value, "required": required, "present": present})
+
+    numbered_missing: list[dict[str, Any]] = []
+    for obligation in obligations:
+        if obligation.kind == "numbered_choice" and not _numbered_choice_present(obligation.value, target_ru):
+            numbered_missing.append({"value": obligation.value, "source_phrase": obligation.source_phrase})
+
+    return {
+        "ok": bool(base.get("ok", True)) and not missing_mentions and not numbered_missing,
+        "base": base,
+        "obligations": [o.__dict__ for o in obligations],
+        "target_values": target_values,
+        "missing_mentions": missing_mentions,
+        "numbered_choice_missing": numbered_missing,
+    }
