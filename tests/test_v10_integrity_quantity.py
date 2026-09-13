@@ -1,5 +1,6 @@
 from bookai.models import BookMemory, Segment
 from bookai.v10_integrity import SegmentIntegrityGate
+from bookai.v10_local_repair import GigaLocalRewriter
 from bookai.v10_quality import V10QualityQA
 from bookai.v10_quantity import compare_quantity_fidelity_v2
 
@@ -65,12 +66,25 @@ def test_quantity_v2_accepts_instrumental_poluduzhinoi():
     assert compare_quantity_fidelity_v2(source, target)["ok"]
 
 
-def test_quantity_v2_preserves_numbered_choice():
+def test_quantity_v2_preserves_numbered_choice_and_governing_action():
     source = "If that's all right, I'll just marry number six."
-    bad = "Если этого достаточно, я просто женюсь."
+    missing = "Если этого достаточно, я просто женюсь."
+    malformed = "Если этого достаточно, это ошибка. «Шестой» (вариант)."
     good = "Если всё так просто, я женюсь на шестой."
-    assert compare_quantity_fidelity_v2(source, bad)["numbered_choice_missing"]
+    assert compare_quantity_fidelity_v2(source, missing)["numbered_choice_missing"]
+    assert compare_quantity_fidelity_v2(source, malformed)["numbered_choice_missing"]
     assert not compare_quantity_fidelity_v2(source, good)["numbered_choice_missing"]
+
+
+def test_giga_local_repair_rejects_editorial_variant_residue():
+    qa = V10QualityQA()
+    source = "If that's all right, I'll just marry number six."
+    segment = seg(source)
+    current = "Если всё так просто, я просто женюсь."
+    malformed = "Если всё так просто, я совершу ошибку. «Шестой» (вариант)."
+    rewriter = GigaLocalRewriter(None, qa)
+    assert not rewriter._accept(segment, current, malformed, BookMemory())
+    assert rewriter.stats["editorial_residue_rejected"] == 1
 
 
 def test_quantity_v2_accepts_cardinal_numbered_label():
