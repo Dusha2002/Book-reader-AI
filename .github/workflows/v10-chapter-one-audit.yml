@@ -25,8 +25,8 @@ jobs:
       GIGACHAT_SCOPE: GIGACHAT_API_PERS
       GIGACHAT_BASE_URL: https://api.giga.chat/v1
       BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
-      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '12'
-      BOOKAI_GIGACHAT_BATCH_CHARS: '9000'
+      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '8'
+      BOOKAI_GIGACHAT_BATCH_CHARS: '6500'
       BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
       BOOKAI_GIGACHAT_TIMEOUT: '55'
       BOOKAI_GIGACHAT_RETRIES: '1'
@@ -58,6 +58,7 @@ jobs:
             src/bookai/v10_speaker.py \
             src/bookai/v10_numeric.py \
             src/bookai/v10_quantity.py \
+            src/bookai/v10_clause_fidelity.py \
             src/bookai/v10_integrity.py \
             src/bookai/v10_quality.py \
             src/bookai/v10_local_repair.py \
@@ -68,6 +69,7 @@ jobs:
             tests/test_v10_source_only.py \
             tests/test_v10_discourse_quality.py \
             tests/test_v10_integrity_quantity.py \
+            tests/test_v10_clause_fidelity.py \
             tests/test_v10_deepseek_routing.py
 
       - name: Translate Chapter One with clean v10
@@ -131,7 +133,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v10-chapter-one-clean6e-proposition-bound-choice
+          name: v10-chapter-one-clean7-clause-dup-transport8
           path: audit
           if-no-files-found: warn
           retention-days: 7
