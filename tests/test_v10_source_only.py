@@ -1,7 +1,8 @@
 from bookai.models import BookMemory, Segment
 from bookai.v10_dialogue import DialogueDiscourseGuard, source_has_dialogue
+from bookai.v10_name_canon import spelling_preserving_v9ad
 from bookai.v10_quality import V10QualityQA
-from bookai.v10_source_bible import SourceOnlyBookBibleBuilder, _has_clean_russian, _spelling_preserving
+from bookai.v10_source_bible import SourceOnlyBookBibleBuilder, _has_clean_russian
 
 
 def seg(text: str, sid: str = "s000001") -> Segment:
@@ -35,11 +36,11 @@ def test_source_only_bible_rejects_mixed_latin_russian_output():
 
 
 def test_v9ad_spelling_guard_rejects_collapsed_fictional_name():
-    assert _spelling_preserving("Miel", "Миэль")
-    assert not _spelling_preserving("Miel", "Мель")
-    assert _spelling_preserving("Valens", "Валенс")
-    assert not _spelling_preserving("Valens", "Вальс")
-    assert _spelling_preserving("Orsea", "Орсеа")
+    assert spelling_preserving_v9ad("Miel", "Миэль")
+    assert not spelling_preserving_v9ad("Miel", "Мель")
+    assert spelling_preserving_v9ad("Valens", "Валенс")
+    assert not spelling_preserving_v9ad("Valens", "Вальс")
+    assert spelling_preserving_v9ad("Orsea", "Орсеа")
 
 
 def test_v9d_principle_detects_dialogue_after_author_sentence():
