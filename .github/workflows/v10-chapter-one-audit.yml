@@ -41,7 +41,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -114,12 +113,9 @@ jobs:
               'segment_integrity': report.get('segment_integrity'),
               'final_integrity_repair': report.get('final_integrity_repair'),
               'final_integrity': report.get('final_integrity'),
-              'dialogue_guard': report.get('dialogue_guard'),
-              'speaker_guard': report.get('speaker_guard'),
               'primary_transport': report.get('primary_transport'),
               'usage': report.get('usage'),
               'qa_initial': report.get('qa_initial'),
-              'patcher': report.get('patcher'),
               'local_rewriter': report.get('local_rewriter'),
               'qa_after_local': report.get('qa_after_local'),
               'deepseek_specialist': report.get('deepseek_specialist'),
@@ -135,7 +131,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v10-chapter-one-clean6d-proof-first-deepseek
+          name: v10-chapter-one-clean6e-proposition-bound-choice
           path: audit
           if-no-files-found: warn
           retention-days: 7
