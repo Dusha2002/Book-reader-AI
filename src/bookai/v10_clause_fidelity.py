@@ -9,6 +9,7 @@ from .v10_quantity import extract_quantity_obligations
 
 
 _WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё0-9]+", re.U)
+_CLAUSE_BOUNDARY_RE = re.compile(r"[.!?;]+(?:\s+|$)")
 _RU_STOP = {
     "и", "а", "но", "или", "что", "как", "это", "он", "она", "они", "мы", "вы", "я", "ты",
     "его", "ее", "её", "их", "ему", "ей", "мне", "тебе", "вам", "нас", "вас", "в", "во", "на",
@@ -90,6 +91,10 @@ def _find_proper_once(text: str, canonical: str) -> int | None:
     return hits[0] if len(hits) == 1 else None
 
 
+def _clause_index(text: str, position: int) -> int:
+    return sum(1 for match in _CLAUSE_BOUNDARY_RE.finditer(str(text or "")) if match.end() <= position)
+
+
 def _quantity_target_position(value: int, target_ru: str) -> int | None:
     low = str(target_ru or "").casefold().replace("ё", "е")
     forms = {
@@ -126,9 +131,16 @@ def _canon_from_memory(memory: BookMemory) -> list[tuple[str, str, bool]]:
 
 
 def compare_clause_order_fidelity(source_en: str, target_ru: str, memory: BookMemory) -> dict[str, Any]:
+    """Compare order of uniquely alignable anchors across discourse clauses.
+
+    Surface word order inside one clause is intentionally ignored: Russian may
+    reorder subject/object/name phrases while preserving meaning. We only flag a
+    proven inversion when two anchors belong to different source clauses and their
+    target clause order is reversed.
+    """
     source = str(source_en or "")
     target = str(target_ru or "")
-    anchors: list[tuple[str, int, int]] = []
+    anchors: list[tuple[str, int, int, int, int]] = []
 
     for obligation in extract_quantity_obligations(source):
         src_match = re.search(re.escape(obligation.source_phrase), source, re.I)
@@ -136,7 +148,11 @@ def compare_clause_order_fidelity(source_en: str, target_ru: str, memory: BookMe
             continue
         target_pos = _quantity_target_position(obligation.value, target)
         if target_pos is not None:
-            anchors.append((f"quantity:{obligation.value}:{obligation.kind}", src_match.start(), target_pos))
+            anchors.append((
+                f"quantity:{obligation.value}:{obligation.kind}",
+                src_match.start(), target_pos,
+                _clause_index(source, src_match.start()), _clause_index(target, target_pos),
+            ))
 
     source_low = source.casefold()
     for src, ru, proper in _canon_from_memory(memory):
@@ -146,9 +162,13 @@ def compare_clause_order_fidelity(source_en: str, target_ru: str, memory: BookMe
         target_pos = _find_proper_once(target, ru) if proper else _find_once(target, ru)
         if target_pos is None:
             continue
-        anchors.append((f"canon:{src}", source_low.find(src_low), target_pos))
+        source_pos = source_low.find(src_low)
+        anchors.append((
+            f"canon:{src}", source_pos, target_pos,
+            _clause_index(source, source_pos), _clause_index(target, target_pos),
+        ))
 
-    unique: dict[str, tuple[str, int, int]] = {}
+    unique: dict[str, tuple[str, int, int, int, int]] = {}
     for row in anchors:
         unique.setdefault(row[0], row)
     ordered = sorted(unique.values(), key=lambda row: row[1])
@@ -157,8 +177,15 @@ def compare_clause_order_fidelity(source_en: str, target_ru: str, memory: BookMe
 
     inversions: list[dict[str, Any]] = []
     for left, right in zip(ordered, ordered[1:]):
-        if left[2] > right[2]:
-            inversions.append({"left": left[0], "right": right[0], "source_positions": [left[1], right[1]], "target_positions": [left[2], right[2]]})
+        # Ignore rearrangement within the same source clause.
+        if left[3] == right[3]:
+            continue
+        if left[3] < right[3] and left[4] > right[4]:
+            inversions.append({
+                "left": left[0], "right": right[0],
+                "source_clause_indexes": [left[3], right[3]],
+                "target_clause_indexes": [left[4], right[4]],
+            })
     return {"ok": not inversions, "anchors": ordered, "inversions": inversions}
 
 
@@ -169,5 +196,5 @@ def scan_clause_fidelity(segment: Segment, target_ru: str, memory: BookMemory) -
         out.append(ClauseFidelityIssue("duplicate_content", str(duplicate.get("reason") or "invented target repetition"), duplicate))
     order = compare_clause_order_fidelity(segment.text, target_ru, memory)
     if not order.get("ok", True):
-        out.append(ClauseFidelityIssue("clause_order", "reliable semantic anchors appear in a different order from source", order))
+        out.append(ClauseFidelityIssue("clause_order", "reliable semantic anchors appear in a different discourse-clause order from source", order))
     return out
