@@ -9,7 +9,8 @@ from pathlib import Path
 from bookai.llm import OpenAICompatibleProvider
 from bookai.parsers.base import load_book, save_book
 from bookai.pipeline import _chapter_groups, _should_translate
-from bookai.v10 import DeepSeekSemanticSpecialist, GigaSpanPatcher, issue_summary
+from bookai.v10 import GigaSpanPatcher, issue_summary
+from bookai.v10_deepseek import DeepSeekSemanticSpecialist
 from bookai.v10_dialogue import DialogueDiscourseGuard
 from bookai.v10_integrity import SegmentIntegrityGate
 from bookai.v10_local_repair import GigaLocalRewriter
@@ -66,7 +67,7 @@ def main() -> None:
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
         "whole_book_segments": len(all_targets),
-        "architecture": "clean-v10:source-only+two-stage-integrity+v9d-dialogue-speaker+v9ad-canon-risk+quantity-v2:no-v9-imports",
+        "architecture": "clean-v10:source-only+two-stage-integrity+v9d-dialogue-speaker+v9ad-canon-risk+quantity-v2+proof-first-deepseek:no-v9-imports",
     }, ensure_ascii=False), flush=True)
 
     giga = RobustTaggedPrimaryTransport()
@@ -163,7 +164,7 @@ def main() -> None:
     MAP.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), "utf-8")
 
     report = {
-        "version": "v10-clean-6c-two-stage-integrity-quantity-v2",
+        "version": "v10-clean-6d-proof-first-deepseek",
         "chapter": chapter_name,
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
@@ -182,7 +183,7 @@ def main() -> None:
             "discourse_dialogue": "v9d source-structural quotation normalization + conservative two-speaker continuity",
             "qa": "deterministic fidelity + proposition-aware QuantityFidelity v2 + direction/kinship/hunting contracts",
             "cheap_repair": "Giga exact-span patch, bounded batch rewrite, then single-row Giga fallback for objective local defects",
-            "semantic_repair": "one DeepSeek batch, <=8 v9ad-style risk-ranked semantic segments",
+            "semantic_repair": "ONE DeepSeek batch, <=8 rows; unresolved proven quantity/omission hard defects have first priority over risk-only candidates",
             "final_gate": "deterministic QA + zero-residual structural integrity",
             "reference_seed": False,
             "legacy_sanitizer": False,
