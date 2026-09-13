@@ -8,8 +8,10 @@ from .models import Segment
 
 _NAME = r"[A-Z][A-Za-z'-]+(?:\s+[A-Z][A-Za-z'-]+){0,2}"
 _SPEECH_VERB = r"(?:said|asked|replied|answered|added|continued|murmured|whispered|shouted|called|cut\s+him\s+off|cut\s+her\s+off)"
+_ACTION_BEAT = r"(?:took\s+a\s+deep\s+breath|smiled|sighed|laughed|nodded|shrugged|frowned|grinned|paused|hesitated)"
 _EXPLICIT_AFTER = re.compile(rf"['\"”’][,!?….]?\s*({_NAME})\s+{_SPEECH_VERB}\b", re.I)
 _EXPLICIT_BEFORE = re.compile(rf"\b({_NAME})\s+{_SPEECH_VERB}\b", re.I)
+_ACTION_AFTER = re.compile(rf"['\"”’][.!?…]?\s*({_NAME})\s+{_ACTION_BEAT}\b", re.I)
 _QUOTE_ONLY = re.compile(r"^\s*['\"“‘].*['\"”’]?\s*$", re.S)
 
 _MALE_EVIDENCE = re.compile(
@@ -37,9 +39,10 @@ _FEMALE_TO_MALE = {v: k for k, v in _MALE_TO_FEMALE.items()}
 
 def _explicit_speaker(source: str) -> str:
     text = str(source or "")
-    # Attribution before or after a quote is much stronger than a nearby capitalized
-    # token. We intentionally do not guess speakers from narration alone.
-    for pattern in (_EXPLICIT_AFTER, _EXPLICIT_BEFORE):
+    # Attribution or a classic immediate dialogue action beat is much stronger than
+    # a merely nearby capitalized token. We intentionally do not guess from general
+    # narration such as "X entered the room".
+    for pattern in (_EXPLICIT_AFTER, _EXPLICIT_BEFORE, _ACTION_AFTER):
         match = pattern.search(text)
         if match:
             name = str(match.group(1) or "").strip()
@@ -52,7 +55,6 @@ def _is_short_quote_only(source: str) -> bool:
     text = str(source or "").strip()
     if not text or len(text) > 180:
         return False
-    # No narrative attribution in the segment itself.
     if _explicit_speaker(text):
         return False
     return bool(_QUOTE_ONLY.match(text))
@@ -135,8 +137,8 @@ class DialogueSpeakerContinuityGuard:
             previous = assigned[i - 1] if i > 0 else ""
             if not previous:
                 continue
-            # Strong look-ahead confirmation: the next explicit attribution repeats
-            # the previous speaker, so this middle unattributed reply is the other.
+            # Strong look-ahead confirmation: the next explicit attribution/action
+            # beat repeats the previous speaker, so this middle reply is the other.
             next_explicit = ""
             for j in range(i + 1, min(len(segments), i + 3)):
                 if explicit[j]:
