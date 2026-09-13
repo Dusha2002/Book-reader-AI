@@ -15,7 +15,8 @@ from bookai.v10 import (
     GigaSpanPatcher,
     issue_summary,
 )
-from bookai.v10_bible import AtomicBookBibleBuilder
+from bookai.v10_dialogue import DialogueDiscourseGuard
+from bookai.v10_source_bible import SourceOnlyBookBibleBuilder
 from bookai.v10_transport import RobustTaggedPrimaryTransport
 
 
@@ -66,17 +67,17 @@ def main() -> None:
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
         "whole_book_segments": len(all_targets),
-        "architecture": "clean-v10:no-v9-imports",
+        "architecture": "clean-v10:source-only-bible+v9d-discourse:no-v9-imports",
     }, ensure_ascii=False), flush=True)
 
     giga = RobustTaggedPrimaryTransport()
     if not giga.available():
         raise RuntimeError("GIGACHAT_AUTH_KEY is missing")
 
-    # One-time per-book stage. Its cost is reported separately and is not counted
-    # against the 2-3 minute per-chapter steady-state SLA.
+    # One-time per-book stage. It is strictly source-only: no Russian reference,
+    # reference-derived seed, or inherited v9 translation cache is read.
     bible_started = time.perf_counter()
-    memory, bible_stats = AtomicBookBibleBuilder(giga, BIBLE).build(all_targets)
+    memory, bible_stats = SourceOnlyBookBibleBuilder(giga, BIBLE).build(all_targets)
     bible_seconds = time.perf_counter() - bible_started
     usage_after_bible = giga.usage.as_dict()
 
@@ -84,9 +85,13 @@ def main() -> None:
     translated, primary_errors = giga.translate_many(targets, memory, source_segments=all_targets)
     usage_after_primary = giga.usage.as_dict()
 
-    # DeepSeek must never serve as a transport fallback. If primary still has
-    # missing ids after bounded Giga-only recovery, preserve the diagnostic but
-    # do not route an empty current_ru to the semantic specialist.
+    # v9d's useful idea, rebuilt as a clean deterministic v10 layer: source
+    # structurally decides whether quotes represent direct speech or narration.
+    dialogue_guard = DialogueDiscourseGuard()
+    dialogue_after_primary = dialogue_guard.apply(targets, translated)
+
+    # DeepSeek must never serve as a transport fallback. Simple/provable defects
+    # stay deterministic/Giga-first; DeepSeek receives only the semantic tail.
     qa = DeterministicQA()
     initial_issues = qa.scan(targets, translated, memory)
     patcher = GigaSpanPatcher(giga, qa)
@@ -102,6 +107,10 @@ def main() -> None:
     )
     specialist_issues = [issue for issue in post_patch_issues if issue.code != "missing"]
     deep_changed = specialist.repair(targets, translated, memory, specialist_issues)
+
+    # Semantic full-segment repair may reintroduce English-style quotes. Reapply
+    # the lexically inert source-aware discourse guard before the final gate.
+    dialogue_after_semantic = dialogue_guard.apply(targets, translated)
     final_issues = qa.scan(targets, translated, memory)
     chapter_seconds = time.perf_counter() - chapter_started
 
@@ -129,7 +138,7 @@ def main() -> None:
     MAP.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), "utf-8")
 
     report = {
-        "version": "v10-clean-2",
+        "version": "v10-clean-3-source-only-v9d",
         "chapter": chapter_name,
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
@@ -142,17 +151,24 @@ def main() -> None:
             "total_cold_seconds": round(time.perf_counter() - run_started, 2),
         },
         "architecture": {
-            "book_bible": "whole-book deterministic candidate scan + distributed GigaChat source intelligence",
-            "primary": "GigaChat tagged batches + fixed micro-recovery + tiny JSON residual recovery; no recursive split",
-            "qa": "single deterministic fidelity scan before/after repair",
+            "book_bible": "whole-book SOURCE-ONLY high-precision proper-name + technical-term intelligence; no reference seed",
+            "primary": "GigaChat tagged batches + bounded Giga-only recovery; strict cross-segment contamination rejection",
+            "discourse_dialogue": "v9d principle rebuilt independently: source-structural direct speech vs narrative quotation; deterministic and lexically inert",
+            "qa": "deterministic fidelity scan before/after repair",
             "cheap_repair": "GigaChat exact span patches; never full paragraph rewrite",
             "semantic_repair": "one DeepSeek batch, <=8 high-risk segments; never transport recovery",
             "final_gate": "deterministic only",
+            "reference_seed": False,
             "legacy_sanitizer": False,
             "deepseek_verifier": False,
             "v9_monkey_patch_chain": False,
         },
         "book_bible": bible_stats,
+        "dialogue_guard": {
+            **dict(dialogue_guard.stats),
+            "after_primary_changed_ids": dialogue_after_primary,
+            "after_semantic_changed_ids": dialogue_after_semantic,
+        },
         "primary_transport": dict(giga.transport_stats),
         "usage": {
             "gigachat_bible": usage_after_bible,
