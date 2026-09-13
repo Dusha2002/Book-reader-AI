@@ -33,6 +33,8 @@ jobs:
       BOOKAI_GIGACHAT_TOKEN_CACHE_TTL: '1440'
       BOOKAI_GIGACHAT_OAUTH_ATTEMPTS: '2'
       BOOKAI_GIGACHAT_OAUTH_FAILURE_BACKOFF: '5'
+      BOOKAI_BERGAMOT_CONFIG: /tmp/bookai-bergamot-enru/config.bergamot.yml
+      BOOKAI_BERGAMOT_WORKERS: '4'
       BOOKAI_ANALYZER_MODEL: deepseek-flash
       BOOKAI_TRANSLATOR_MODEL: deepseek-flash
       BOOKAI_GATE_MODEL: deepseek-flash
@@ -82,29 +84,49 @@ jobs:
       BOOKAI_V9AF_SANITIZER_MAX: '32'
       BOOKAI_V9AF_SANITIZER_BATCH: '18'
       BOOKAI_V9AG_RETRY_MAX: '16'
-      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first-three-v9ah-source-only'
+      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first-three-v9ai-bergamot-editor-source-only'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - name: Install project and run tests
+          python-version: '3.10'
+      - name: Install project, Bergamot wheel, and run tests
         env:
           BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
         shell: bash
         run: |
           set -euo pipefail
-          pip install -e '.[dev]' gigachat
-          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/chapter_reference_translation_v9e.py scripts/chapter_reference_translation_v9f.py scripts/chapter_reference_translation_v9g.py scripts/chapter_reference_translation_v9h.py scripts/chapter_reference_translation_v9i.py scripts/chapter_reference_translation_v9j.py scripts/chapter_reference_translation_v9k.py scripts/chapter_reference_translation_v9l.py scripts/chapter_reference_translation_v9m.py scripts/chapter_reference_translation_v9n.py scripts/chapter_reference_translation_v9o.py scripts/chapter_reference_translation_v9p.py scripts/chapter_reference_translation_v9q.py scripts/chapter_reference_translation_v9r.py scripts/chapter_reference_translation_v9s.py scripts/chapter_reference_translation_v9t.py scripts/chapter_reference_translation_v9u.py scripts/chapter_reference_translation_v9v.py scripts/chapter_reference_translation_v9w.py scripts/chapter_reference_translation_v9x.py scripts/chapter_reference_translation_v9y.py scripts/chapter_reference_translation_v9z.py scripts/chapter_reference_translation_v9aa.py scripts/chapter_reference_translation_v9ab.py scripts/chapter_reference_translation_v9ac.py scripts/chapter_reference_translation_v9ad.py scripts/chapter_reference_translation_v9ae.py scripts/chapter_reference_translation_v9af.py scripts/chapter_reference_translation_v9ag.py scripts/chapter_reference_translation_v9ah.py scripts/hybrid_reference_translation.py
+          pip install -e '.[dev]' gigachat 'bergamot==0.4.5'
+          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/chapter_reference_translation_v9e.py scripts/chapter_reference_translation_v9f.py scripts/chapter_reference_translation_v9g.py scripts/chapter_reference_translation_v9h.py scripts/chapter_reference_translation_v9i.py scripts/chapter_reference_translation_v9j.py scripts/chapter_reference_translation_v9k.py scripts/chapter_reference_translation_v9l.py scripts/chapter_reference_translation_v9m.py scripts/chapter_reference_translation_v9n.py scripts/chapter_reference_translation_v9o.py scripts/chapter_reference_translation_v9p.py scripts/chapter_reference_translation_v9q.py scripts/chapter_reference_translation_v9r.py scripts/chapter_reference_translation_v9s.py scripts/chapter_reference_translation_v9t.py scripts/chapter_reference_translation_v9u.py scripts/chapter_reference_translation_v9v.py scripts/chapter_reference_translation_v9w.py scripts/chapter_reference_translation_v9x.py scripts/chapter_reference_translation_v9y.py scripts/chapter_reference_translation_v9z.py scripts/chapter_reference_translation_v9aa.py scripts/chapter_reference_translation_v9ab.py scripts/chapter_reference_translation_v9ac.py scripts/chapter_reference_translation_v9ad.py scripts/chapter_reference_translation_v9ae.py scripts/chapter_reference_translation_v9af.py scripts/chapter_reference_translation_v9ag.py scripts/chapter_reference_translation_v9ah.py scripts/chapter_reference_translation_v9ai.py scripts/setup_bergamot_enru.py scripts/hybrid_reference_translation.py
           pytest -q
+      - name: Cache Firefox Bergamot EN-RU base model
+        uses: actions/cache@v4
+        with:
+          path: /tmp/bookai-bergamot-enru
+          key: firefox-bergamot-enru-base-v2-0ef9a209
+      - name: Prepare and smoke-test Firefox Bergamot EN-RU
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/setup_bergamot_enru.py --output /tmp/bookai-bergamot-enru
+          python - <<'PY'
+          import os
+          from bergamot import ResponseOptions, Service, ServiceConfig, VectorString
+          service = Service(ServiceConfig(numWorkers=4, logLevel='off'))
+          model = service.modelFromConfigPath(os.environ['BOOKAI_BERGAMOT_CONFIG'])
+          rows = service.translate(model, VectorString(['The shortest way to a man’s heart is through his stomach.']), ResponseOptions(qualityScores=False, alignment=False, HTML=False, sentenceMappings=False))
+          text = str(rows[0].target.text or '').strip()
+          print('[bergamot-smoke]', text)
+          assert text and any('А' <= ch <= 'я' or ch in 'Ёё' for ch in text), text
+          PY
       - name: Verify API secrets without exposing them
         shell: bash
         run: |
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
           test -n "${DEEPSEEK_API_KEY:-}" || { echo 'DEEPSEEK_API_KEY is not configured' >&2; exit 1; }
-          echo '[bookai] architecture=v9ah model=deepseek-flash(v4.1) chapters=one,two,three source-only=yes deepseek-bulk-qe=no deepseek-budget=adaptive-length+risk-density mandatory-high-risk=unbounded repair-batch=8 verify-batch=12 source-sanitizer=validated-gigachat+deterministic gold-reference=no'
-      - name: Translate Chapters One through Three with v9ah adaptive sparse DeepSeek
+          echo '[bookai] architecture=v9ai primary=firefox-bergamot-base-enru local-draft + gigachat-literary-editor downstream=v9ah-adaptive-deepseek source-only=yes gold-reference=no'
+      - name: Translate Chapters One through Three with v9ai Bergamot + GigaChat editor
         shell: bash
         run: |
           set -euo pipefail
@@ -113,14 +135,14 @@ jobs:
             slug=$(printf '%s' "$word" | tr '[:upper:]' '[:lower:]')
             echo "[bookai] ===== START Chapter ${word} ====="
             BOOKAI_CHAPTER_NAME="Chapter ${word}" timeout --signal=TERM --kill-after=30s 15m \
-              python scripts/chapter_reference_translation_v9ah.py 2>&1 | tee "chapter-v9-full-${slug}.log"
+              python scripts/chapter_reference_translation_v9ai.py 2>&1 | tee "chapter-v9-full-${slug}.log"
             echo "[bookai] ===== DONE Chapter ${word} ====="
           done
-      - name: Upload first three chapters v9ah adaptive evaluation
+      - name: Upload first three chapters v9ai Bergamot editor evaluation
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: first-three-chapters-v9ah-adaptive-sparse-deepseek-evaluation
+          name: first-three-chapters-v9ai-bergamot-gigachat-editor-evaluation
           path: |
             Devices_and_Desires_RU_*_EVAL_V9.fb2
             chapter-v9-*.txt
