@@ -62,3 +62,71 @@ def test_hundred_compound_is_preserved():
     assert result["ok"] is True
     assert 105 in result["source_values"]
     assert 105 in result["target_values"]
+
+
+def test_generic_first_time_can_lexicalize():
+    result = compare_numeric_fidelity(
+        "He wrote to him for the first time since his escape.",
+        "Он написал ему впервые после побега.",
+    )
+    assert result["ok"] is True
+    assert result["source_values"] == []
+
+
+def test_generic_third_cousin_is_not_a_hard_numeric_fact():
+    result = compare_numeric_fidelity(
+        "He met his third cousin.",
+        "Он встретил троюродного брата.",
+    )
+    assert result["ok"] is True
+    assert result["source_values"] == []
+
+
+def test_fourth_day_is_numbered_context_and_must_survive():
+    result = compare_numeric_fidelity(
+        "At noon on the fourth day they arrived.",
+        "В полдень пятого дня они прибыли.",
+    )
+    assert result["ok"] is False
+    assert result["missing"] == [4]
+
+
+def test_punctuation_separates_island_and_street_numbers():
+    result = compare_numeric_fidelity(
+        "Island Seventeen, Sixty-Seventh Street.",
+        "Остров Семнадцать, Шестьдесят седьмая улица.",
+    )
+    assert result["ok"] is True
+    assert result["source_values"] == [17, 67]
+    assert result["target_values"] == [17, 67]
+
+
+def test_seven_storey_does_not_accept_seventeen_storey():
+    result = compare_numeric_fidelity(
+        "It was a seven-storey block on the sixth floor.",
+        "Это был семнадцатиэтажный дом на шестом этаже.",
+    )
+    assert result["ok"] is False
+    assert 7 in result["missing"]
+    assert 6 not in result["missing"]
+
+
+def test_thirty_thousandths_preserves_numerator_without_becoming_30000():
+    result = compare_numeric_fidelity(
+        "The gap never varied by more than thirty thousandths of an inch.",
+        "Зазор отличался не более чем на тридцать тысячных дюйма.",
+    )
+    assert result["ok"] is True
+    assert 30 in result["source_values"]
+    assert 30 in result["target_values"]
+    assert 30000 not in result["target_values"]
+
+
+def test_small_cardinal_quantity_is_strict_and_collective_russian_counts():
+    result = compare_numeric_fidelity(
+        "There were four guards behind him.",
+        "Позади него шли четверо стражников.",
+    )
+    assert result["ok"] is True
+    assert result["source_values"] == [4]
+    assert 4 in result["target_values"]
