@@ -32,6 +32,7 @@ def make_rate_limit_resilient_backend(base_cls: type[T]) -> type[T]:
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self._rate_limit_failed_calls = 0
+            self._rate_limit_exhausted_batches = 0
 
         def _chat(self, payload, batch, *, strict):
             attempts = max(1, int(os.getenv("BOOKAI_GIGACHAT_RATE_LIMIT_ATTEMPTS") or "6"))
@@ -46,6 +47,9 @@ def make_rate_limit_resilient_backend(base_cls: type[T]) -> type[T]:
                         raise
                     self._rate_limit_failed_calls += 1
                     if attempt >= attempts:
+                        # The base backend will count this failed logical batch
+                        # once when the exception propagates into its split logic.
+                        self._rate_limit_exhausted_batches += 1
                         print(
                             f"[gigachat-rate-limit] exhausted=true attempts={attempts} "
                             f"segments={len(batch)} action=delegate_to_existing_recovery",
@@ -64,14 +68,19 @@ def make_rate_limit_resilient_backend(base_cls: type[T]) -> type[T]:
             raise RuntimeError("unreachable rate-limit retry state")
 
         def translate_many(self, *args, **kwargs):
-            before = int(self._rate_limit_failed_calls)
+            before_failed = int(self._rate_limit_failed_calls)
+            before_exhausted = int(self._rate_limit_exhausted_batches)
             try:
                 return super().translate_many(*args, **kwargs)
             finally:
-                # The base backend counts one API call per completed/failed
-                # _translate_batch attempt. Calls hidden inside our same-request
-                # 429 retry loop are additional physical upstream requests.
-                extra = int(self._rate_limit_failed_calls) - before
+                # Successful logical batches already count their final successful
+                # physical call in the base usage counter, so every preceding 429
+                # is extra. Exhausted logical batches are themselves counted once
+                # by the base recovery path; subtract that final failed call to
+                # avoid double-counting physical traffic.
+                failed_delta = int(self._rate_limit_failed_calls) - before_failed
+                exhausted_delta = int(self._rate_limit_exhausted_batches) - before_exhausted
+                extra = max(0, failed_delta - exhausted_delta)
                 usage = getattr(self, "usage", None)
                 if extra > 0 and usage is not None and hasattr(usage, "api_calls"):
                     usage.api_calls += extra
