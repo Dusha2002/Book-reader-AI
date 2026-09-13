@@ -8,6 +8,13 @@ from .models import BookMemory, Segment
 from .v10 import V10Issue, _giga_json, _norm, _usage
 
 
+_EDITORIAL_RESIDUE_RE = re.compile(
+    r"(?:\(\s*(?:вариант|букв\.?|буквально|дословно|option|variant|translation)\s*\)|"
+    r"\[\s*(?:вариант|букв\.?|буквально|дословно|option|variant|translation)\s*\])",
+    re.I,
+)
+
+
 class GigaLocalRewriter:
     """Second cheap repair tier for deterministic defects span-patching cannot fix."""
 
@@ -15,8 +22,6 @@ class GigaLocalRewriter:
         "numeric", "quantity_obligation", "numbered_choice", "quarter_inch", "question",
         "material", "order", "latin_leak", "character_gender", "glossary_term",
     }
-    # Single-row recovery is reserved for objective high-value defects where the
-    # batched JSON editor is known to truncate or omit rows. It is still Giga-first.
     _SINGLE_FALLBACK_CODES = {
         "numeric", "quantity_obligation", "numbered_choice", "quarter_inch", "latin_leak",
     }
@@ -28,11 +33,17 @@ class GigaLocalRewriter:
         self.stats: dict[str, Any] = {
             "calls": 0, "requested": 0, "accepted": 0, "rejected": 0,
             "missing_rows": 0, "single_calls": 0, "single_accepted": 0,
-            "selected_ids": [], "single_ids": [],
+            "selected_ids": [], "single_ids": [], "editorial_residue_rejected": 0,
         }
 
     def _accept(self, segment: Segment, current: str, candidate: str, memory: BookMemory) -> bool:
         if not candidate or candidate == current or "<s " in candidate or "<src " in candidate:
+            return False
+        # Local repair is final prose, never an editor's note or a list of options.
+        # This specifically prevents a bare gloss such as «шестой» (вариант) from
+        # fooling the numbered-choice detector while the governing action is absent.
+        if _EDITORIAL_RESIDUE_RE.search(candidate):
+            self.stats["editorial_residue_rejected"] += 1
             return False
         before = self.qa.scan_segment(segment, current, memory)
         after = self.qa.scan_segment(segment, candidate, memory)
@@ -48,6 +59,7 @@ class GigaLocalRewriter:
             "Ты точный редактор литературного перевода EN→RU. Дана ОДНА строка с уже доказанными локальными дефектами. "
             "Исправь только их, но верни ПОЛНЫЙ готовый русский перевод SOURCE. Ничего не сокращай и не добавляй. "
             "Для dozen: a dozen=12, half a dozen=6, two dozen=24. Для number six сохрани сам выбор №6 и весь связанный смысл. "
+            "Не добавляй скобочные пояснения, пометы 'вариант', альтернативы или комментарии переводчика. "
             "Если дефект Latin — убери латиницу, сохранив имя/значение. Верни только русский текст, без JSON, комментариев и вариантов."
         )
         request = {
@@ -102,8 +114,9 @@ class GigaLocalRewriter:
 Fix ONLY the listed defect(s) while preserving the current Russian wording, literary tone, paragraph structure and all unrelated facts.
 Typical defects: missing/wrong number or unit, repeated/dozen quantity, numbered choice/label, question force/punctuation, physical material/order, raw untranslated Latin, local gender agreement.
 For NUMERIC/QUANTITY defects, restore the COMPLETE proposition attached to every missing quantity. Do not satisfy a later quantity merely because the same number appears earlier in the paragraph.
-Interpret dozen exactly: a dozen=12, half a dozen=6, two dozen=24. For a numbered choice such as "number six", preserve the choice naturally in Russian (e.g. «номер шесть» or «шестой вариант/кандидат») together with its surrounding clause.
+Interpret dozen exactly: a dozen=12, half a dozen=6, two dozen=24. For a numbered choice such as "number six", preserve the choice naturally in Russian together with its governing action and surrounding clause.
 For a LATIN defect, remove mixed-script/transliterated residue without changing the referent.
+Never append explanations, alternatives, bracketed glosses, translator notes or words such as «вариант» merely to satisfy a detector.
 Do not add interpretations and do not perform broad stylistic rewriting. corrected_ru MUST be the COMPLETE final Russian translation of exactly source.
 Return every supplied id. ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]}.
 """
@@ -135,8 +148,6 @@ Return every supplied id. ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]
                 else:
                     self.stats["rejected"] += 1
 
-        # Robust fallback: only objective local defects still present after the
-        # batched editor are retried one row at a time, without JSON transport.
         fallback_rows: list[dict[str, Any]] = []
         for row in rows:
             sid = row["id"]
