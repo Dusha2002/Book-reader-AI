@@ -57,11 +57,17 @@ jobs:
             src/bookai/v10_dialogue.py \
             src/bookai/v10_speaker.py \
             src/bookai/v10_numeric.py \
+            src/bookai/v10_quantity.py \
+            src/bookai/v10_integrity.py \
             src/bookai/v10_quality.py \
             src/bookai/v10_local_repair.py \
             src/bookai/v10_transport.py \
             scripts/chapter_translation_v10.py
-          pytest -q tests/test_v10_architecture.py tests/test_v10_source_only.py tests/test_v10_discourse_quality.py
+          pytest -q \
+            tests/test_v10_architecture.py \
+            tests/test_v10_source_only.py \
+            tests/test_v10_discourse_quality.py \
+            tests/test_v10_integrity_quantity.py
 
       - name: Translate Chapter One with clean v10
         run: |
@@ -103,6 +109,8 @@ jobs:
               'wall_seconds_with_bible': wall,
               'timing': report.get('timing'),
               'book_bible': report.get('book_bible'),
+              'segment_integrity': report.get('segment_integrity'),
+              'final_integrity': report.get('final_integrity'),
               'dialogue_guard': report.get('dialogue_guard'),
               'speaker_guard': report.get('speaker_guard'),
               'primary_transport': report.get('primary_transport'),
@@ -124,7 +132,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v10-chapter-one-clean5-discourse-risk
+          name: v10-chapter-one-clean6-integrity-quantity
           path: audit
           if-no-files-found: warn
           retention-days: 7
