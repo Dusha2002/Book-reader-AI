@@ -67,14 +67,14 @@ def test_quality_routes_bad_hunting_collocation_to_semantic_specialist():
     assert any(issue.code == "hunting_collocation" and issue.mode == "semantic" for issue in issues)
 
 
-def test_speaker_continuity_fixes_gender_only_with_strong_two_speaker_sandwich():
+def test_speaker_continuity_fixes_gender_with_action_beat_confirmation():
     segments = [
         seg("'Bolt out of the blue,' Licinius said.", "s000001"),
         seg("'Which daughter?' Valens said.", "s000002"),
         seg("'What? Oh, right. I'm not absolutely sure.'", "s000003"),
         seg("'Can you find out?' Valens said.", "s000004"),
         seg("'I've already said yes.'", "s000005"),
-        seg("'That's splendid.' Valens said.", "s000006"),
+        seg("'That's splendid.' Valens took a deep breath. 'That'll have to do.'", "s000006"),
     ]
     translated = {
         "s000001": "— Как гром среди ясного неба, — сказал Лициний.",
@@ -82,7 +82,7 @@ def test_speaker_continuity_fixes_gender_only_with_strong_two_speaker_sandwich()
         "s000003": "— Что? Я не совсем уверен.",
         "s000004": "— Можешь выяснить? — сказал Валенс.",
         "s000005": "— Я уже сказала да.",
-        "s000006": "— Вот и прекрасно, — сказал Валенс.",
+        "s000006": "— Вот и прекрасно. Валенс глубоко вдохнул. — На этом хватит.",
     }
     guard = DialogueSpeakerContinuityGuard()
     changed = guard.apply(segments, translated)
