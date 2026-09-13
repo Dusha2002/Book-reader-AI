@@ -13,7 +13,7 @@
       "chapter": "Chapter One",
       "categories": ["causality","negation","numbers","reference_resolution","terminology","time"],
       "source": "It was typical of Valens' father that he insisted on his son learning the new fencing; the stock, the tuck, the small-sword and the rapier. It was elegant, refined, difficult, endlessly time-consuming and, of course, useless. A brigandine or even a thick winter coat would turn one of those exquisite points; if you wanted to have any chance of doing useful work, you had to aim for the holes in the face, targets no bigger than an eight-mark coin. Against a farm worker with a hedging tool, you stood no chance whatsoever. But, for ten years, Valens had flounced and stretched up and down a chalk line in a draughty shed that hadn't been cleaned out since it was still a stable. When he could hit the apple, the instructor had hung up a plum, and then a damson. Now he could get the damson nine times out of ten, and so the ring had taken its place. Once he'd mastered that, he wondered what he'd be faced with next. The eye of a darning-needle, probably.",
-      "expectations": {"hard": true, "required_regex": ["бриг[ао]нт", "(?:тернослив|т[её]рн|слив)", "ушк.{0,30}игл"], "note": "armour/fruit/needle-part terminology"}
+      "expectations": {"hard": true, "required_regex": ["(?:бригандин|бригантин)", "(?:тернослив|т[её]рн|слив)", "ушк.{0,30}игл"], "note": "armour/fruit/needle-part terminology"}
     },
     {
       "id": "s000012",
