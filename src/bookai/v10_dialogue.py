@@ -39,18 +39,17 @@ class DialogueDiscourseGuard:
         value = re.sub(r",\s*,+", ",", value)
 
         if source_has_dialogue(segment.text):
-            # Interpret quote delimiters as dialogue only when English source
-            # structurally confirms direct speech.
             if re.match(r"^\s*[\"'«]", value):
                 value = re.sub(r"^\s*[\"'«]\s*", "— ", value, count=1)
             value = re.sub(r"—\s*[\"'«]\s*(?=[А-ЯЁ])", "— ", value)
             value = re.sub(r"(?<=[.!?…])\s*[\"'«]\s*(?=[А-ЯЁ])", " — ", value)
-            value = re.sub(r"(?<=[А-Яа-яЁё0-9])['\"](?=[,!?….])", "", value)
+            # Russian model output often has «реплика», — сказал. Once the opening
+            # quote became a dialogue dash, its paired closing quote must disappear.
+            value = re.sub(r"(?<=[А-Яа-яЁё0-9])['\"»](?=[,!?….])", "", value)
             value = re.sub(r"([,!?….])\s*[\"'»](?=\s*(?:—|-|$))", r"\1", value)
+            value = re.sub(r"»\s*(?=,\s*—)", "", value)
             value = re.sub(r"[\"'»]\s*$", "", value)
         else:
-            # In narration, convert only balanced straight-quote pairs. Never
-            # reinterpret an isolated quote as a dialogue boundary.
             value = re.sub(r"['\"]([^'\"\n]{1,240})['\"]", r"«\1»", value)
 
         value = re.sub(r"\s+([,.!?…])", r"\1", value)
