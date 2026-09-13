@@ -7,6 +7,7 @@ from typing import Any
 
 import chapter_reference_translation_v9ah as v9ah
 import chapter_reference_translation_v9ak as v9ak
+from bookai.semantic_fidelity import compare_short_omission_fidelity
 
 
 # Fast-path principle: keep v9ah's proven repair selection exactly as-is, but do
@@ -62,15 +63,12 @@ def _hard_issue_rows(targets, translated, memory) -> list[dict[str, Any]]:
     v3 = v9ah.v9ag.v9ad.v9ac.v9ab.v3
     issue_map: dict[str, set[str]] = {}
 
-    # Existing generic hard QA: question loss, digit changes, omissions, mixed
-    # script, entity consistency, etc.
     for issue in v3.enhanced_batch_issues(
         targets, translated, memory, source_segments=targets
     ):
         if str(getattr(issue, "severity", "")) == "hard":
             issue_map.setdefault(str(issue.id), set()).add(str(issue.code))
 
-    # v9ag's narrower source-grounded blockers (notably residual Latin prose).
     for row in v9ah.v9af._objective_issues(targets, translated):
         sid = str(row.get("id") or "")
         if sid:
@@ -78,22 +76,14 @@ def _hard_issue_rows(targets, translated, memory) -> list[dict[str, Any]]:
 
     by_id = {segment.id: (i, segment) for i, segment in enumerate(targets)}
 
-    # Cheap short-omission detector. v3 intentionally ignored very short rows to
-    # avoid false positives; here we only flag extreme shrinkage with evidence of
-    # multiple source clauses/dialogue beats.
     for i, segment in enumerate(targets):
         source = str(segment.text or "").strip()
         current = str(translated.get(segment.id) or "").strip()
         if not source or not current:
             continue
-        ratio = len(current) / max(1, len(source))
-        multi_beat = source.count(".") >= 2 or source.count("'") >= 4 or source.count('"') >= 4
-        if 20 <= len(source) < 100 and ratio < 0.42 and multi_beat:
+        if not compare_short_omission_fidelity(source, current).get("ok", True):
             issue_map.setdefault(segment.id, set()).add("short_omission")
 
-        # Numbered addresses/streets are rare but semantically brittle. Route only
-        # these explicit number-entity constructions instead of every number in the
-        # chapter; DeepSeek must preserve every value exactly.
         if _NUMBER_ADDRESS_RE.search(source):
             issue_map.setdefault(segment.id, set()).add("numbered_entity_exactness")
 
@@ -140,6 +130,11 @@ def _issue_score(targets, translated, memory, sid: str) -> tuple[int, list[str]]
                     codes.append(code)
                 score += 4
             break
+    short = compare_short_omission_fidelity(str(segment.text or ""), candidate)
+    if not short.get("ok", True):
+        if "short_omission" not in codes:
+            codes.append("short_omission")
+        score += 12
     return score, codes
 
 
@@ -216,9 +211,6 @@ ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]}.
         translated[sid] = candidate
         after_score, _ = _issue_score(targets, translated, memory, sid)
 
-        # Accept only an objectively better state. A numbered-entity row may not
-        # have had a generic QA score, so accept a non-truncated complete candidate
-        # unless it introduces a new hard defect.
         if after_score < before_score or (
             "numbered_entity_exactness" in row["codes"]
             and after_score == 0
@@ -256,8 +248,6 @@ def _quality_fast(harness, targets, translated, memory):
     stats = dict(_ORIGINAL_BASE_QUALITY(harness, targets, translated, memory) or {})
     evidence = _evidence_deepseek_cleanup(harness, targets, translated, memory)
 
-    # Rebuild the final v9 state from the actual post-repair text so the exported
-    # quality report is not stale.
     semantic: dict[str, list[dict[str, Any]]] = {}
     final_map, final_scores, det_final = v9ah.v9af.v9t._rebuild_full_map(
         targets, translated, memory, semantic
@@ -318,8 +308,6 @@ def main() -> None:
     old_backend = v9ah.v9.GigaChatLightningV9Backend
     old_base_quality = v9ah._BASE_QUALITY
 
-    # Keep v9ah routing untouched. Reuse only v9ak's transport-level recovery,
-    # which has zero quality-policy effect when a normal GigaChat batch succeeds.
     v9ah._adaptive_deep_verify = _fast_no_second_verify
     v9ah.v9.GigaChatLightningV9Backend = v9ak.GigaChatLightningV9AKBackend
     v9ah._BASE_QUALITY = _quality_fast
