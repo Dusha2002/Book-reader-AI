@@ -98,6 +98,8 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install project and run tests
+        env:
+          BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
         shell: bash
         run: |
           set -euo pipefail
