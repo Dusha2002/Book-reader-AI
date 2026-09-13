@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from .models import BookMemory, Segment
-from .v10 import GigaPrimaryTransport, _giga_json, _norm
+from .v10 import GigaPrimaryTransport, _giga_json, _norm, _usage
 
 
 class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
@@ -12,9 +13,9 @@ class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
 
     Normal path stays one tagged request per logical batch. If a response is
     truncated, missing ids are retried in fixed micro-batches (default 4), not as
-    one large repeated batch and not through recursive split cascades. A tiny JSON
-    fallback is allowed only for the final residual ids. DeepSeek is never used to
-    recover missing primary translation.
+    one large repeated batch and not through recursive split cascades. Tiny JSON
+    recovery is used for a small residual; any final stubborn id is translated by
+    one plain-text single-segment Giga call. DeepSeek is never a transport fallback.
     """
 
     name = "gigachat-3-lightning-v10-tagged-complete"
@@ -26,6 +27,7 @@ class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
             "tagged_calls": 0,
             "micro_recovery_calls": 0,
             "json_fallback_calls": 0,
+            "plain_single_calls": 0,
             "first_pass_missing": 0,
             "final_missing": 0,
         }
@@ -67,6 +69,47 @@ No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly on
                 out[sid] = ru
         return out
 
+    def _plain_single_recover(self, segment: Segment, memory: BookMemory, source_segments) -> str:
+        context = self._context_for_batch([segment], source_segments) or "нет"
+        glossary = self._relevant_glossary([segment], memory) or "нет"
+        characters = self._relevant_characters([segment], memory) or "нет"
+        client = self._ensure_client()
+        request = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Переведи один английский фрагмент литературной прозы на русский. "
+                        "Верни ТОЛЬКО полный готовый русский перевод без JSON, тегов, комментариев, "
+                        "пометок 'перевод:' и альтернатив. Ничего не сокращай и не добавляй."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"CONTEXT_ONLY: {context}\nCHARACTERS: {characters}\nGLOSSARY: {glossary}\n\n"
+                        f"SOURCE:\n{segment.text}"
+                    ),
+                },
+            ],
+            "temperature": 0.05,
+            "top_p": 0.9,
+            "max_tokens": max(1200, min(5000, int(self.max_tokens))),
+        }
+        self.transport_stats["plain_single_calls"] += 1
+        try:
+            response = client.chat(request)
+            self.usage.add(_usage(response), calls=1)
+        except Exception as exc:
+            print(f"[v10-primary-plain-single] id={segment.id} error={type(exc).__name__}", flush=True)
+            return ""
+        text = str(response.choices[0].message.content or "").strip()
+        text = re.sub(r"^```(?:text|markdown)?\s*", "", text, flags=re.I)
+        text = re.sub(r"\s*```$", "", text)
+        text = re.sub(r"^\s*(?:перевод|translation)\s*:\s*", "", text, flags=re.I)
+        return text.strip()
+
     def translate_many(self, segments: list[Segment], memory: BookMemory, *, source_segments: list[Segment] | None = None) -> tuple[dict[str, str], dict[str, str]]:
         result: dict[str, str] = {}
         regular: list[Segment] = []
@@ -103,11 +146,13 @@ No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly on
             for start in range(0, len(residual), json_batch):
                 result.update(self._json_recover(residual[start:start + json_batch], memory, source_segments))
 
+        # Final stubborn rows are safest as one input -> one plain translation.
+        # This is bounded by the tiny residual after tagged+micro+JSON recovery.
         final_missing = [s for s in regular if s.id not in result]
-        # Last bounded Giga-only single-id recovery. This is intentionally rare;
-        # it guarantees DeepSeek never receives an untranslated primary row.
         for segment in final_missing:
-            result.update(self._json_recover([segment], memory, source_segments))
+            candidate = self._plain_single_recover(segment, memory, source_segments)
+            if candidate:
+                result[segment.id] = candidate
 
         final_missing = [s for s in regular if s.id not in result]
         self.transport_stats["final_missing"] = len(final_missing)
