@@ -14,13 +14,19 @@ def test_tagged_transport_parser_recovers_all_ids():
     assert rows == {"s000001": "Первый перевод.", "s000002": "Второй\nперевод."}
 
 
-def test_tagged_transport_rejects_block_that_runs_into_next_segment():
-    # s000001 has no closing tag before s000002. It must become missing/recoverable,
-    # never swallow protocol + neighboring translation into its value.
+def test_tagged_transport_salvages_unclosed_block_at_next_opening_boundary():
+    # The next opening tag is a safe boundary. s000001 may be salvaged without
+    # swallowing s000002 even though the first closing tag is missing.
     text = '<s id="s000001">Первый перевод.\n<s id="s000002">Второй перевод.</s>'
     rows = RobustTaggedPrimaryTransport.parse_tagged(text, {"s000001", "s000002"})
-    assert "s000001" not in rows
+    assert rows["s000001"] == "Первый перевод."
     assert rows["s000002"] == "Второй перевод."
+
+
+def test_tagged_transport_does_not_salvage_final_unclosed_block():
+    text = '<s id="s000001">Первый перевод без конца'
+    rows = RobustTaggedPrimaryTransport.parse_tagged(text, {"s000001"})
+    assert "s000001" not in rows
 
 
 def test_dozen_cannot_be_half_dozen():
