@@ -9,7 +9,7 @@ from pathlib import Path
 from bookai.llm import OpenAICompatibleProvider
 from bookai.parsers.base import load_book, save_book
 from bookai.pipeline import _chapter_groups, _should_translate
-from bookai.v10 import GigaSpanPatcher, issue_summary
+from bookai.v10 import issue_summary
 from bookai.v10_deepseek import DeepSeekSemanticSpecialist
 from bookai.v10_dialogue import DialogueDiscourseGuard
 from bookai.v10_integrity import SegmentIntegrityGate
@@ -67,7 +67,7 @@ def main() -> None:
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
         "whole_book_segments": len(all_targets),
-        "architecture": "clean-v10:source-only+two-stage-integrity+v9d-dialogue-speaker+v9ad-canon-risk+quantity-v2+clause-dup-fidelity+proof-first-deepseek+boundary-salvage:no-v9-imports",
+        "architecture": "clean-v10:source-only+two-stage-integrity+v9d-dialogue-speaker+v9ad-canon-risk+quantity-v2+clause-dup-fidelity+full-local-tail+proof-first-deepseek+boundary-salvage:no-v9-imports",
     }, ensure_ascii=False), flush=True)
 
     giga = RobustTaggedPrimaryTransport()
@@ -94,13 +94,11 @@ def main() -> None:
 
     qa = V10QualityQA()
     initial_issues = qa.scan(targets, translated, memory)
-    patcher = GigaSpanPatcher(giga, qa)
-    patch_changed = patcher.repair(targets, translated, memory, initial_issues)
-    usage_after_patcher = giga.usage.as_dict()
-    post_patch_issues = qa.scan(targets, translated, memory)
 
-    local_rewriter = GigaLocalRewriter(giga, qa, max_segments=16)
-    local_changed = local_rewriter.repair(targets, translated, memory, post_patch_issues)
+    # v10 span patcher was removed from the fast path after repeated zero-yield
+    # production runs. One full local Giga editor now owns all proven cheap defects.
+    local_rewriter = GigaLocalRewriter(giga, qa, max_segments=24)
+    local_changed = local_rewriter.repair(targets, translated, memory, initial_issues)
     usage_after_local = giga.usage.as_dict()
     post_local_issues = qa.scan(targets, translated, memory)
 
@@ -159,7 +157,7 @@ def main() -> None:
     MAP.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), "utf-8")
 
     report = {
-        "version": "v10-clean-7-clause-dup-transport-salvage",
+        "version": "v10-clean-7e-local-tail-clause-transport",
         "chapter": chapter_name,
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
@@ -176,10 +174,11 @@ def main() -> None:
             "primary": "GigaChat tagged batches + next-opening boundary salvage + bounded Giga-only recovery + prompt-leak rejection",
             "segment_integrity": "pre-QA and pre-export structural gates; isolated SOURCE-only Giga recovery",
             "discourse_dialogue": "v9d source-structural quotation normalization + conservative two-speaker continuity",
-            "qa": "deterministic fidelity + QuantityFidelity v2 + duplicate-content + reliable-anchor clause-order + direction/kinship/hunting contracts",
-            "cheap_repair": "Giga exact-span patch, bounded batch rewrite, then single-row Giga fallback for objective local defects",
-            "semantic_repair": "ONE DeepSeek batch, <=8 rows; unresolved proven quantity/omission/duplicate/order hard defects have first priority",
+            "qa": "deterministic fidelity + QuantityFidelity v2 + duplicate-content + discourse-clause order + direction/kinship/hunting contracts",
+            "cheap_repair": "single bounded Giga full-local editor over the entire proven local tail + prioritized single-row fallback",
+            "semantic_repair": "ONE DeepSeek batch, <=8 rows; proven quantity/omission/duplicate/order defects get first priority with explicit obligations",
             "final_gate": "deterministic QA + zero-residual structural integrity",
+            "span_patcher": False,
             "reference_seed": False,
             "legacy_sanitizer": False,
             "deepseek_verifier": False,
@@ -209,16 +208,13 @@ def main() -> None:
             "gigachat_bible": usage_after_bible,
             "gigachat_primary": _usage_delta(usage_after_primary, usage_after_bible),
             "gigachat_integrity": _usage_delta(usage_after_integrity, usage_after_primary),
-            "gigachat_patcher": _usage_delta(usage_after_patcher, usage_after_integrity),
-            "gigachat_local_rewriter": _usage_delta(usage_after_local, usage_after_patcher),
+            "gigachat_local_rewriter": _usage_delta(usage_after_local, usage_after_integrity),
             "gigachat_final_integrity": _usage_delta(usage_after_final_integrity, usage_after_local),
             "gigachat_total": usage_after_final_integrity,
             "deepseek": dict(provider.usage),
         },
         "primary_errors": primary_errors,
         "qa_initial": issue_summary(initial_issues),
-        "patcher": {**patcher.stats, "changed_ids": patch_changed},
-        "qa_after_patch": issue_summary(post_patch_issues),
         "local_rewriter": {**local_rewriter.stats, "changed_ids": local_changed},
         "qa_after_local": issue_summary(post_local_issues),
         "deepseek_specialist": {**specialist.stats, "changed_ids": deep_changed},
