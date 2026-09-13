@@ -11,6 +11,22 @@ from .v10 import GigaPrimaryTransport, _giga_json, _norm, _usage
 _START_TAG_RE = re.compile(r"<s\s+id=[\"']?(s\d{6})[\"']?\s*>", re.I)
 _CLOSE_TAG_RE = re.compile(r"</s\s*>", re.I)
 _ANY_S_TAG_RE = re.compile(r"</?s(?:\s|>)", re.I)
+_PROMPT_LABELS = (
+    "CONTEXT_ONLY:", "CHARACTERS:", "GLOSSARY:", "SOURCE:", "TARGETS:",
+    "VOICE:", "RHYTHM:", "DIALOGUE:", "HUMOR:", "Глоссарий:", "Источник:",
+)
+
+
+def _looks_like_prompt_leak(value: str) -> bool:
+    text = str(value or "")
+    if not text:
+        return False
+    if re.search(r"\bru\s*=\s*[^;\n]{0,100};\s*gender\s*=", text, re.I):
+        return True
+    if re.search(r"<src\s+id=", text, re.I):
+        return True
+    labels = sum(label.casefold() in text.casefold() for label in _PROMPT_LABELS)
+    return labels >= 2
 
 
 class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
@@ -18,8 +34,8 @@ class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
 
     A malformed tagged response must never contaminate a neighboring segment. Each
     block is accepted only when its closing </s> occurs before the next opening <s>.
-    Corrupt/truncated ids are simply treated as missing and recovered with Giga.
-    DeepSeek is never a transport fallback.
+    Corrupt/truncated ids and prompt echoes are treated as missing and recovered
+    with Giga. DeepSeek is never a transport fallback.
     """
 
     name = "gigachat-3-lightning-v10-tagged-complete"
@@ -53,8 +69,8 @@ class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
             if close is None:
                 continue
             value = raw[body_start:close.start()].strip()
-            # Reject any protocol residue even if the outer block happened to close.
-            if not value or _ANY_S_TAG_RE.search(value):
+            # Reject protocol residue and prompt echoes even if the outer block closed.
+            if not value or _ANY_S_TAG_RE.search(value) or _looks_like_prompt_leak(value):
                 continue
             out[sid] = value
         return out
@@ -92,7 +108,7 @@ No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly on
                 continue
             sid = str(row.get("id") or "")
             ru = _norm(row.get("ru") or "")
-            if sid in expected and ru and not _ANY_S_TAG_RE.search(ru):
+            if sid in expected and ru and not _ANY_S_TAG_RE.search(ru) and not _looks_like_prompt_leak(ru):
                 out[sid] = ru
         return out
 
@@ -135,7 +151,7 @@ No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly on
         text = re.sub(r"^```(?:text|markdown)?\s*", "", text, flags=re.I)
         text = re.sub(r"\s*```$", "", text)
         text = re.sub(r"^\s*(?:перевод|translation)\s*:\s*", "", text, flags=re.I)
-        if _ANY_S_TAG_RE.search(text):
+        if _ANY_S_TAG_RE.search(text) or _looks_like_prompt_leak(text):
             return ""
         return text.strip()
 
