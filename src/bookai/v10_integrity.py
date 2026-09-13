@@ -65,8 +65,27 @@ class SegmentIntegrityGate:
             out.extend(self.scan_segment(segment, translated.get(segment.id, "")))
         return out
 
-    def _source_only_recover(self, segment: Segment) -> str:
+    @staticmethod
+    def _canon_for_source(segment: Segment, memory: BookMemory) -> list[str]:
+        """Return source-grounded canon only; never neighboring prose.
+
+        Structural recovery must not see adjacent scene text (that caused prior
+        cross-segment copying), but stable Book Bible spellings/terms are safe and
+        prevent a recovery from mutating Valens -> Velen or other canon names.
+        """
+        source_low = str(segment.text or "").casefold()
+        rows: list[str] = []
+        for en, ru in memory.glossary.items():
+            en_text = str(en or "").strip()
+            ru_text = str(ru or "").strip()
+            if en_text and ru_text and en_text.casefold() in source_low:
+                rows.append(f"{en_text} => {ru_text}")
+        return rows[:18]
+
+    def _source_only_recover(self, segment: Segment, memory: BookMemory) -> str:
         client = self.backend._ensure_client()
+        canon = self._canon_for_source(segment, memory)
+        canon_text = "\n".join(canon) if canon else "нет"
         request = {
             "model": self.backend.model,
             "messages": [
@@ -76,11 +95,12 @@ class SegmentIntegrityGate:
                         "Переведи РОВНО один английский фрагмент литературной прозы на русский. "
                         "SOURCE ниже — единственный текст, который разрешено переводить. "
                         "Не продолжай сцену, не добавляй соседний контекст, служебные подписи, XML/HTML-теги или комментарии. "
-                        "Сохрани все предложения, реплики, числа, имена, причинность и порядок. "
+                        "CANON содержит только уже подтвержденные написания имен/терминов из всей книги; соблюдай его дословно. "
+                        "Сохрани все предложения, реплики, числа, причинность и порядок. "
                         "Верни только полный готовый русский перевод этого SOURCE."
                     ),
                 },
-                {"role": "user", "content": str(segment.text or "")},
+                {"role": "user", "content": f"CANON:\n{canon_text}\n\nSOURCE:\n{str(segment.text or '')}"},
             ],
             "temperature": 0.0,
             "top_p": 0.9,
@@ -106,7 +126,7 @@ class SegmentIntegrityGate:
         *,
         source_segments: list[Segment] | None = None,
     ) -> list[str]:
-        del memory, source_segments
+        del source_segments  # recovery intentionally ignores neighboring prose
         issues = self.scan(segments, translated)
         suspect_ids = list(dict.fromkeys(issue.id for issue in issues))
         self.stats["detected"] = len(suspect_ids)
@@ -116,7 +136,7 @@ class SegmentIntegrityGate:
         for sid in suspect_ids:
             segment = by_id[sid]
             self.stats["recovery_calls"] += 1
-            candidate = self._source_only_recover(segment)
+            candidate = self._source_only_recover(segment, memory)
             if not candidate:
                 self.stats["rejected_recoveries"] += 1
                 continue
