@@ -7,6 +7,7 @@ from .models import Segment
 
 
 _DIALOGUE_IN_SOURCE = re.compile(r"(^|[.!?…]\s+)[\"'“‘]", re.M)
+_SOURCE_STARTS_DIALOGUE = re.compile(r"^\s*[\"'“‘]")
 
 
 def source_has_dialogue(text: str) -> bool:
@@ -35,14 +36,26 @@ class DialogueDiscourseGuard:
         value = str(text or "").strip()
         if not value:
             return value
+        source = str(segment.text or "")
         value = value.replace("‘", "'").replace("’", "'").replace("“", '"').replace("”", '"')
         value = re.sub(r",\s*,+", ",", value)
 
-        if source_has_dialogue(segment.text):
-            if re.match(r"^\s*[\"'«]", value):
-                value = re.sub(r"^\s*[\"'«]\s*", "— ", value, count=1)
-            value = re.sub(r"—\s*[\"'«]\s*(?=[А-ЯЁ])", "— ", value)
+        if source_has_dialogue(source):
+            # Source structure is authoritative. If the source segment itself
+            # starts as direct speech, Russian should start with a dialogue dash
+            # even when the model forgot its opening quote/dash altogether.
+            if _SOURCE_STARTS_DIALOGUE.match(source):
+                if re.match(r"^\s*[\"'«]", value):
+                    value = re.sub(r"^\s*[\"'«]\s*", "— ", value, count=1)
+                elif not re.match(r"^\s*—", value):
+                    value = "— " + value.lstrip()
+
+            # Dialogue continuation after an author clause may begin lowercase
+            # Russian (e.g. «... — сказал он, — и ...»), so do not require a
+            # capital letter after the stray English quote.
+            value = re.sub(r"—\s*[\"'«]\s*(?=[А-Яа-яЁё])", "— ", value)
             value = re.sub(r"(?<=[.!?…])\s*[\"'«]\s*(?=[А-ЯЁ])", " — ", value)
+
             # Russian model output often has «реплика», — сказал. Once the opening
             # quote became a dialogue dash, its paired closing quote must disappear.
             value = re.sub(r"(?<=[А-Яа-яЁё0-9])['\"»](?=[,!?….])", "", value)
