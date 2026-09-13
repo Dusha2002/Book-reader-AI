@@ -18,7 +18,7 @@ class GigaLocalRewriter:
         self.backend = backend
         self.qa = qa
         self.max_segments = max(1, max_segments)
-        self.stats: dict[str, Any] = {"calls": 0, "requested": 0, "accepted": 0, "rejected": 0, "selected_ids": []}
+        self.stats: dict[str, Any] = {"calls": 0, "requested": 0, "accepted": 0, "rejected": 0, "missing_rows": 0, "selected_ids": []}
 
     def repair(self, targets: list[Segment], translated: dict[str, str], memory: BookMemory, issues: list[V10Issue]) -> list[str]:
         by_id = {s.id: s for s in targets}
@@ -55,18 +55,24 @@ Do not add interpretations and do not perform broad stylistic rewriting. correct
 Return every supplied id. ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]}.
 """
         changed: list[str] = []
-        for start in range(0, len(rows), 8):
-            batch = rows[start:start + 8]
+        batch_size = 4  # full-segment JSON for 8 rows truncated in real Chapter One
+        for start in range(0, len(rows), batch_size):
+            batch = rows[start:start + batch_size]
             try:
-                obj = _giga_json(self.backend, system, {"items": batch}, max_tokens=5000)
+                obj = _giga_json(self.backend, system, {"items": batch}, max_tokens=4600)
                 self.stats["calls"] += 1
             except Exception as exc:
-                print(f"[v10-local-rewriter] batch={start // 8 + 1} error={type(exc).__name__}", flush=True)
+                print(f"[v10-local-rewriter] batch={start // batch_size + 1} error={type(exc).__name__}", flush=True)
+                self.stats["rejected"] += len(batch)
                 continue
             parsed = {str(item.get("id") or ""): item for item in (obj.get("items") or []) if isinstance(item, dict)}
             for row in batch:
                 sid = row["id"]
-                item = parsed.get(sid) or {}
+                if sid not in parsed:
+                    self.stats["missing_rows"] += 1
+                    self.stats["rejected"] += 1
+                    continue
+                item = parsed[sid]
                 candidate = _norm(item.get("corrected_ru") or "")
                 current = str(translated.get(sid) or "")
                 if not candidate or candidate == current or "<s " in candidate or "<src " in candidate:
