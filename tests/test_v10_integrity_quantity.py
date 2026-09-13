@@ -67,6 +67,12 @@ def test_quantity_v2_preserves_numbered_choice():
     assert not compare_quantity_fidelity_v2(source, good)["numbered_choice_missing"]
 
 
+def test_quantity_v2_accepts_cardinal_numbered_label():
+    source = "He faced it down the shaft of a number four spear."
+    target = "Он встретил зверя лицом к лицу с копьём номер четыре."
+    assert not compare_quantity_fidelity_v2(source, target)["numbered_choice_missing"]
+
+
 def test_quantity_v2_accepts_twelve_thousand_compound():
     source = "It was a twelve-thousand-line didactic poem."
     target = "Это была двенадцатитысячная дидактическая поэма."
