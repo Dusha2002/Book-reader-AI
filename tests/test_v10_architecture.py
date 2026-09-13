@@ -1,5 +1,6 @@
 from bookai.models import BookMemory, Segment
-from bookai.v10 import BookBibleBuilder, DeterministicQA, GigaPrimaryTransport
+from bookai.v10 import DeterministicQA, GigaPrimaryTransport
+from bookai.v10_bible import AtomicBookBibleBuilder
 
 
 def seg(text: str, sid: str = "s000001") -> Segment:
@@ -49,7 +50,7 @@ def test_book_bible_candidates_scan_across_segments():
         seg("Ziani spoke to Miel about the treadle saw.", "s000001"),
         seg("Much later Miel asked Ziani about the treadle saw again.", "s000002"),
     ]
-    candidates = BookBibleBuilder._candidate_records(rows)
+    candidates = AtomicBookBibleBuilder._candidate_records(rows)
     values = {row["candidate"].casefold() for row in candidates}
     assert "ziani" in values
-    assert any("treadle" in value and "saw" in value for value in values)
+    assert "treadle saw" in values
