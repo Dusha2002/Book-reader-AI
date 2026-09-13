@@ -1,6 +1,7 @@
 from bookai.models import BookMemory, Segment
 from bookai.v10 import DeterministicQA, GigaPrimaryTransport
 from bookai.v10_bible import AtomicBookBibleBuilder
+from bookai.v10_transport import RobustTaggedPrimaryTransport
 
 
 def seg(text: str, sid: str = "s000001") -> Segment:
@@ -9,8 +10,17 @@ def seg(text: str, sid: str = "s000001") -> Segment:
 
 def test_tagged_transport_parser_recovers_all_ids():
     text = '<s id="s000001">Первый перевод.</s>\n<s id="s000002">Второй\nперевод.</s>'
-    rows = GigaPrimaryTransport.parse_tagged(text, {"s000001", "s000002"})
+    rows = RobustTaggedPrimaryTransport.parse_tagged(text, {"s000001", "s000002"})
     assert rows == {"s000001": "Первый перевод.", "s000002": "Второй\nперевод."}
+
+
+def test_tagged_transport_rejects_block_that_runs_into_next_segment():
+    # s000001 has no closing tag before s000002. It must become missing/recoverable,
+    # never swallow protocol + neighboring translation into its value.
+    text = '<s id="s000001">Первый перевод.\n<s id="s000002">Второй перевод.</s>'
+    rows = RobustTaggedPrimaryTransport.parse_tagged(text, {"s000001", "s000002"})
+    assert "s000001" not in rows
+    assert rows["s000002"] == "Второй перевод."
 
 
 def test_dozen_cannot_be_half_dozen():
