@@ -117,7 +117,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf .bookai-cache-chapter-eval-v3-* .bookai-cache-v9ah-baseline
-          rm -f chapter-v3-* Devices_and_Desires_RU_CHAPTER_EVAL_V3.fb2
+          rm -f chapter-v3-* chapter-v9-* Devices_and_Desires_RU_*_EVAL_V9.fb2
           mkdir -p benchmark/baseline
           export BOOKAI_CHAPTER_NAME='Chapter Twelve'
           export BOOKAI_V8_SHARED_CACHE='.bookai-cache-v9ah-baseline'
@@ -125,15 +125,15 @@ jobs:
             timeout --signal=TERM --kill-after=30s 15m \
             python scripts/chapter_reference_translation_v9ah.py \
             2>&1 | tee benchmark/baseline/run.log
-          cp -f chapter-v3-* benchmark/baseline/ 2>/dev/null || true
-          cp -f Devices_and_Desires_RU_CHAPTER_EVAL_V3.fb2 benchmark/baseline/ 2>/dev/null || true
+          cp -f chapter-v9-* benchmark/baseline/ 2>/dev/null || true
+          cp -f Devices_and_Desires_RU_*_EVAL_V9.fb2 benchmark/baseline/ 2>/dev/null || true
 
       - name: Run v9ah fast path with DeepSeek specialist on Chapter Twelve
         shell: bash
         run: |
           set -euo pipefail
           rm -rf .bookai-cache-chapter-eval-v3-* .bookai-cache-v9ah-fast
-          rm -f chapter-v3-* Devices_and_Desires_RU_CHAPTER_EVAL_V3.fb2
+          rm -f chapter-v3-* chapter-v9-* Devices_and_Desires_RU_*_EVAL_V9.fb2
           mkdir -p benchmark/fast
           export BOOKAI_CHAPTER_NAME='Chapter Twelve'
           export BOOKAI_V8_SHARED_CACHE='.bookai-cache-v9ah-fast'
@@ -141,25 +141,25 @@ jobs:
             timeout --signal=TERM --kill-after=30s 15m \
             python scripts/chapter_reference_translation_v9al_fast_deepseek.py \
             2>&1 | tee benchmark/fast/run.log
-          cp -f chapter-v3-* benchmark/fast/ 2>/dev/null || true
-          cp -f Devices_and_Desires_RU_CHAPTER_EVAL_V3.fb2 benchmark/fast/ 2>/dev/null || true
+          cp -f chapter-v9-* benchmark/fast/ 2>/dev/null || true
+          cp -f Devices_and_Desires_RU_*_EVAL_V9.fb2 benchmark/fast/ 2>/dev/null || true
 
       - name: Evaluate both outputs with the same source-grounded regression
         if: always()
         shell: bash
         run: |
           set -u
-          if test -f benchmark/baseline/chapter-v3-translation-map.json; then
+          if test -f benchmark/baseline/chapter-v9-translation-map.json; then
             python scripts/evaluate_translation_regression.py \
               --dataset eval/literary_regression_v1.json \
               --output benchmark/baseline/regression.json \
-              benchmark/baseline/chapter-v3-translation-map.json || true
+              benchmark/baseline/chapter-v9-translation-map.json || true
           fi
-          if test -f benchmark/fast/chapter-v3-translation-map.json; then
+          if test -f benchmark/fast/chapter-v9-translation-map.json; then
             python scripts/evaluate_translation_regression.py \
               --dataset eval/literary_regression_v1.json \
               --output benchmark/fast/regression.json \
-              benchmark/fast/chapter-v3-translation-map.json || true
+              benchmark/fast/chapter-v9-translation-map.json || true
           fi
 
       - name: Build A/B summary
@@ -187,7 +187,7 @@ jobs:
 
           def collect(name):
               folder = root / name
-              report = read_json(folder / 'chapter-v3.json')
+              report = read_json(folder / 'chapter-v9.json')
               return {
                   'elapsed_seconds': elapsed(folder),
                   'completion_percent': report.get('completion_percent'),
@@ -209,7 +209,7 @@ jobs:
           speedup = round(b / f, 3) if b and f else None
           summary = {
               'chapter': 'Chapter Twelve',
-              'comparison': 'v9ah DeepSeek baseline vs v9ah fast-path DeepSeek',
+              'comparison': 'v9ah DeepSeek baseline vs v9ah fast-path DeepSeek v2',
               'gigachat_ultra_used': False,
               'baseline': baseline,
               'fast': fast,
