@@ -1,0 +1,154 @@
+name: v9ah-ultra-experiment
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [full-literary-reference-v9]
+    paths:
+      - 'src/bookai/gigachat_ultra_provider.py'
+      - 'scripts/chapter_reference_translation_v9ah_ultra.py'
+      - '.github/workflows/v9ah-ultra-experiment.yml'
+
+concurrency:
+  group: v9ah-ultra-experiment-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ultra-eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_BASE_URL: https://api.deepseek.com
+      GIGACHAT_AUTH_KEY: ${{ secrets.GIGACHAT_AUTH_KEY }}
+      GIGACHAT_SCOPE: GIGACHAT_API_PERS
+      GIGACHAT_BASE_URL: https://api.giga.chat/v1
+      BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
+      BOOKAI_GIGACHAT_ULTRA_MODEL: GigaChat-3-Ultra
+      BOOKAI_GIGACHAT_ULTRA_TIMEOUT: '70'
+      BOOKAI_GIGACHAT_ULTRA_MAX_TOKENS: '7000'
+      BOOKAI_GIGACHAT_ULTRA_ATTEMPTS: '2'
+      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '12'
+      BOOKAI_GIGACHAT_BATCH_CHARS: '10000'
+      BOOKAI_GIGACHAT_SPLIT_DEPTH: '4'
+      BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
+      BOOKAI_GIGACHAT_RECOVERY_ROUNDS: '1'
+      BOOKAI_GIGACHAT_TOKEN_CACHE: /tmp/bookai-gigachat-token.json
+      BOOKAI_GIGACHAT_TOKEN_CACHE_TTL: '1440'
+      BOOKAI_GIGACHAT_OAUTH_ATTEMPTS: '2'
+      BOOKAI_GIGACHAT_OAUTH_FAILURE_BACKOFF: '5'
+      BOOKAI_ANALYZER_MODEL: deepseek-flash
+      BOOKAI_TRANSLATOR_MODEL: deepseek-flash
+      BOOKAI_GATE_MODEL: deepseek-flash
+      BOOKAI_MEMORY_MODEL: deepseek-flash
+      BOOKAI_EDITOR_MODEL: deepseek-flash
+      BOOKAI_HARD_MODEL: deepseek-flash
+      BOOKAI_MAX_MODEL: deepseek-flash
+      BOOKAI_LLM_GATE: 'false'
+      BOOKAI_REASONING: none
+      BOOKAI_HYMT_HARD_THRESHOLD: '999'
+      BOOKAI_DEEPSEEK_SEGMENT_CAP: '0'
+      BOOKAI_DRAFT_RECOVERY_MAX: '0'
+      BOOKAI_SECOND_REPAIR_MAX: '0'
+      BOOKAI_FRESH_RETRANSLATE_MAX: '0'
+      BOOKAI_BOOK_INTELLIGENCE_WAIT: '30'
+      BOOKAI_TM_RETRIEVAL_K: '4'
+      BOOKAI_HYBRID_BATCH_CHARS: '10000'
+      BOOKAI_BULK_PROBE_SEGMENTS: '8'
+      BOOKAI_RETRY_ATTEMPTS: '3'
+      BOOKAI_REQUEST_TIMEOUT: '45'
+      BOOKAI_ANALYZER_REQUEST_TIMEOUT: '60'
+      BOOKAI_ANALYSIS_CHARS: '32000'
+      BOOKAI_CONTEXT_WORKERS: '3'
+      BOOKAI_RELIABILITY_WORKERS: '2'
+      BOOKAI_V9F_CUE_WORDS: '5'
+      BOOKAI_V9_REPAIR_MAX: '42'
+      BOOKAI_V9_REPAIR_WORKERS: '3'
+      BOOKAI_V9S_VERIFY_BATCH_CHARS: '11500'
+      BOOKAI_V9S_TAIL_REPAIR_MAX: '20'
+      BOOKAI_V9T_VERIFY_WORKERS: '2'
+      BOOKAI_V9T_TAIL_WORKERS: '3'
+      BOOKAI_V9X_RETRANSLATE_MAX: '15'
+      BOOKAI_V9X_RETRANSLATE_WORKERS: '2'
+      BOOKAI_V9Z_NAME_MAX: '36'
+      BOOKAI_V9Z_VERIFY_MAX: '24'
+      BOOKAI_V9Z_SECOND_REPAIR_MAX: '8'
+      BOOKAI_V9AA_NAME_MAX: '64'
+      BOOKAI_V9AA_VERIFY_EXTRA: '8'
+      BOOKAI_V9AA_VERIFY_BATCH: '10'
+      BOOKAI_V9AB_DEEP_REPAIR_MAX: '48'
+      BOOKAI_V9AB_GIGA_EXTRA_MAX: '0'
+      BOOKAI_V9AB_DEEP_BATCH: '8'
+      BOOKAI_V9AB_FINAL_VERIFY_MAX: '48'
+      BOOKAI_V9AB_VERIFY_BATCH: '12'
+      BOOKAI_V9AD_NAME_MAX: '60'
+      BOOKAI_V9AD_NAME_BATCH: '20'
+      BOOKAI_V9AF_SANITIZER_MAX: '32'
+      BOOKAI_V9AF_SANITIZER_BATCH: '18'
+      BOOKAI_V9AG_RETRY_MAX: '16'
+      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first-three-v9ah-ultra-source-only'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install project and run tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install -e '.[dev]' gigachat
+          python -m compileall -q src scripts/chapter_reference_translation_v9ah_ultra.py
+          pytest -q
+      - name: Verify secrets and Ultra access
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
+          test -n "${DEEPSEEK_API_KEY:-}" || { echo 'DEEPSEEK_API_KEY is not configured' >&2; exit 1; }
+          python - <<'PY'
+          from bookai.gigachat_ultra_provider import GigaChatUltraProvider
+          from bookai.llm import extract_json
+          p = GigaChatUltraProvider(role='smoke')
+          text = p.complete('Return only valid JSON.', 'Return exactly {"ultra":true}.', temperature=0.0)
+          obj = extract_json(text)
+          assert obj.get('ultra') is True, obj
+          print('[bookai-ultra-smoke]', p.model, p.usage)
+          PY
+      - name: Translate Chapters One through Three with v9ah + Ultra specialist
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f Devices_and_Desires.fb2
+          for word in One Two Three; do
+            slug=$(printf '%s' "$word" | tr '[:upper:]' '[:lower:]')
+            echo "[bookai] ===== START Chapter ${word} ====="
+            BOOKAI_CHAPTER_NAME="Chapter ${word}" timeout --signal=TERM --kill-after=30s 15m \
+              python scripts/chapter_reference_translation_v9ah_ultra.py 2>&1 | tee "chapter-v9-ultra-${slug}.log"
+            echo "[bookai] ===== DONE Chapter ${word} ====="
+          done
+      - name: Run source-grounded literary regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/evaluate_translation_regression.py \
+            --dataset eval/literary_regression_v1.json \
+            --output chapter-v9-ultra-regression.json \
+            chapter-v9-*-translation-map.json
+      - name: Upload v9ah Ultra experiment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-three-chapters-v9ah-ultra-specialist-experiment
+          path: |
+            Devices_and_Desires_RU_*_EVAL_V9.fb2
+            chapter-v9-*.txt
+            chapter-v9-*.json
+            chapter-v9-*.log
+            chapter-v9-ultra-*.log
+          if-no-files-found: ignore
+          retention-days: 7
