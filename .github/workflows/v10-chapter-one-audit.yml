@@ -95,6 +95,7 @@ jobs:
       - name: Build compact summary
         if: always()
         run: |
+          mkdir -p audit
           python - <<'PY'
           import json
           from pathlib import Path
@@ -133,7 +134,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v10-chapter-one-clean7-clause-dup-transport8
+          name: v10-chapter-one-clean7b-clause-dup-transport8
           path: audit
           if-no-files-found: warn
           retention-days: 7
