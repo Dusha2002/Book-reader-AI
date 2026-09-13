@@ -98,7 +98,7 @@ jobs:
           set -euo pipefail
           pip install 'bergamot==0.4.5'
           echo "BOOKAI_BERGAMOT_PYTHON=$(which python)" >> "$GITHUB_ENV"
-          python -c "import bergamot; print('[bergamot-wheel]', bergamot.__version__)"
+          python -c "import bergamot; from bergamot import Service, ServiceConfig; print('[bergamot-wheel] import_ok')"
       - name: Set up Python 3.12 for Book Reader
         uses: actions/setup-python@v5
         with:
