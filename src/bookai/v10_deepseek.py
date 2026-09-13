@@ -19,6 +19,8 @@ PROVEN_DEEPSEEK_CODES = frozenset({
     "quarter_inch",
     "short_omission",
     "omission",
+    "duplicate_content",
+    "clause_order",
 })
 
 
@@ -26,7 +28,7 @@ class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
     """One-batch DeepSeek tail with proof-first routing.
 
     Selection priority:
-      1. deterministic hard quantity/omission defects that survived Giga;
+      1. deterministic hard fidelity defects that survived Giga;
       2. other deterministic hard semantic defects;
       3. ordinary v9ad-style semantic-risk candidates.
 
@@ -131,7 +133,9 @@ Rows with must_fix_codes contain SOURCE-GROUNDED, DETERMINISTICALLY PROVEN fidel
 - numeric / quantity_obligation: restore every exact quantity and the proposition attached to it;
 - numbered_choice: preserve the numbered option/label and its surrounding action (for example, "number six" must not disappear);
 - quarter_inch: preserve the exact fraction/unit (quarter inch = 1/4 inch, or 6.35 mm if converted);
-- short_omission / omission: restore every missing source beat, clause, dialogue turn and action without inventing text.
+- short_omission / omission: restore every missing source beat, clause, dialogue turn and action without inventing text;
+- duplicate_content: remove target-only repeated clauses/phrases while preserving the single source proposition;
+- clause_order: restore the source order of reliable quantities, names and established terms without otherwise flattening Russian syntax.
 For those rows, change=true is expected unless current_ru already demonstrably contains the required meaning.
 
 For other rows, repair only genuine semantic/publication defects: invented facts, actor/action/object reversals, antecedents, chronology, causality, negation/modality, difficult word sense or technical denotation. Do not rewrite merely for taste.
@@ -187,8 +191,6 @@ ONLY JSON {"items":[{"id":"...","change":true,"corrected_ru":"...","confidence":
                     for issue in after
                     if issue.severity == "hard" and issue.code in required_codes
                 }
-                # Proof-routed rows must actually fix every defect that justified
-                # spending a DeepSeek slot; a stylistic rewrite is not enough.
                 if residual_required or after_hard > before_hard:
                     self.stats["forced_proven_rejected"] += 1
                     continue
