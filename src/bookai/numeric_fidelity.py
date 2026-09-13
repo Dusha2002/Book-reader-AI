@@ -123,8 +123,22 @@ def _digit_value(token: str) -> int | float | None:
     return int(value) if value.is_integer() else value
 
 
+def _joiner(text: str, left: _Token, right: _Token) -> str:
+    return text[left.end:right.start]
+
+
 def _joined(text: str, left: _Token, right: _Token) -> bool:
-    return bool(_JOINER_RE.fullmatch(text[left.end:right.start]))
+    return bool(_JOINER_RE.fullmatch(_joiner(text, left, right)))
+
+
+def _small_cardinal_range(left: tuple[int, str], right: tuple[int, str], gap: str) -> bool:
+    return (
+        "-" in gap
+        and left[1] == "cardinal"
+        and right[1] == "cardinal"
+        and 0 <= left[0] < 10
+        and 0 <= right[0] < 10
+    )
 
 
 def _parse_en(words: list[str]) -> int | None:
@@ -175,6 +189,18 @@ def _english_values(text: str) -> list[int | float]:
                 break
             nxt = toks[j].text
             if nxt not in _EN_WORDS or seen_ordinal:
+                break
+            gap = _joiner(text, toks[j - 1], toks[j])
+            left_word = words[-1]
+            left_cardinal = _EN_CARDINAL.get(left_word)
+            right_cardinal = _EN_CARDINAL.get(nxt)
+            if (
+                "-" in gap
+                and left_cardinal is not None
+                and right_cardinal is not None
+                and left_cardinal < 10
+                and right_cardinal < 10
+            ):
                 break
             words.append(nxt)
             if nxt in _EN_ORDINAL:
@@ -283,6 +309,9 @@ def _russian_values(text: str) -> list[int | float]:
             nxt = _ru_word_value(toks[j].text)
             if nxt is None or seen_ordinal or nxt[1] == "compound":
                 break
+            gap = _joiner(text, toks[j - 1], toks[j])
+            if _small_cardinal_range(items[-1], nxt, gap):
+                break
             items.append(nxt)
             if nxt[1] == "ordinal":
                 seen_ordinal = True
@@ -299,8 +328,10 @@ def compare_numeric_fidelity(source_en: str, target_ru: str) -> dict[str, Any]:
 
     We verify value presence, not mention multiplicity. Russian may replace a
     repeated "other two" with a pronoun or merge two clauses while preserving the
-    same quantity. Omission/completeness is handled by separate QA; this contract
-    is specifically for substitutions such as 30→31 or seven-storey→seventeen-storey.
+    same quantity. Hyphenated small numerals such as `два-три` are alternatives /
+    ranges, not arithmetic sums. Omission/completeness is handled by separate QA;
+    this contract is specifically for substitutions such as 30→31 or
+    seven-storey→seventeen-storey.
     """
     source_values = _english_values(source_en)
     target_values = _russian_values(target_ru)
