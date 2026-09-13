@@ -104,14 +104,7 @@ def _extra_reason(codes: list[str]) -> str:
 
 
 def _address_aware_route(targets, translated, memory):
-    """Normalize cheap address facts, then promote all proven draft defects early.
-
-    v9am already promotes numeric/question/material failures. Here we additionally
-    promote the two residual defect classes that the old final evidence pass kept
-    finding on Chapter Twelve: extreme short omissions and v9af-proven Latin leaks.
-    They are visible in the primary Lightning draft, so paying a later specialist
-    round-trip for them is unnecessary.
-    """
+    """Normalize cheap address facts, then promote all proven draft defects early."""
     _normalize_address_literals(targets, translated)
     selected, ranked = _BASE_CONTRACT_ROUTE(targets, translated, memory)
 
@@ -208,8 +201,108 @@ def _address_aware_route(targets, translated, memory):
     return selected_out, ranked_out
 
 
+def _strict_publication_retry(harness, targets, translated, memory, rejected_ids, before) -> tuple[list[str], int]:
+    """One bounded retry only for first-wave rows that still violate hard proof.
+
+    This replaces the old chain where Giga sanitizer retried Latin wordplay several
+    times and the final DeepSeek evidence pass retried it yet again. The retry is
+    source-grounded, small, and accepted only if every deterministic contract is
+    actually clean afterwards.
+    """
+    if not rejected_ids:
+        return [], 0
+    by_id = {str(segment.id): segment for segment in targets}
+    index = {str(segment.id): i for i, segment in enumerate(targets)}
+    payload = []
+    for sid in rejected_ids:
+        segment = by_id.get(str(sid))
+        if segment is None:
+            continue
+        i = index[str(sid)]
+        current = str(before.get(str(sid)) or translated.get(str(sid)) or "")
+        codes = _extra_failure_codes(segment, current)
+        if not codes:
+            continue
+        payload.append(
+            {
+                "id": str(sid),
+                "failed_checks": codes,
+                "source": str(segment.text or ""),
+                "current_ru": current,
+                "before_en": [str(x.text or "") for x in targets[max(0, i - 2):i]],
+                "after_en": [str(x.text or "") for x in targets[i + 1:i + 3]],
+            }
+        )
+    if not payload:
+        return [], 0
+
+    system = """You are a STRICT final EN→RU publication-contract repairer. Every input row already failed a deterministic check.
+Return a COMPLETE Russian translation of exactly SOURCE for every id. Do not merely edit one word if that leaves the
+source incomplete.
+
+Mandatory rules:
+- latin_leak: corrected_ru must contain NO accidental English/Latin prose. Render proper names in established Cyrillic.
+  If the source contains quoted rhyme, pun, or wordplay, recreate the literary device in natural Russian Cyrillic;
+  do not leave English words and do not use Latin transliteration as a substitute.
+- short_omission: preserve every source sentence/dialogue beat, speaker attribution, action, adjective and object.
+- Preserve all numbers, polarity, questions, chronology, roles and causal relations exactly.
+- BEFORE_EN/AFTER_EN are context only; never import their facts into corrected_ru.
+
+ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]}; exactly one row per input id.
+"""
+    try:
+        obj = v9am.v9al.v9ah.v8._complete_json(harness.gate, system, {"items": payload})
+        raw = obj.get("items") or []
+    except Exception as exc:
+        print(f"[v9an-strict-retry] error={type(exc).__name__}", flush=True)
+        return [], 1
+
+    parsed = {
+        str(row.get("id") or ""): row
+        for row in raw
+        if isinstance(row, dict) and str(row.get("id") or "")
+    }
+    recovered: list[str] = []
+    for item in payload:
+        sid = item["id"]
+        segment = by_id[sid]
+        row = parsed.get(sid) or {}
+        candidate = v9am.v9al.v9ah.v9._norm_text(row.get("corrected_ru") or "")
+        if not candidate:
+            continue
+        try:
+            candidate = v9am.v9al.v9ah.v9ag.v9ad._canonicalize_candidate(segment, candidate, memory)
+        except Exception:
+            pass
+        if not candidate:
+            continue
+        if v9am._contract_failures(str(segment.text or ""), candidate):
+            continue
+        if _extra_failure_codes(segment, candidate):
+            continue
+        old = str(before.get(sid) or "")
+        if v9am.v9al.v9ah.v9._fatal_count(segment, candidate, memory) > v9am.v9al.v9ah.v9._fatal_count(segment, old, memory):
+            continue
+        translated[sid] = candidate
+        recovered.append(sid)
+
+    print(
+        "[v9an-strict-retry] "
+        + json.dumps(
+            {
+                "requested_ids": [item["id"] for item in payload],
+                "recovered_ids": recovered,
+                "unrecovered_ids": [item["id"] for item in payload if item["id"] not in recovered],
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
+    return recovered, 1
+
+
 def _extra_validated_repair(harness, targets, translated, memory, routes):
-    """Keep v9am contract validation and additionally enforce short/Latin fixes."""
+    """Keep v9am validation; strict-retry only failed short/Latin obligations."""
     before = {
         str(row.get("id") or ""): str(translated.get(str(row.get("id") or "")) or "")
         for row in routes
@@ -232,20 +325,27 @@ def _extra_validated_repair(harness, targets, translated, memory, routes):
         else:
             accepted.append(sid)
 
-    _PRE_REPAIR_STATS["extra_validation_rejected_ids"] = rejected
+    recovered, retry_calls = _strict_publication_retry(
+        harness, targets, translated, memory, rejected, before
+    )
+    accepted.extend(sid for sid in recovered if sid not in accepted)
+    rejected_final = [sid for sid in rejected if sid not in set(recovered)]
+
+    _PRE_REPAIR_STATS["extra_validation_rejected_initial_ids"] = rejected
+    _PRE_REPAIR_STATS["strict_retry_calls"] = retry_calls
+    _PRE_REPAIR_STATS["strict_retry_recovered_ids"] = recovered
+    _PRE_REPAIR_STATS["extra_validation_rejected_final_ids"] = rejected_final
     _PRE_REPAIR_STATS["repair_changed_after_extra_validation"] = len(accepted)
-    if rejected:
+    if rejected_final:
         print(
             "[v9an-extra-repair-reject] "
-            + json.dumps({"rejected_ids": rejected, "accepted_ids": accepted}, ensure_ascii=False),
+            + json.dumps({"rejected_ids": rejected_final, "accepted_ids": accepted}, ensure_ascii=False),
             flush=True,
         )
-    return accepted, calls
+    return accepted, calls + retry_calls
 
 
 def _address_aware_hard_rows(targets, translated, memory):
-    # Run the same narrow postcondition after sanitizer/repair in case an upstream
-    # edit reintroduced the English label. This pass is deterministic and free.
     _normalize_address_literals(targets, translated)
     return _BASE_HARD_ROWS(targets, translated, memory)
 
@@ -269,7 +369,10 @@ def _annotate_report() -> None:
             "pre_repair_publication_contracts": (
                 "short multi-beat omissions and v9af-proven Latin leaks are mandatory first-wave DeepSeek routes"
             ),
-            "deepseek_repair_batch_minimum": 12,
+            "failed_publication_contract_retry": (
+                "one strict bounded DeepSeek retry replaces repeated Giga sanitizer plus final generic evidence when first-wave output still fails proof"
+            ),
+            "deepseek_repair_batch_minimum": 16,
             "gigachat_ultra_used": False,
         }
     )
@@ -293,8 +396,8 @@ def main() -> None:
             current_batch = int(os.environ.get("BOOKAI_V9AB_DEEP_BATCH") or "0")
         except ValueError:
             current_batch = 0
-        if current_batch < 12:
-            os.environ["BOOKAI_V9AB_DEEP_BATCH"] = "12"
+        if current_batch < 16:
+            os.environ["BOOKAI_V9AB_DEEP_BATCH"] = "16"
         v9am.main()
     finally:
         v9am._contract_route_v9am = old_route
