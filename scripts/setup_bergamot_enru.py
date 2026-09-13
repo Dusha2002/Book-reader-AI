@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import shutil
 import urllib.request
 from pathlib import Path
@@ -12,41 +13,46 @@ FILES = {
     "vocab.enru.spm.gz": 100_000,
     "lex.50.50.enru.s2t.bin.gz": 100_000,
 }
-RAW_URL = "https://raw.githubusercontent.com/mozilla/firefox-translations-models/main/models/base/enru"
+# Public mirror of the archived Firefox/Bergamot model files. Pin a concrete
+# revision instead of `main` so the benchmark is reproducible.
+HF_REVISION = "ffb33a7be7079f5c1a1d8db07f9b5c432f0bcc87"
+HF_BASE_URL = (
+    "https://huggingface.co/TiberiuCristianLeon/Bergamot/resolve/"
+    + HF_REVISION
+    + "/base/enru"
+)
 
 
 def _copy_or_download(name: str, destination: Path, source_dir: Path | None) -> None:
-    if destination.exists() and destination.stat().st_size > 128:
+    if destination.exists() and destination.stat().st_size > 256:
         return
     if source_dir is not None:
         source = source_dir / name
         if not source.exists():
             raise FileNotFoundError(f"Missing Bergamot source file: {source}")
-        # A Git-LFS pointer is ~130 bytes. Refuse it explicitly rather than failing
-        # later while gunzipping with a confusing message.
         if source.stat().st_size <= 256:
-            raise RuntimeError(
-                f"{source} is still a Git LFS pointer ({source.stat().st_size} bytes); run git lfs pull first"
-            )
+            raise RuntimeError(f"{source} is not a real model object")
         shutil.copy2(source, destination)
         return
 
-    # Fallback is useful outside CI only when raw.githubusercontent happens to serve
-    # the LFS object. CI uses a sparse Git-LFS checkout deliberately.
     tmp = destination.with_suffix(destination.suffix + ".part")
-    request = urllib.request.Request(
-        f"{RAW_URL}/{name}", headers={"User-Agent": "BookReaderAI-Bergamot-Eval/1.0"}
-    )
-    with urllib.request.urlopen(request, timeout=120) as response, tmp.open("wb") as out:
+    url = f"{HF_BASE_URL}/{name}?download=true"
+    request = urllib.request.Request(url, headers={"User-Agent": "BookReaderAI-Bergamot-Eval/1.0"})
+    with urllib.request.urlopen(request, timeout=180) as response, tmp.open("wb") as out:
         shutil.copyfileobj(response, out)
     if tmp.stat().st_size <= 256:
         tmp.unlink(missing_ok=True)
-        raise RuntimeError("Raw GitHub returned a Git LFS pointer; provide --source-dir after git lfs pull")
+        raise RuntimeError(f"Bergamot mirror returned an invalid object for {name}")
     tmp.replace(destination)
+    print(
+        f"[bergamot-download] file={name} bytes={destination.stat().st_size} "
+        f"sha256={hashlib.sha256(destination.read_bytes()).hexdigest()[:16]}",
+        flush=True,
+    )
 
 
 def _gunzip(source: Path, target: Path) -> None:
-    if target.exists() and target.stat().st_size > 128:
+    if target.exists() and target.stat().st_size > 256:
         return
     tmp = target.with_suffix(target.suffix + ".part")
     with gzip.open(source, "rb") as inp, tmp.open("wb") as out:
@@ -97,10 +103,9 @@ alignment: soft
 """,
         encoding="utf-8",
     )
-    print(config)
     print(
-        f"[bergamot-setup] model={model.stat().st_size} vocab={vocab.stat().st_size} "
-        f"shortlist={shortlist.stat().st_size} config={config}",
+        f"[bergamot-setup] revision={HF_REVISION} model={model.stat().st_size} "
+        f"vocab={vocab.stat().st_size} shortlist={shortlist.stat().st_size} config={config}",
         flush=True,
     )
     return config
