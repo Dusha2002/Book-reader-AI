@@ -110,6 +110,7 @@ jobs:
               'timing': report.get('timing'),
               'book_bible': report.get('book_bible'),
               'segment_integrity': report.get('segment_integrity'),
+              'final_integrity_repair': report.get('final_integrity_repair'),
               'final_integrity': report.get('final_integrity'),
               'dialogue_guard': report.get('dialogue_guard'),
               'speaker_guard': report.get('speaker_guard'),
@@ -132,7 +133,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v10-chapter-one-clean6b-sourceonly-integrity
+          name: v10-chapter-one-clean6c-two-stage-integrity
           path: audit
           if-no-files-found: warn
           retention-days: 7
