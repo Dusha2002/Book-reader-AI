@@ -45,9 +45,6 @@ def extract_quantity_obligations(source_en: str) -> list[QuantityObligation]:
     text = str(source_en or "")
     out: list[QuantityObligation] = []
     occupied: list[tuple[int, int]] = []
-
-    # Longest/more specific forms first so `half a dozen` is not also counted as
-    # a generic `a dozen` obligation.
     patterns: list[tuple[re.Pattern[str], str]] = [
         (re.compile(r"\bhalf\s+(?:a\s+)?dozen\b", re.I), "half_dozen"),
         (re.compile(r"\b(?P<n>one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+)\s+dozen\b", re.I), "n_dozen"),
@@ -81,23 +78,17 @@ def extract_quantity_obligations(source_en: str) -> list[QuantityObligation]:
 def _extra_target_values(target_ru: str) -> list[int]:
     text = str(target_ru or "").casefold().replace("ё", "е")
     out: list[int] = []
-
-    # Russian lexicalized dozen forms.
     out.extend([6] * len(re.findall(r"\bполдюжин\w*\b", text)))
-    # `две/три дюжины` etc. — count the combined value, not merely the multiplier.
     ru_n = {
         "одна": 1, "одну": 1, "одной": 1, "две": 2, "двух": 2, "три": 3,
         "трех": 3, "четыре": 4, "четырех": 4, "пять": 5, "шесть": 6,
     }
     for match in re.finditer(r"\b(одна|одну|одной|две|двух|три|трех|четыре|четырех|пять|шесть)\s+дюжин\w*\b", text):
         out.append(12 * ru_n[match.group(1)])
-    # Bare дюжина/дюжину/дюжины etc., excluding the полдюжины token already handled.
     for match in re.finditer(r"\bдюжин\w*\b", text):
         prefix = text[max(0, match.start() - 4):match.start()]
         if "пол" not in prefix:
             out.append(12)
-
-    # Productive compounds such as двенадцатитысячный/двенадцатитысячное.
     for prefix, value in _RU_THOUSAND_PREFIXES.items():
         out.extend([value] * len(re.findall(rf"\b{re.escape(prefix)}[а-я]+\b", text)))
     return out
@@ -117,21 +108,19 @@ def _numbered_choice_present(value: int, target_ru: str) -> bool:
 
 
 def compare_quantity_fidelity_v2(source_en: str, target_ru: str) -> dict[str, Any]:
-    """Proposition-aware quantity fidelity layered on top of numeric_fidelity.
-
-    The legacy contract intentionally ignores multiplicity. v2 keeps that behavior
-    for generic numbers, but adds multiplicity for explicit lexical quantity
-    obligations (dozen/half-dozen/N dozen) and preserves numbered choices such as
-    `number six`. This catches `twelve ... a dozen` -> one surviving 12 without
-    making every repeated pronoun-like number globally strict.
-    """
+    """Proposition-aware quantity fidelity layered on top of numeric_fidelity."""
     base = compare_numeric_fidelity_v10(source_en, target_ru)
     obligations = extract_quantity_obligations(source_en)
     target_values = list(base.get("target_values") or []) + _extra_target_values(target_ru)
     target_counts = Counter(target_values)
 
-    # Base source numeric mentions plus lexical obligations. If source says `twelve`
-    # and later `a dozen`, value 12 must survive twice, not merely somewhere once.
+    # Russian productive compounds can satisfy a legacy base-number obligation that
+    # the old parser could not see (e.g. twelve-thousand-line -> двенадцатитысячная).
+    base_missing = [
+        value for value in (base.get("missing") or [])
+        if target_counts.get(value, 0) <= 0
+    ]
+
     source_counts = Counter(base.get("source_values") or [])
     for obligation in obligations:
         if obligation.kind != "numbered_choice":
@@ -141,11 +130,8 @@ def compare_quantity_fidelity_v2(source_en: str, target_ru: str) -> dict[str, An
     for value, required in source_counts.items():
         present = target_counts.get(value, 0)
         if present < required:
-            # Only elevate multiplicity beyond the base contract when a lexical
-            # quantity obligation accounts for the extra required mention.
             lexical_for_value = [o for o in obligations if o.value == value and o.kind != "numbered_choice"]
-            base_missing = value in set(base.get("missing") or [])
-            if base_missing or lexical_for_value:
+            if value in set(base_missing) or lexical_for_value:
                 missing_mentions.append({"value": value, "required": required, "present": present})
 
     numbered_missing: list[dict[str, Any]] = []
@@ -154,8 +140,9 @@ def compare_quantity_fidelity_v2(source_en: str, target_ru: str) -> dict[str, An
             numbered_missing.append({"value": obligation.value, "source_phrase": obligation.source_phrase})
 
     return {
-        "ok": bool(base.get("ok", True)) and not missing_mentions and not numbered_missing,
+        "ok": not base_missing and not missing_mentions and not numbered_missing,
         "base": base,
+        "base_missing": base_missing,
         "obligations": [o.__dict__ for o in obligations],
         "target_values": target_values,
         "missing_mentions": missing_mentions,
