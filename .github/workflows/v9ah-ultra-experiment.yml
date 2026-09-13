@@ -2,16 +2,10 @@ name: v9ah-ultra-experiment
 
 on:
   workflow_dispatch:
-  push:
-    branches: [full-literary-reference-v9]
-    paths:
-      - 'src/bookai/gigachat_ultra_provider.py'
-      - 'scripts/chapter_reference_translation_v9ah_ultra.py'
-      - '.github/workflows/v9ah-ultra-experiment.yml'
 
 concurrency:
-  group: v9ah-ultra-experiment-${{ github.ref }}
-  cancel-in-progress: true
+  group: bookai-gigachat-pers-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read

@@ -4,6 +4,7 @@ import json
 
 import chapter_reference_translation_v9ah as v9ah
 import chapter_reference_translation_v9y as v9y
+from bookai.gigachat_runtime_guard import install_gigachat_runtime_guard
 from bookai.gigachat_ultra_provider import GigaChatUltraProvider
 
 
@@ -37,12 +38,13 @@ def _annotate() -> None:
     architecture = dict(data.get("architecture") or {})
     architecture.update(
         {
-            "experiment": "v9ah-ultra-specialist-ab",
+            "experiment": "v9ah-ultra-specialist-promoted",
             "base": "v9ah unchanged",
             "primary_translation": "GigaChat-3-Lightning",
             "sparse_semantic_specialist": "GigaChat-3-Ultra",
             "deepseek_specialist_replaced": True,
             "deepseek_legacy_fallbacks_retained": True,
+            "gigachat_rate_limit_guard": True,
             "gold_reference_available_to_pipeline": False,
         }
     )
@@ -51,6 +53,7 @@ def _annotate() -> None:
 
 
 def main() -> None:
+    install_gigachat_runtime_guard()
     v9y.adapt_harness = _adapt_harness_with_ultra
     try:
         v9ah.main()
