@@ -49,6 +49,36 @@ _MATERIAL_RULES: dict[str, tuple[re.Pattern[str], tuple[str, ...]]] = {
 _LEAD_SCREW_SOURCE = re.compile(r"\blead[- ]screws?\b", re.I)
 _LEAD_SCREW_RU = re.compile(r"\bходов\w*\s+винт\w*\b", re.I)
 
+# High-precision ordering phrases only. Do not attempt a general temporal/causal
+# parser here: these rules exist to catch obvious reversals such as
+# `put his best stuff at the front` -> `приберег лучшее напоследок`.
+_ORDER_RULES: tuple[tuple[str, re.Pattern[str], re.Pattern[str], re.Pattern[str]], ...] = (
+    (
+        "at_the_front",
+        re.compile(r"\bat the front\b", re.I),
+        re.compile(r"(?:\bвперед\w*\b|\bсперед\w*\b|\bв начал\w*\b|\bперв\w*\s+(?:част|план|мест)\w*\b|\bпередн\w*\b)", re.I),
+        re.compile(r"(?:\bнапоследок\b|\bв конц\w*\b|\bсзади\b|\bпозади\b)", re.I),
+    ),
+    (
+        "at_the_back",
+        re.compile(r"\bat the back\b", re.I),
+        re.compile(r"(?:\bсзади\b|\bпозади\b|\bв задн\w*\b|\bв конц\w*\b)", re.I),
+        re.compile(r"(?:\bвперед\w*\b|\bсперед\w*\b|\bв начал\w*\b|\bпередн\w*\b)", re.I),
+    ),
+    (
+        "at_the_beginning",
+        re.compile(r"\bat the beginning\b", re.I),
+        re.compile(r"(?:\bв начал\w*\b|\bсначала\b|\bв самом начал\w*\b)", re.I),
+        re.compile(r"(?:\bв конц\w*\b|\bнапоследок\b|\bпод конец\b)", re.I),
+    ),
+    (
+        "at_the_end",
+        re.compile(r"\bat the end\b", re.I),
+        re.compile(r"(?:\bв конц\w*\b|\bпод конец\b|\bнапоследок\b|\bв самом конц\w*\b)", re.I),
+        re.compile(r"(?:\bв начал\w*\b|\bсначала\b|\bсперед\w*\b)", re.I),
+    ),
+)
+
 
 def compare_question_fidelity(source_en: str, target_ru: str) -> dict[str, Any]:
     """Require every explicit source question mark to survive."""
@@ -117,6 +147,31 @@ def compare_material_fidelity(source_en: str, target_ru: str) -> dict[str, Any]:
         "ok": not missing,
         "required": required,
         "missing": missing,
+    }
+
+
+def compare_order_fidelity(source_en: str, target_ru: str) -> dict[str, Any]:
+    """Catch only source-proven front/back/beginning/end reversals."""
+    source = str(source_en or "")
+    target = str(target_ru or "")
+    required: list[str] = []
+    missing: list[str] = []
+    contradictory: list[str] = []
+    for name, source_re, positive_re, opposite_re in _ORDER_RULES:
+        if not source_re.search(source):
+            continue
+        required.append(name)
+        positive = bool(positive_re.search(target))
+        opposite = bool(opposite_re.search(target))
+        if not positive:
+            missing.append(name)
+        if opposite:
+            contradictory.append(name)
+    return {
+        "ok": not missing and not contradictory,
+        "required": required,
+        "missing": missing,
+        "contradictory": contradictory,
     }
 
 
