@@ -12,19 +12,36 @@ FILES = {
     "vocab.enru.spm.gz": 100_000,
     "lex.50.50.enru.s2t.bin.gz": 100_000,
 }
-BASE_URL = (
-    "https://media.githubusercontent.com/media/mozilla/"
-    "firefox-translations-models/main/models/base/enru"
-)
+RAW_URL = "https://raw.githubusercontent.com/mozilla/firefox-translations-models/main/models/base/enru"
 
 
-def _download(url: str, destination: Path) -> None:
+def _copy_or_download(name: str, destination: Path, source_dir: Path | None) -> None:
     if destination.exists() and destination.stat().st_size > 128:
         return
+    if source_dir is not None:
+        source = source_dir / name
+        if not source.exists():
+            raise FileNotFoundError(f"Missing Bergamot source file: {source}")
+        # A Git-LFS pointer is ~130 bytes. Refuse it explicitly rather than failing
+        # later while gunzipping with a confusing message.
+        if source.stat().st_size <= 256:
+            raise RuntimeError(
+                f"{source} is still a Git LFS pointer ({source.stat().st_size} bytes); run git lfs pull first"
+            )
+        shutil.copy2(source, destination)
+        return
+
+    # Fallback is useful outside CI only when raw.githubusercontent happens to serve
+    # the LFS object. CI uses a sparse Git-LFS checkout deliberately.
     tmp = destination.with_suffix(destination.suffix + ".part")
-    request = urllib.request.Request(url, headers={"User-Agent": "BookReaderAI-Bergamot-Eval/1.0"})
+    request = urllib.request.Request(
+        f"{RAW_URL}/{name}", headers={"User-Agent": "BookReaderAI-Bergamot-Eval/1.0"}
+    )
     with urllib.request.urlopen(request, timeout=120) as response, tmp.open("wb") as out:
         shutil.copyfileobj(response, out)
+    if tmp.stat().st_size <= 256:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError("Raw GitHub returned a Git LFS pointer; provide --source-dir after git lfs pull")
     tmp.replace(destination)
 
 
@@ -37,11 +54,11 @@ def _gunzip(source: Path, target: Path) -> None:
     tmp.replace(target)
 
 
-def prepare(output: Path) -> Path:
+def prepare(output: Path, source_dir: Path | None = None) -> Path:
     output.mkdir(parents=True, exist_ok=True)
     for name in FILES:
         compressed = output / name
-        _download(f"{BASE_URL}/{name}", compressed)
+        _copy_or_download(name, compressed, source_dir)
         _gunzip(compressed, output / name.removesuffix(".gz"))
 
     model = output / "model.enru.intgemm.alphas.bin"
@@ -92,8 +109,9 @@ alignment: soft
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default="/tmp/bookai-bergamot-enru")
+    parser.add_argument("--source-dir", default="")
     args = parser.parse_args()
-    prepare(Path(args.output))
+    prepare(Path(args.output), Path(args.source_dir) if args.source_dir else None)
 
 
 if __name__ == "__main__":
