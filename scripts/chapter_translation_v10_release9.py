@@ -8,11 +8,16 @@ from pathlib import Path
 
 from bookai.llm import OpenAICompatibleProvider
 from bookai.parsers.base import load_book, save_book
-from bookai.release_final import FinalBookBibleBuilder, FinalDeepSeekSemanticSpecialist, FinalV10QualityQA
+from bookai.release_final import (
+    FinalBookBibleBuilder,
+    FinalDeepSeekSemanticSpecialist,
+    FinalDialogueDiscourseGuard,
+    FinalV10QualityQA,
+    ResidualHardDeepSeekRepair,
+)
 from bookai.v10 import issue_summary
 from bookai.v10_integrity import SegmentIntegrityGate
 from bookai.v10_release import (
-    HardenedDialogueDiscourseGuard,
     HardenedLocalRewriter,
     HardenedRobustTaggedPrimaryTransport,
     select_numbered_chapter,
@@ -59,7 +64,7 @@ def main() -> None:
         "source_chars": sum(len(s.text) for s in targets),
         "whole_book_segments": len(all_targets),
         "selection": selection,
-        "architecture": "clean9:complete-chapter+filtered-canon+evidence-aware-qa+single-focused-release-deepseek",
+        "architecture": "clean9.1:complete-chapter+safe-dialogue+evidence-aware-qa+focused-release-deepseek+fail-closed-residual-rescue",
     }, ensure_ascii=False), flush=True)
 
     giga = HardenedRobustTaggedPrimaryTransport()
@@ -79,7 +84,7 @@ def main() -> None:
     integrity_changed = integrity.repair(targets, translated, memory, source_segments=all_targets)
     usage_after_integrity = giga.usage.as_dict()
 
-    dialogue_guard = HardenedDialogueDiscourseGuard()
+    dialogue_guard = FinalDialogueDiscourseGuard()
     dialogue_after_primary = dialogue_guard.apply(targets, translated)
     speaker_primary = DialogueSpeakerContinuityGuard()
     speaker_after_primary = speaker_primary.apply(targets, translated)
@@ -115,8 +120,8 @@ def main() -> None:
     speaker_integrity = DialogueSpeakerContinuityGuard()
     speaker_after_integrity = speaker_integrity.apply(targets, translated)
 
-    # Release tail: no second Giga rewrite cascade. The evidence-aware QA strips known false positives,
-    # then ONE larger DeepSeek batch receives every remaining release-blocking segment.
+    # Release tail: no second Giga rewrite cascade. Evidence-aware QA first removes
+    # proven false positives; one larger DeepSeek batch receives residual HARD rows.
     release_qa = FinalV10QualityQA(demote_clause_order=True)
     release_pre_issues = release_qa.scan(targets, translated, memory)
     release_local_changed: list[str] = []
@@ -133,6 +138,20 @@ def main() -> None:
     dialogue_after_release_semantic = dialogue_guard.apply(targets, translated)
     speaker_release_semantic = DialogueSpeakerContinuityGuard()
     speaker_after_release_semantic = speaker_release_semantic.apply(targets, translated)
+
+    # Rare provider/schema-confidence collapse is rescued by one small, proof-gated
+    # call over ONLY the rows that still fail deterministic release QA.
+    residual_pre_issues = release_qa.scan(targets, translated, memory)
+    residual_repair = ResidualHardDeepSeekRepair(
+        provider,
+        release_qa,
+        max_segments=max(4, int(os.getenv("BOOKAI_V10_RESIDUAL_DEEP_MAX") or "12")),
+    )
+    residual_changed = residual_repair.repair(targets, translated, memory, residual_pre_issues)
+    dialogue_after_residual = dialogue_guard.apply(targets, translated)
+    speaker_residual = DialogueSpeakerContinuityGuard()
+    speaker_after_residual = speaker_residual.apply(targets, translated)
+    residual_post_issues = release_qa.scan(targets, translated, memory)
 
     publication_integrity = SegmentIntegrityGate(giga)
     publication_integrity_changed = publication_integrity.repair(
@@ -182,7 +201,7 @@ def main() -> None:
     MAP.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), "utf-8")
 
     report = {
-        "version": "v10-clean-9-focused-release",
+        "version": "v10-clean-9.1-focused-release",
         "chapter": chapter_name,
         "chapter_selection": selection,
         "segments": len(targets),
@@ -199,8 +218,9 @@ def main() -> None:
             "chapter_selection": "numbered Chapter N boundary; internal FB2 section headings remain inside chapter",
             "book_bible": "SOURCE-ONLY canon with runtime pruning of false common-word character entries",
             "primary": "GigaChat tagged batches + bounded recovery",
-            "qa": "evidence-aware quantity/fraction/half-inch/name filtering; hard semantic contracts retained",
-            "release_tail": "NO second Giga cascade; one bounded DeepSeek batch over residual HARD segments",
+            "dialogue": "source-aware dialogue dash normalization preserving genuine nested Russian guillemets",
+            "qa": "evidence-aware quantity/fraction/half-inch/name/mixed-notation filtering; hard semantic contracts retained",
+            "release_tail": "NO second Giga cascade; one bounded DeepSeek batch plus one small fail-closed rescue only if HARD remains",
             "final_gate": "zero untranslated + zero structural integrity + zero HARD release QA issues",
             "reference_seed": False,
         },
@@ -221,6 +241,7 @@ def main() -> None:
             "after_integrity_changed_ids": dialogue_after_integrity,
             "after_release_local_changed_ids": release_local_changed,
             "after_release_semantic_changed_ids": dialogue_after_release_semantic,
+            "after_residual_changed_ids": dialogue_after_residual,
             "after_publication_integrity_changed_ids": dialogue_after_publication_integrity,
         },
         "speaker_guard": {
@@ -229,6 +250,7 @@ def main() -> None:
             "after_semantic": {**dict(speaker_semantic.stats), "changed_ids": speaker_after_semantic},
             "after_integrity": {**dict(speaker_integrity.stats), "changed_ids": speaker_after_integrity},
             "after_release_semantic": {**dict(speaker_release_semantic.stats), "changed_ids": speaker_after_release_semantic},
+            "after_residual": {**dict(speaker_residual.stats), "changed_ids": speaker_after_residual},
             "after_publication_integrity": {**dict(speaker_publication_integrity.stats), "changed_ids": speaker_after_publication_integrity},
         },
         "primary_transport": dict(giga.transport_stats),
@@ -249,9 +271,12 @@ def main() -> None:
         "qa_after_local": issue_summary(post_local_issues),
         "deepseek_specialist": {**specialist.stats, "changed_ids": deep_changed},
         "qa_release_pre": issue_summary(release_pre_issues),
-        "release_local_rewriter": {"disabled": True, "reason": "replaced by one focused residual DeepSeek batch", "changed_ids": []},
+        "release_local_rewriter": {"disabled": True, "reason": "replaced by focused semantic release tail", "changed_ids": []},
         "qa_release_mid": issue_summary(release_mid_issues),
         "release_deepseek_specialist": {**release_specialist.stats, "changed_ids": release_deep_changed},
+        "qa_residual_pre": issue_summary(residual_pre_issues),
+        "residual_deepseek_repair": dict(residual_repair.stats),
+        "qa_residual_post": issue_summary(residual_post_issues),
         "qa_final": issue_summary(final_issues),
         "final_hard": {
             "count": len(final_hard),
