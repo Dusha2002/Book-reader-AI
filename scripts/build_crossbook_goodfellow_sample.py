@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html as html_lib
+import io
 import json
 import re
 import sys
@@ -8,99 +9,63 @@ import unicodedata
 import urllib.request
 from pathlib import Path
 
-from bs4 import BeautifulSoup
+from pypdf import PdfReader
 
-SOURCE_URL = "https://www.deeplearningbook.org/contents/intro.html"
-
-WINDOWS = (
-    ("The third wave of neural networks research began", "deep models to leverage large labeled datasets."),
-    ("One may wonder why deep learning has only recently become recognized", "unsupervised or semi-supervised learning."),
-    ("Another key reason that neural networks are wildly successful today", "An individual neuron or small collection of neurons is not particularly useful."),
-    ("Biological neurons are not especially densely connected.", "biological neural networks may be even larger than this plot portrays."),
-    ("In retrospect, it is not particularly surprising that neural networks with fewer", "expected to continue well into the future."),
-)
+# Public mirror of the same MIT Press edition used for the cross-book diagnostic.
+# We extract physical PDF pages 35–40, matching the user-provided original range.
+SOURCE_URL = "https://raw.githubusercontent.com/janishar/mit-deep-learning-book-pdf/master/complete-book-bookmarked-pdf/deeplearningbook.pdf"
+PAGE_FIRST = 35
+PAGE_LAST = 40
 
 _LIGATURES = str.maketrans({
     "ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl",
-    "–": "-", "—": "-", "’": "'", "“": '"', "”": '"',
+    "–": "-", "—": "—", "’": "'", "“": '“', "”": '”',
     "\u200b": "", "\u200c": "", "\u200d": "", "\ufeff": "",
 })
 
 
 def _norm(text: str) -> str:
     value = unicodedata.normalize("NFKC", str(text or "")).translate(_LIGATURES).replace("\u00ad", "")
-    value = re.sub(r"(?<=\w)-\s+(?=\w)", "", value)
-    value = re.sub(r"\s+", " ", value).strip()
-    return value
+    # Join only typesetting hyphenation at a newline before a lowercase continuation.
+    value = re.sub(r"(?<=[A-Za-z])-\s*\n\s*(?=[a-z])", "", value)
+    value = re.sub(r"[ \t]+", " ", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
 
 
-def _download() -> str:
-    request = urllib.request.Request(SOURCE_URL, headers={"User-Agent": "Mozilla/5.0 Book-reader-AI benchmark"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return response.read().decode("utf-8", errors="replace")
+def _download_pdf() -> bytes:
+    request = urllib.request.Request(SOURCE_URL, headers={"User-Agent": "Book-reader-AI cross-book benchmark/1.0"})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        data = response.read()
+    if not data.startswith(b"%PDF"):
+        raise RuntimeError(f"Benchmark source is not a PDF: {data[:32]!r}")
+    return data
 
 
-def _clean_page_text(raw_html: str) -> str:
-    soup = BeautifulSoup(raw_html, "html.parser")
-    text = _norm(soup.get_text(" ", strip=True))
-    text = re.sub(r"\b\d{1,3}\s+CHAPTER 1\. INTRODUCTION\b", " ", text, flags=re.I)
-    text = re.sub(r"\bCHAPTER 1\. INTRODUCTION\b", " ", text, flags=re.I)
-    return _norm(text)
+def _page_text(pdf_bytes: bytes) -> list[str]:
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    if len(reader.pages) < PAGE_LAST:
+        raise RuntimeError(f"Benchmark PDF has only {len(reader.pages)} pages")
+    pages: list[str] = []
+    for physical_page in range(PAGE_FIRST, PAGE_LAST + 1):
+        raw = reader.pages[physical_page - 1].extract_text() or ""
+        text = _norm(raw)
+        # Strip repeated running header and a standalone printed page number, while
+        # preserving section numbers, citations, quantities and figure references.
+        text = re.sub(r"(?im)^\s*CHAPTER\s+1\.\s+INTRODUCTION\s*$", "", text)
+        text = re.sub(r"(?im)^\s*\d{1,2}\s*$", "", text)
+        text = _norm(text)
+        if len(text) < 200:
+            raise RuntimeError(f"Physical page {physical_page} extracted only {len(text)} chars")
+        pages.append(text)
+    return pages
 
 
-def _find_anchor(text: str, marker: str, *, start: int = 0) -> int:
-    marker = _norm(marker)
-    pos = text.find(marker, start)
-    if pos >= 0:
-        return pos
-    words = re.findall(r"[A-Za-z0-9]+", marker)
-    if not words:
-        return -1
-    pattern = r"\b" + r"[\s\W]{0,24}".join(re.escape(word) for word in words) + r"\b"
-    match = re.search(pattern, text[start:], flags=re.I)
-    return start + match.start() if match else -1
-
-
-def _diagnostic(text: str, marker: str) -> str:
-    low = text.casefold()
-    probes = ["third wave", "neural networks", "deep learning", "introduction"]
-    positions = {probe: low.find(probe) for probe in probes}
-    snippets = {}
-    for probe, pos in positions.items():
-        if pos >= 0:
-            snippets[probe] = text[max(0, pos - 120):pos + 360]
-    return json.dumps({
-        "marker": marker,
-        "text_chars": len(text),
-        "probe_positions": positions,
-        "snippets": snippets,
-        "head": text[:500],
-    }, ensure_ascii=False)
-
-
-def _extract_window(text: str, start_marker: str, end_marker: str) -> str:
-    start_marker = _norm(start_marker)
-    end_marker = _norm(end_marker)
-    start = _find_anchor(text, start_marker)
-    if start < 0:
-        raise RuntimeError("Could not resolve benchmark start marker: " + _diagnostic(text, start_marker))
-    end = _find_anchor(text, end_marker, start=start)
-    if end < 0:
-        raise RuntimeError("Could not resolve benchmark end marker: " + _diagnostic(text[start:], end_marker))
-    end += len(end_marker)
-    value = _norm(text[start:end])
-    if len(value) < 100:
-        raise RuntimeError(f"Benchmark window unexpectedly short: {len(value)} chars")
-    return value
-
-
-def _select(raw_html: str) -> list[str]:
-    text = _clean_page_text(raw_html)
-    selected = [_extract_window(text, start, end) for start, end in WINDOWS]
-    source_chars = sum(len(row) for row in selected)
-    if not (3000 <= source_chars <= 18000):
-        raise RuntimeError(f"Unexpected benchmark size: {source_chars} chars")
-    return selected
+def _prose_blocks(pages: list[str]) -> list[str]:
+    # Keep page boundaries as segment boundaries. Figure/axis fragments are useful to
+    # the diagnostic too: a general translator must not hallucinate around numbers,
+    # labels, acronyms or cross-references. No gold/reference text is used here.
+    return [f"[Physical page {PAGE_FIRST + i}]\n{text}" for i, text in enumerate(pages)]
 
 
 def _fb2(paragraphs: list[str]) -> str:
@@ -131,16 +96,26 @@ def _fb2(paragraphs: list[str]) -> str:
 def main() -> None:
     out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "crossbook-goodfellow")
     out_dir.mkdir(parents=True, exist_ok=True)
-    selected = _select(_download())
+    pages = _page_text(_download_pdf())
+    selected = _prose_blocks(pages)
     source_text = "\n\n".join(selected)
+    if not (7000 <= len(source_text) <= 30000):
+        raise RuntimeError(f"Unexpected pages 35–40 benchmark size: {len(source_text)} chars")
+    # Sanity checks describe the domain rather than exact prose and catch wrong-edition downloads.
+    required = ("deep learning", "neural", "LSTM", "CIFAR")
+    missing = [term for term in required if term.casefold() not in source_text.casefold()]
+    if missing:
+        raise RuntimeError(f"Benchmark pages do not match expected chapter/domain; missing={missing}")
+
     (out_dir / "sample.fb2").write_text(_fb2(selected), "utf-8")
     (out_dir / "sample-source.txt").write_text(source_text, "utf-8")
     meta = {
         "source_url": SOURCE_URL,
-        "selection": "five continuous prose windows spanning the late third-wave discussion and sections 1.2.2–1.2.3; figures omitted",
-        "windows": len(selected),
+        "physical_pages": [PAGE_FIRST, PAGE_LAST],
+        "page_count": len(pages),
         "source_chars": len(source_text),
         "reference_text_embedded": False,
+        "selection": "physical PDF pages 35–40; no gold translation used by the pipeline",
     }
     (out_dir / "sample-meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
     print(json.dumps(meta, ensure_ascii=False))
