@@ -14,6 +14,11 @@ class GigaChatUltraProvider:
     Ultra is the existing sparse semantic specialist. Transient 429 responses are
     retried in place with bounded exponential backoff so throttling never creates a
     new translation branch/layer or silently downgrades semantic verification.
+
+    Production deliberately keeps the retry budget small: a sparse specialist must
+    improve a fast chapter, not turn one unavailable request into a chapter-wide
+    stall. The surrounding pipeline can preserve the current translation and its
+    deterministic review state when the specialist is temporarily unavailable.
     """
 
     def __init__(self, *, role: str = "gate") -> None:
@@ -22,16 +27,16 @@ class GigaChatUltraProvider:
         self.base_url = (os.getenv("GIGACHAT_BASE_URL") or "https://api.giga.chat/v1").strip()
         self.model = (os.getenv("BOOKAI_GIGACHAT_ULTRA_MODEL") or "GigaChat-3-Ultra").strip()
         self.role = role
-        self.timeout_seconds = max(20, min(120, int(os.getenv("BOOKAI_GIGACHAT_ULTRA_TIMEOUT") or "70")))
+        self.timeout_seconds = max(20, min(90, int(os.getenv("BOOKAI_GIGACHAT_ULTRA_TIMEOUT") or "55")))
         self.max_tokens = max(1200, int(os.getenv("BOOKAI_GIGACHAT_ULTRA_MAX_TOKENS") or "7000"))
-        self.max_attempts = max(1, min(10, int(os.getenv("BOOKAI_GIGACHAT_ULTRA_ATTEMPTS") or "5")))
+        self.max_attempts = max(1, min(5, int(os.getenv("BOOKAI_GIGACHAT_ULTRA_ATTEMPTS") or "3")))
         self.rate_limit_backoff = max(
             0.5,
             min(10.0, float(os.getenv("BOOKAI_GIGACHAT_RATE_LIMIT_BACKOFF") or "2.0")),
         )
         self.rate_limit_max_sleep = max(
             self.rate_limit_backoff,
-            min(30.0, float(os.getenv("BOOKAI_GIGACHAT_RATE_LIMIT_MAX_SLEEP") or "15.0")),
+            min(20.0, float(os.getenv("BOOKAI_GIGACHAT_RATE_LIMIT_MAX_SLEEP") or "12.0")),
         )
         self._client = None
         self._lock = threading.Lock()
@@ -41,6 +46,7 @@ class GigaChatUltraProvider:
             "total_tokens": 0,
             "requests": 0,
             "cost": 0.0,
+            "failed_requests": 0,
         }
         if not self.credentials:
             raise ValueError("GIGACHAT_AUTH_KEY is required for GigaChat-3-Ultra")
@@ -50,19 +56,29 @@ class GigaChatUltraProvider:
             return self._client
         from gigachat import GigaChat
 
+        started = time.perf_counter()
+        print(
+            f"[gigachat-ultra] role={self.role} init model={self.model} timeout={self.timeout_seconds}s "
+            f"attempts={self.max_attempts}",
+            flush=True,
+        )
         client = GigaChat(
             credentials=self.credentials,
             scope=self.scope,
             base_url=self.base_url,
             verify_ssl_certs=False,
             timeout=self.timeout_seconds,
-            max_retries=1,
-            retry_backoff_factor=0.8,
+            max_retries=0,
+            retry_backoff_factor=0.0,
         )
         token = client.get_token()
         if not str(getattr(token, "access_token", "") or ""):
             raise RuntimeError("GigaChat Ultra OAuth succeeded but access_token is empty")
         self._client = client
+        print(
+            f"[gigachat-ultra] role={self.role} init_ok elapsed={time.perf_counter()-started:.2f}s",
+            flush=True,
+        )
         return client
 
     @staticmethod
@@ -89,6 +105,11 @@ class GigaChatUltraProvider:
         last_error: Exception | None = None
         for attempt in range(self.max_attempts):
             started = time.perf_counter()
+            print(
+                f"[gigachat-ultra] role={self.role} request_start attempt={attempt + 1}/{self.max_attempts} "
+                f"input_chars={len(system) + len(user)}",
+                flush=True,
+            )
             try:
                 # Physical-person GigaChat API effectively has one request stream.
                 # Serialize specialist calls instead of producing our own 429 burst.
@@ -111,10 +132,13 @@ class GigaChatUltraProvider:
                 return content
             except Exception as exc:
                 last_error = exc
+                with self._lock:
+                    self.usage["failed_requests"] += 1
                 limited = is_rate_limit_error(exc)
                 print(
                     f"[gigachat-ultra] role={self.role} attempt={attempt + 1}/{self.max_attempts} "
-                    f"rate_limited={str(limited).lower()} error={type(exc).__name__}: {str(exc)[:220]}",
+                    f"elapsed={time.perf_counter()-started:.2f}s rate_limited={str(limited).lower()} "
+                    f"error={type(exc).__name__}: {str(exc)[:220]}",
                     flush=True,
                 )
                 if attempt + 1 >= self.max_attempts:
@@ -125,7 +149,7 @@ class GigaChatUltraProvider:
                         self.rate_limit_backoff * (2 ** attempt),
                     ) + random.uniform(0.05, 0.35)
                 else:
-                    delay = min(4.0, 0.8 * (2**attempt)) + random.uniform(0.05, 0.25)
+                    delay = min(3.0, 0.7 * (2**attempt)) + random.uniform(0.05, 0.20)
                 print(
                     f"[gigachat-ultra] role={self.role} retry_same_request sleep={delay:.2f}s",
                     flush=True,
