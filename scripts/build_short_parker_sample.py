@@ -10,6 +10,8 @@ from pathlib import Path
 from bookai.parsers.base import load_book
 
 
+# Variant A is the original targeted regression. B and C are disjoint distributed
+# prose windows. C is used for the current anti-overfit cycle.
 ANCHORS = (
     "last lesson but one",
     "brass bushing",
@@ -22,17 +24,25 @@ MAX_SOURCE_CHARS = 4800
 VARIANT = (os.getenv("BOOKAI_SHORT_VARIANT") or "a").strip().casefold()
 
 
-def _fb2(target_paragraphs: list[str], memory_paragraphs: list[str]) -> str:
-    target_body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in target_paragraphs)
-    memory_body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in memory_paragraphs)
+def _fb2(paragraphs: list[str]) -> str:
+    body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in paragraphs)
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
-  <description><title-info><genre>sf_fantasy</genre><author><first-name>K. J.</first-name><last-name>Parker</last-name></author><book-title>Devices and Desires — short benchmark</book-title><lang>en</lang></title-info><document-info><id>bookai-short-parker</id><version>1.0</version></document-info></description>
-  <body><section><title><p>Chapter One</p></title>
-{target_body}
-    </section><section><title><p>Chapter Two</p></title>
-{memory_body}
-    </section></body>
+  <description>
+    <title-info>
+      <genre>sf_fantasy</genre>
+      <author><first-name>K. J.</first-name><last-name>Parker</last-name></author>
+      <book-title>Devices and Desires — short anti-overfit benchmark</book-title>
+      <lang>en</lang>
+    </title-info>
+    <document-info><id>bookai-short-parker</id><version>1.0</version></document-info>
+  </description>
+  <body>
+    <section>
+      <title><p>Chapter One</p></title>
+{body}
+    </section>
+  </body>
 </FictionBook>
 '''
 
@@ -42,7 +52,8 @@ def _targeted_sample(segments):
     seen: set[str] = set()
     matched: dict[str, str] = {}
     for anchor in ANCHORS:
-        match = next((s for s in segments if anchor.casefold() in str(s.text or "").casefold()), None)
+        low_anchor = anchor.casefold()
+        match = next((s for s in segments if low_anchor in str(s.text or "").casefold()), None)
         if match is None or match.id in seen:
             continue
         text = str(match.text or "").strip()
@@ -67,7 +78,9 @@ def _eligible_prose(segments):
     for segment in segments:
         text = str(segment.text or "").strip()
         low = text.casefold()
-        if not (320 <= len(text) <= 1250) or any(anchor in low for anchor in old):
+        if not (320 <= len(text) <= 1250):
+            continue
+        if any(anchor in low for anchor in old):
             continue
         if text.count(" ") < 45 or sum(ch.isalpha() for ch in text) / max(1, len(text)) < 0.62:
             continue
@@ -80,6 +93,7 @@ def _spread_sample(segments, fractions: tuple[float, ...], mode: str, excluded_i
     excluded_ids = set(excluded_ids or ())
     if len(eligible) < 20:
         raise RuntimeError(f"Not enough Parker prose for unseen spread sample: {len(eligible)}")
+
     chosen = []
     seen: set[str] = set()
     chars = 0
@@ -95,7 +109,9 @@ def _spread_sample(segments, fractions: tuple[float, ...], mode: str, excluded_i
                 continue
             candidate = eligible[pos]
             text = str(candidate.text or "").strip()
-            if candidate.id in seen or candidate.id in excluded_ids or chars + len(text) > MAX_SOURCE_CHARS:
+            if candidate.id in seen or candidate.id in excluded_ids:
+                continue
+            if chars + len(text) > MAX_SOURCE_CHARS:
                 continue
             match = candidate
             break
@@ -104,9 +120,16 @@ def _spread_sample(segments, fractions: tuple[float, ...], mode: str, excluded_i
         chosen.append(match)
         seen.add(match.id)
         chars += len(str(match.text or "").strip())
+
     if len(chosen) < 4 or chars < 2200:
         raise RuntimeError(f"Unseen Parker sample too small: segments={len(chosen)} chars={chars}")
-    return chosen, {"selection_mode": mode, "fractions": list(fractions), "eligible_segments": len(eligible), "excluded_known_anchors": True, "excluded_prior_variant_ids": len(excluded_ids)}
+    return chosen, {
+        "selection_mode": mode,
+        "fractions": list(fractions),
+        "eligible_segments": len(eligible),
+        "excluded_known_anchors": True,
+        "excluded_prior_variant_ids": len(excluded_ids),
+    }
 
 
 def _unseen_spread_sample(segments):
@@ -115,25 +138,19 @@ def _unseen_spread_sample(segments):
 
 def _unseen_spread_sample_c(segments):
     prior, _ = _unseen_spread_sample(segments)
-    return _spread_sample(segments, (0.06, 0.23, 0.42, 0.73, 0.94), "unseen-distributed-c", {segment.id for segment in prior})
-
-
-def _memory_paragraphs(segments, chosen_ids: set[str]) -> list[str]:
-    rows: list[str] = []
-    for segment in segments:
-        if segment.id in chosen_ids:
-            continue
-        text = str(segment.text or "").strip()
-        if not text or re.fullmatch(r"Chapter\s+\S+", text, re.I):
-            continue
-        rows.append(text)
-    return rows
+    return _spread_sample(
+        segments,
+        (0.06, 0.23, 0.42, 0.73, 0.94),
+        "unseen-distributed-c",
+        {segment.id for segment in prior},
+    )
 
 
 def main() -> None:
     source = Path(sys.argv[1] if len(sys.argv) > 1 else "Devices_and_Desires.fb2")
     out_dir = Path(sys.argv[2] if len(sys.argv) > 2 else "short-parker")
     out_dir.mkdir(parents=True, exist_ok=True)
+
     document = load_book(source)
     segments = [s for s in document.segments if str(s.text or "").strip()]
     if VARIANT in {"c", "fresh", "unseen-c"}:
@@ -144,18 +161,25 @@ def main() -> None:
         chosen, selection_meta = _targeted_sample(segments)
 
     paragraphs = [str(s.text or "").strip() for s in chosen]
-    memory_rows = _memory_paragraphs(segments, {s.id for s in chosen})
     source_text = "\n\n".join(paragraphs)
-    (out_dir / "sample.fb2").write_text(_fb2(paragraphs, memory_rows), "utf-8")
-    # Stable across A/B/C: BookMemory is keyed to the actual original book rather than
-    # to whichever short target window is currently under test.
+    (out_dir / "sample.fb2").write_text(_fb2(paragraphs), "utf-8")
+    # Parker already arrives as a full FB2. Keep an exact, target-independent copy as
+    # the stable whole-book memory source so variants A/B/C share one BookMemory key.
     (out_dir / "memory-source.fb2").write_bytes(source.read_bytes())
     (out_dir / "sample-source.txt").write_text(source_text, "utf-8")
     meta = {
-        "variant": VARIANT, "source": str(source), "segments": len(chosen), "source_chars": len(source_text),
-        "source_segment_ids": [s.id for s in chosen], "source_chapters": [s.chapter for s in chosen],
-        "memory_scope": "stable-original-whole-book", "memory_segments": len(segments),
-        "memory_chars": sum(len(str(s.text or "")) for s in segments), "reference_text_embedded": False, **selection_meta,
+        "variant": VARIANT,
+        "source": str(source),
+        "segments": len(chosen),
+        "source_chars": len(source_text),
+        "source_segment_ids": [s.id for s in chosen],
+        "source_chapters": [s.chapter for s in chosen],
+        "memory_scope": "stable-whole-book-source",
+        "memory_segments": len(segments),
+        "memory_chars": sum(len(str(s.text or "")) for s in segments),
+        "memory_source": "memory-source.fb2",
+        "reference_text_embedded": False,
+        **selection_meta,
     }
     (out_dir / "sample-meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
     print(json.dumps(meta, ensure_ascii=False))
