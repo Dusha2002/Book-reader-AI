@@ -15,7 +15,7 @@ permissions:
 jobs:
   chapter-eval:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 360
     env:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       BOOKAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -90,6 +90,7 @@ jobs:
       BOOKAI_V9AF_SANITIZER_BATCH: '18'
       BOOKAI_V9AG_RETRY_MAX: '16'
       BOOKAI_V8_SHARED_CACHE: '.bookai-cache-production-literary-v1'
+      BOOKAI_FULL_CHAPTER_TIMEOUT_SECONDS: '1200'
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python 3.12
@@ -147,6 +148,38 @@ jobs:
             --fail-on-hard \
             --fail-on-objective \
             chapter-v9-*-translation-map.json
+      - name: Translate complete book after green sample
+        if: ${{ success() && github.event_name == 'push' && contains(github.event.head_commit.message, '[full-book]') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '[bookai] sample translation and 150-case gate passed; starting complete book'
+          timeout --signal=TERM --kill-after=60s 300m \
+            python scripts/production_full_book_translation.py 2>&1 | tee production-full-book.log
+      - name: Validate complete book release
+        if: ${{ success() && github.event_name == 'push' && contains(github.event.head_commit.message, '[full-book]') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/evaluate_translation_regression.py \
+            --dataset eval/literary_regression_v2.json \
+            --output production-full-book-regression.json \
+            --fail-on-hard \
+            --fail-on-objective \
+            chapter-v9-*-translation-map.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('production-full-book.json').read_text('utf-8'))
+          if report.get('status') != 'complete':
+              raise SystemExit('full book is not release-clean: ' + json.dumps(report.get('review_required_chapters') or [], ensure_ascii=False))
+          output = Path(report['output'])
+          if not output.exists() or output.stat().st_size < 10000:
+              raise SystemExit('full book artifact is missing or unexpectedly small')
+          if report.get('segments_merged') != report.get('segments_total'):
+              raise SystemExit('full book segment invariant failed')
+          print('[bookai-full-release] status=complete segments=', report['segments_total'], 'bytes=', output.stat().st_size)
+          PY
       - name: Upload production evaluation
         if: always()
         uses: actions/upload-artifact@v4
@@ -154,9 +187,10 @@ jobs:
           name: production-literary-v1-source-only-evaluation
           path: |
             Devices_and_Desires_RU_*_EVAL_V9.fb2
+            Devices_and_Desires_RU_PRODUCTION_FULL.fb2
             chapter-v9-*.txt
             chapter-v9-*.json
             production-*.json
             production-*.log
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14
