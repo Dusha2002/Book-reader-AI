@@ -4,6 +4,7 @@ import html as html_lib
 import json
 import re
 import sys
+import unicodedata
 import urllib.request
 from pathlib import Path
 
@@ -11,61 +12,30 @@ from bs4 import BeautifulSoup
 
 SOURCE_URL = "https://www.deeplearningbook.org/contents/intro.html"
 
-# Short, semantically unique anchors deliberately avoid crossing PDF-derived page
-# boundaries in the official HTML. The extracted text remains the full prose between
-# the anchors; only the locator is tolerant of layout drift.
 WINDOWS = (
-    (
-        "The third wave of neural networks research began",
-        "deep models to leverage large labeled datasets.",
-    ),
-    (
-        "One may wonder why deep learning has only recently become recognized",
-        "unsupervised or semi-supervised learning.",
-    ),
-    (
-        "Another key reason that neural networks are wildly successful today",
-        "An individual neuron or small collection of neurons is not particularly useful.",
-    ),
-    (
-        "Biological neurons are not especially densely connected.",
-        "biological neural networks may be even larger than this plot portrays.",
-    ),
-    (
-        "In retrospect, it is not particularly surprising that neural networks with fewer",
-        "expected to continue well into the future.",
-    ),
+    ("The third wave of neural networks research began", "deep models to leverage large labeled datasets."),
+    ("One may wonder why deep learning has only recently become recognized", "unsupervised or semi-supervised learning."),
+    ("Another key reason that neural networks are wildly successful today", "An individual neuron or small collection of neurons is not particularly useful."),
+    ("Biological neurons are not especially densely connected.", "biological neural networks may be even larger than this plot portrays."),
+    ("In retrospect, it is not particularly surprising that neural networks with fewer", "expected to continue well into the future."),
 )
 
 _LIGATURES = str.maketrans({
-    "ﬁ": "fi",
-    "ﬂ": "fl",
-    "ﬀ": "ff",
-    "ﬃ": "ffi",
-    "ﬄ": "ffl",
-    "–": "-",
-    "—": "-",
-    "’": "'",
-    "“": '"',
-    "”": '"',
+    "ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl",
+    "–": "-", "—": "-", "’": "'", "“": '"', "”": '"',
+    "\u200b": "", "\u200c": "", "\u200d": "", "\ufeff": "",
 })
 
 
 def _norm(text: str) -> str:
-    value = str(text or "").translate(_LIGATURES).replace("\u00ad", "")
-    # The official HTML is generated from typeset pages and contains discretionary
-    # line-break hyphenation such as "net- works" and "prob- lems". Join only a
-    # hyphen followed by whitespace, so genuine compounds such as layer-wise remain.
+    value = unicodedata.normalize("NFKC", str(text or "")).translate(_LIGATURES).replace("\u00ad", "")
     value = re.sub(r"(?<=\w)-\s+(?=\w)", "", value)
     value = re.sub(r"\s+", " ", value).strip()
     return value
 
 
 def _download() -> str:
-    request = urllib.request.Request(
-        SOURCE_URL,
-        headers={"User-Agent": "Book-reader-AI cross-book benchmark/1.0"},
-    )
+    request = urllib.request.Request(SOURCE_URL, headers={"User-Agent": "Mozilla/5.0 Book-reader-AI benchmark"})
     with urllib.request.urlopen(request, timeout=30) as response:
         return response.read().decode("utf-8", errors="replace")
 
@@ -73,7 +43,6 @@ def _download() -> str:
 def _clean_page_text(raw_html: str) -> str:
     soup = BeautifulSoup(raw_html, "html.parser")
     text = _norm(soup.get_text(" ", strip=True))
-    # Remove only repeated printed page scaffolding. Do not rewrite benchmark prose.
     text = re.sub(r"\b\d{1,3}\s+CHAPTER 1\. INTRODUCTION\b", " ", text, flags=re.I)
     text = re.sub(r"\bCHAPTER 1\. INTRODUCTION\b", " ", text, flags=re.I)
     return _norm(text)
@@ -84,15 +53,29 @@ def _find_anchor(text: str, marker: str, *, start: int = 0) -> int:
     pos = text.find(marker, start)
     if pos >= 0:
         return pos
-
-    # Last-resort locator: tolerate punctuation/spacing inserted by generated HTML,
-    # while still requiring every anchor word in the same order and close together.
     words = re.findall(r"[A-Za-z0-9]+", marker)
     if not words:
         return -1
-    pattern = r"\b" + r"[\s\W]{0,12}".join(re.escape(word) for word in words) + r"\b"
+    pattern = r"\b" + r"[\s\W]{0,24}".join(re.escape(word) for word in words) + r"\b"
     match = re.search(pattern, text[start:], flags=re.I)
     return start + match.start() if match else -1
+
+
+def _diagnostic(text: str, marker: str) -> str:
+    low = text.casefold()
+    probes = ["third wave", "neural networks", "deep learning", "introduction"]
+    positions = {probe: low.find(probe) for probe in probes}
+    snippets = {}
+    for probe, pos in positions.items():
+        if pos >= 0:
+            snippets[probe] = text[max(0, pos - 120):pos + 360]
+    return json.dumps({
+        "marker": marker,
+        "text_chars": len(text),
+        "probe_positions": positions,
+        "snippets": snippets,
+        "head": text[:500],
+    }, ensure_ascii=False)
 
 
 def _extract_window(text: str, start_marker: str, end_marker: str) -> str:
@@ -100,12 +83,10 @@ def _extract_window(text: str, start_marker: str, end_marker: str) -> str:
     end_marker = _norm(end_marker)
     start = _find_anchor(text, start_marker)
     if start < 0:
-        raise RuntimeError(f"Could not resolve benchmark start marker: {start_marker!r}")
+        raise RuntimeError("Could not resolve benchmark start marker: " + _diagnostic(text, start_marker))
     end = _find_anchor(text, end_marker, start=start)
     if end < 0:
-        raise RuntimeError(f"Could not resolve benchmark end marker: {end_marker!r}")
-    # Exact end length is safe for exact anchors; fuzzy fallback gets a small tail and
-    # is normalized below. The marker itself is diagnostics-only, never a reference.
+        raise RuntimeError("Could not resolve benchmark end marker: " + _diagnostic(text[start:], end_marker))
     end += len(end_marker)
     value = _norm(text[start:end])
     if len(value) < 100:
