@@ -20,9 +20,9 @@ _TECH_STYLE_WORDS = (
     "technical", "academic", "scientific", "expository", "textbook", "engineering", "research",
 )
 _RU_ENDINGS = (
-    "ыми", "ими", "ого", "ему", "ому", "ыми", "ими", "ую", "юю", "ая", "яя", "ой", "ей",
+    "ыми", "ими", "ого", "ему", "ому", "ую", "юю", "ами", "ями", "ая", "яя", "ой", "ей",
     "ый", "ий", "ое", "ее", "ые", "ие", "ых", "их", "ам", "ям", "ах", "ях", "ом", "ем",
-    "ами", "ями", "ов", "ев", "ей", "ам", "ям", "ы", "и", "а", "я", "у", "ю", "е", "о", "ь",
+    "ов", "ев", "ью", "ы", "и", "а", "я", "у", "ю", "е", "о", "ь",
 )
 
 
@@ -180,17 +180,17 @@ class FinalV10QualityQA(_UniversalQualityQA):
         source = str(segment.text or "")
         low = str(target or "").casefold().replace("ё", "е")
 
-        # Generic attributive-inch measurement plus an explicit feet-long measurement.
-        # The inch quantity may describe width/diameter/section, but it must not become
-        # a second length in Russian merely because both numbers survived.
+        # Generic attributive inch measurement plus a separate explicit feet-long
+        # measurement. The first quantity describes section/width/diameter unless
+        # source explicitly says otherwise; merely preserving both numbers is not enough.
         dual = bool(re.search(
-            r"\b(?:[a-z]+(?:-[a-z]+){0,2}|\d+(?:/\d+)?)\s*[- ]inch\s+[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2}\s*,[^.!?]{0,120}\b(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+feet?\s+long\b",
+            r"\b[a-z0-9/]+[- ]inch\b[^.!?]{0,120},[^.!?]{0,120}\b(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+feet?\s+long\b",
             source,
             re.I,
         ))
         bad_binding = bool(
-            re.search(r"\bдюйм\w*\s+в\s+длин\w*\b", low)
-            or re.search(r"\bдлин\w*\s+(?:в\s+)?(?:\w+\s+){0,2}дюйм\w*\b", low)
+            re.search(r"\b[а-яё]*дюйм\w*\s+в\s+длин\w*\b", low)
+            or re.search(r"\bдлин\w*\s+(?:в\s+)?(?:\w+\s+){0,2}[а-яё]*дюйм\w*\b", low)
         )
         if dual and bad_binding and not any(row.code == "dimension_relation" for row in out):
             out.append(V10Issue(
@@ -242,8 +242,6 @@ class FinalV10QualityQA(_UniversalQualityQA):
             expected = str(ru or "").strip()
             if not term or not expected or not _source_phrase_present(source, term):
                 continue
-            # Single ordinary words are too polysemous for a hard invariant. Multiword
-            # or hyphenated terms are much safer and carry the domain terminology load.
             if " " not in term and "-" not in term:
                 continue
             if _ru_phrase_present(expected, target):
