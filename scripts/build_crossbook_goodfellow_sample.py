@@ -52,6 +52,10 @@ _LIGATURES = str.maketrans({
 
 def _norm(text: str) -> str:
     value = str(text or "").translate(_LIGATURES).replace("\u00ad", "")
+    # The official HTML is generated from typeset pages and contains discretionary
+    # line-break hyphenation such as "net- works" and "prob- lems". Join only a
+    # hyphen followed by whitespace, so genuine compounds such as layer-wise remain.
+    value = re.sub(r"(?<=\w)-\s+(?=\w)", "", value)
     value = re.sub(r"\s+", " ", value).strip()
     return value
 
