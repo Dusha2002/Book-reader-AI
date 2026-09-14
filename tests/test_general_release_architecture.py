@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from bookai.models import BookMemory, Segment
-from bookai.release_final import FinalDialogueDiscourseGuard, FinalV10QualityQA
+from bookai.release_final import FinalDeepSeekSemanticSpecialist, FinalDialogueDiscourseGuard, FinalV10QualityQA
 from bookai.v10_publication_release import _priority_term_candidates
 
 
@@ -16,6 +16,7 @@ def _segment(text: str, sid: str = "s1") -> Segment:
 
 def _technical_memory() -> BookMemory:
     memory = BookMemory()
+    memory.domain = "academic_technical"
     memory.style.narrative_voice = "Technical academic expository prose."
     return memory
 
@@ -77,6 +78,28 @@ def test_source_acronyms_are_allowed_in_technical_translation():
     )
     assert not any(issue.code == "latin_leak" for issue in issues)
     assert not any(issue.code == "acronym_fidelity" for issue in issues)
+
+
+def test_source_backed_lowercase_math_symbol_is_not_a_latin_leak():
+    qa = FinalV10QualityQA()
+    memory = _technical_memory()
+    issues = qa.scan_segment(
+        _segment("The encoder can represent each training example with the code i."),
+        "Кодировщик может представить каждый обучающий пример кодом i.",
+        memory,
+    )
+    assert not any(issue.code == "latin_leak" for issue in issues)
+
+
+def test_one_letter_english_article_is_not_mistaken_for_math_notation():
+    qa = FinalV10QualityQA()
+    memory = _technical_memory()
+    issues = qa.scan_segment(
+        _segment("A model can learn a useful representation."),
+        "Модель может выучить a полезное представление.",
+        memory,
+    )
+    assert any(issue.code == "latin_leak" and issue.severity == "hard" for issue in issues)
 
 
 def test_missing_acronym_is_hard_when_publication_policy_is_confident():
@@ -220,6 +243,20 @@ def test_priority_term_candidates_include_definition_and_citation_concepts():
     assert terms["adaptive sequence memory"].startswith("explicit_acronym_definition")
     assert "kernel families" in terms
     assert terms["kernel families"] == "citation_adjacent_concept"
+
+
+def test_semantic_hint_can_route_low_generic_risk_segment_to_specialist():
+    class Provider:
+        pass
+
+    qa = FinalV10QualityQA()
+    specialist = FinalDeepSeekSemanticSpecialist(Provider(), qa, max_segments=2)
+    memory = BookMemory()
+    memory.semantic_hints["formal motion"] = "a proposal put to a vote, not physical movement"
+    hinted = _segment("The committee considered the formal motion.", "s1")
+    plain = _segment("The committee considered the document.", "s2")
+    selected = specialist._select([hinted, plain], {"s1": "", "s2": ""}, memory, [])
+    assert [row.id for row in selected] == ["s1"]
 
 
 def test_citation_surname_spelling_is_preserved_in_academic_domain():
