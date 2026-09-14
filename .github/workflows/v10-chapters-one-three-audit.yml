@@ -12,6 +12,8 @@ on:
       - scripts/chapter_translation_v10_release9.py
       - scripts/build_crossbook_goodfellow_sample.py
       - scripts/build_short_parker_sample.py
+      - tests/test_general_release_architecture.py
+      - tests/test_v10_clause_fidelity.py
   workflow_dispatch:
 
 concurrency:
@@ -24,7 +26,7 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       BOOKAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -37,17 +39,17 @@ jobs:
       GIGACHAT_SCOPE: GIGACHAT_API_PERS
       GIGACHAT_BASE_URL: https://api.giga.chat/v1
       BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
-      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '7'
-      BOOKAI_GIGACHAT_BATCH_CHARS: '6500'
+      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '4'
+      BOOKAI_GIGACHAT_BATCH_CHARS: '4800'
       BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
       BOOKAI_GIGACHAT_TIMEOUT: '55'
       BOOKAI_GIGACHAT_RETRIES: '1'
       BOOKAI_V10_NAME_MAX: '48'
       BOOKAI_V10_NAME_BATCH: '20'
       BOOKAI_V10_TERM_BATCH: '16'
-      BOOKAI_V10_DEEP_MAX: '6'
-      BOOKAI_V10_RELEASE_DEEP_MAX: '8'
-      BOOKAI_V10_RESIDUAL_DEEP_MAX: '6'
+      BOOKAI_V10_DEEP_MAX: '4'
+      BOOKAI_V10_RELEASE_DEEP_MAX: '4'
+      BOOKAI_V10_RESIDUAL_DEEP_MAX: '4'
       BOOKAI_V10_RECOVERY_BATCH: '4'
       BOOKAI_V10_JSON_RECOVERY_BATCH: '3'
 
@@ -61,7 +63,7 @@ jobs:
         id: validate
         run: |
           set -euo pipefail
-          pip install -e '.[dev]' gigachat pypdf
+          pip install -e '.[dev]' gigachat
           python -m compileall -q \
             src/bookai/v10*.py src/bookai/release_final.py \
             scripts/chapter_translation_v10_release9.py \
@@ -99,7 +101,7 @@ jobs:
               BOOKAI_CHAPTER_NAME="Chapter One" \
               BOOKAI_V10_BIBLE_CACHE="../.bookai-cache/book-bible.json" \
                 /usr/bin/time -f '%e' -o wall_seconds.txt \
-                timeout --signal=TERM --kill-after=30s 7m \
+                timeout --signal=TERM --kill-after=30s 5m \
                 python ../../scripts/chapter_translation_v10_release9.py 2>&1 | tee run.log
               exit ${PIPESTATUS[0]}
             )
