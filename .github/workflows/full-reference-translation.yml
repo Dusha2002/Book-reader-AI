@@ -1,4 +1,4 @@
-name: full-reference-translation
+name: production-literary-translation
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: bookai-gigachat-pers-${{ github.ref }}
+  group: bookai-production-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -15,7 +15,7 @@ permissions:
 jobs:
   chapter-eval:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
     env:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       BOOKAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -89,7 +89,7 @@ jobs:
       BOOKAI_V9AF_SANITIZER_MAX: '32'
       BOOKAI_V9AF_SANITIZER_BATCH: '18'
       BOOKAI_V9AG_RETRY_MAX: '16'
-      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-first-three-v9ah-ultra-source-only'
+      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-production-literary-v1'
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python 3.12
@@ -103,20 +103,20 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src scripts/chapter_reference_translation_v3.py scripts/chapter_reference_translation_v4.py scripts/chapter_reference_translation_v4b.py scripts/chapter_reference_translation_v5.py scripts/chapter_reference_translation_v6.py scripts/chapter_reference_translation_v7.py scripts/chapter_reference_translation_v8.py scripts/chapter_reference_translation_v8b.py scripts/chapter_reference_translation_v8c.py scripts/chapter_reference_translation_v9.py scripts/chapter_reference_translation_v9b.py scripts/chapter_reference_translation_v9c.py scripts/chapter_reference_translation_v9d.py scripts/chapter_reference_translation_v9e.py scripts/chapter_reference_translation_v9f.py scripts/chapter_reference_translation_v9g.py scripts/chapter_reference_translation_v9h.py scripts/chapter_reference_translation_v9i.py scripts/chapter_reference_translation_v9j.py scripts/chapter_reference_translation_v9k.py scripts/chapter_reference_translation_v9l.py scripts/chapter_reference_translation_v9m.py scripts/chapter_reference_translation_v9n.py scripts/chapter_reference_translation_v9o.py scripts/chapter_reference_translation_v9p.py scripts/chapter_reference_translation_v9q.py scripts/chapter_reference_translation_v9r.py scripts/chapter_reference_translation_v9s.py scripts/chapter_reference_translation_v9t.py scripts/chapter_reference_translation_v9u.py scripts/chapter_reference_translation_v9v.py scripts/chapter_reference_translation_v9w.py scripts/chapter_reference_translation_v9x.py scripts/chapter_reference_translation_v9y.py scripts/chapter_reference_translation_v9z.py scripts/chapter_reference_translation_v9aa.py scripts/chapter_reference_translation_v9ab.py scripts/chapter_reference_translation_v9ac.py scripts/chapter_reference_translation_v9ad.py scripts/chapter_reference_translation_v9ae.py scripts/chapter_reference_translation_v9af.py scripts/chapter_reference_translation_v9ag.py scripts/chapter_reference_translation_v9ah.py scripts/chapter_reference_translation_v9ah_ultra.py scripts/chapter_reference_translation_v9ai.py scripts/setup_bergamot_enru.py scripts/bergamot_worker.py scripts/hybrid_reference_translation.py
+          python -m compileall -q src scripts
           pytest -q
           python - <<'PY'
           from bookai.gigachat_runtime_guard import is_rate_limit_error
           assert is_rate_limit_error(RuntimeError('HTTP 429 Too Many Requests'))
           assert not is_rate_limit_error(RuntimeError('HTTP 400 invalid response_format schema'))
-          print('[bookai] gigachat rate-limit guard classification ok')
+          print('[bookai] runtime guard classification ok')
           PY
       - name: Verify API secrets and Ultra access
         shell: bash
         run: |
           set -euo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
-          test -n "${DEEPSEEK_API_KEY:-}" || { echo 'DEEPSEEK_API_KEY is not configured for legacy emergency fallbacks' >&2; exit 1; }
+          test -n "${DEEPSEEK_API_KEY:-}" || { echo 'DEEPSEEK_API_KEY is not configured for emergency fallbacks' >&2; exit 1; }
           python - <<'PY'
           from bookai.gigachat_ultra_provider import GigaChatUltraProvider
           from bookai.llm import extract_json
@@ -126,8 +126,8 @@ jobs:
           assert obj.get('ultra') is True, obj
           print('[bookai-ultra-smoke]', p.model, p.usage)
           PY
-          echo '[bookai] architecture=v9ah primary=gigachat-lightning sparse-specialist=gigachat-3-ultra legacy-emergency-fallback=deepseek source-only=yes gold-reference=no'
-      - name: Translate Chapters One through Three with v9ah + Ultra specialist
+          echo '[bookai] production_strategy=literary-production-v1 primary=gigachat-lightning specialist=gigachat-3-ultra fallback=deepseek source-only=yes gold-reference=no'
+      - name: Translate release sample with stable production strategy
         shell: bash
         run: |
           set -euo pipefail
@@ -136,27 +136,29 @@ jobs:
             slug=$(printf '%s' "$word" | tr '[:upper:]' '[:lower:]')
             echo "[bookai] ===== START Chapter ${word} ====="
             BOOKAI_CHAPTER_NAME="Chapter ${word}" timeout --signal=TERM --kill-after=30s 15m \
-              python scripts/chapter_reference_translation_v9ah_ultra.py 2>&1 | tee "chapter-v9-ultra-${slug}.log"
+              python scripts/production_literary_translation.py 2>&1 | tee "production-${slug}.log"
             echo "[bookai] ===== DONE Chapter ${word} ====="
           done
-      - name: Run source-grounded literary regression
+      - name: Enforce 150-case source-grounded literary regression
         shell: bash
         run: |
           set -euo pipefail
           python scripts/evaluate_translation_regression.py \
-            --dataset eval/literary_regression_v1.json \
-            --output chapter-v9-ultra-regression.json \
+            --dataset eval/literary_regression_v2.json \
+            --output production-literary-regression.json \
+            --fail-on-hard \
+            --fail-on-objective \
             chapter-v9-*-translation-map.json
-      - name: Upload first three chapters v9ah Ultra evaluation
+      - name: Upload production evaluation
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: first-three-chapters-v9ah-ultra-source-only-evaluation
+          name: production-literary-v1-source-only-evaluation
           path: |
             Devices_and_Desires_RU_*_EVAL_V9.fb2
             chapter-v9-*.txt
             chapter-v9-*.json
-            chapter-v9-*.log
-            chapter-v9-ultra-*.log
+            production-*.json
+            production-*.log
           if-no-files-found: ignore
           retention-days: 7
