@@ -55,46 +55,8 @@ def _hard_entity_kind(desc: str) -> bool:
     return kind in {"person", "place", "institution"}
 
 
-def _occurs_only_inside_longer_entity(source: str, entity: str, memory: BookMemory) -> bool:
-    """Suppress component canon checks when this segment only uses a longer entity.
-
-    A component remains independently enforceable in segments where it occurs on its
-    own. This is longest-span matching, not a global deletion of component canons.
-    """
-    text = str(source or "")
-    name = str(entity or "").strip()
-    if not text or not name:
-        return False
-    occurrences = list(re.finditer(rf"(?<![A-Za-z]){re.escape(name)}(?![A-Za-z])", text, re.I))
-    if not occurrences:
-        return False
-    covering_spans: list[tuple[int, int]] = []
-    for longer, desc in memory.characters.items():
-        longer_name = str(longer or "").strip()
-        if len(longer_name) <= len(name) or not _hard_entity_kind(str(desc or "")):
-            continue
-        if not re.search(rf"(?<![A-Za-z]){re.escape(name)}(?![A-Za-z])", longer_name, re.I):
-            continue
-        covering_spans.extend(
-            (match.start(), match.end())
-            for match in re.finditer(rf"(?<![A-Za-z]){re.escape(longer_name)}(?![A-Za-z])", text, re.I)
-        )
-    if not covering_spans:
-        return False
-    return all(
-        any(left <= occurrence.start() and occurrence.end() <= right for left, right in covering_spans)
-        for occurrence in occurrences
-    )
-
-
 class FinalBookBibleBuilder(SourceOnlyBookBibleBuilder):
-    """Book-adaptive source-only memory with no title-specific vocabulary in code.
-
-    Proper entities are discovered by the source-bible model. Technical/rare term
-    candidates are generated from recurring lexical n-grams across the whole book,
-    then filtered by the existing high-confidence term classifier. This makes the
-    same release pipeline usable for fantasy, SF, history, romance or technical prose.
-    """
+    """Book-adaptive source-only memory with no title-specific vocabulary in code."""
 
     @staticmethod
     def _candidate_records(segments: list[Segment]) -> list[dict[str, Any]]:
@@ -105,7 +67,6 @@ class FinalBookBibleBuilder(SourceOnlyBookBibleBuilder):
             for row in records
             if row.get("kind_hint") == "proper"
         }
-
         counts: Counter[str] = Counter()
         contexts: dict[str, list[dict[str, str]]] = {}
 
@@ -189,7 +150,6 @@ class FinalBookBibleBuilder(SourceOnlyBookBibleBuilder):
                     self.cache_path.unlink()
                 except OSError:
                     pass
-
         memory, stats = super().build(segments)
         try:
             data = json.loads(self.cache_path.read_text("utf-8"))
@@ -230,7 +190,6 @@ class FinalDialogueDiscourseGuard(DialogueDiscourseGuard):
         source = str(segment.text or "")
         value = value.replace("‘", "'").replace("’", "'").replace("“", '"').replace("”", '"')
         value = re.sub(r",\s*,+", ",", value)
-
         if source_has_dialogue(source):
             if re.match(r"^\s*[\"'“‘]", source):
                 if re.match(r"^\s*[\"'«]", value):
@@ -245,7 +204,6 @@ class FinalDialogueDiscourseGuard(DialogueDiscourseGuard):
             value = FinalDialogueDiscourseGuard._drop_unmatched_closing_guillemets(value)
         else:
             value = re.sub(r"['\"]([^'\"\n]{1,240})['\"]", r"«\1»", value)
-
         value = re.sub(r"\s+([,.!?…])", r"\1", value)
         value = re.sub(r"\s{2,}", " ", value).strip()
         return re.sub(r",\s*,+", ",", value)
@@ -268,41 +226,27 @@ class FinalV10QualityQA(HardenedV10QualityQA):
         quantity = dict(super()._clean_quantity(source, target))
         low = str(target or "").casefold().replace("ё", "е")
         suppress: set[int] = set()
-
         hundred_patterns = {
             100: (r"\bсто\b", r"\bсотн\w*\b", r"\bстопроцент\w*\b"),
-            200: (r"\bдвест\w*\b",),
-            300: (r"\bтрист\w*\b",),
-            400: (r"\bчетырест\w*\b",),
-            500: (r"\bпятьсот\b", r"\bпятисот\b"),
-            600: (r"\bшестьсот\b", r"\bшестисот\b"),
-            700: (r"\bсемьсот\b", r"\bсемисот\b"),
-            800: (r"\bвосемьсот\b", r"\bвосьмисот\b"),
+            200: (r"\bдвест\w*\b",), 300: (r"\bтрист\w*\b",), 400: (r"\bчетырест\w*\b",),
+            500: (r"\bпятьсот\b", r"\bпятисот\b"), 600: (r"\bшестьсот\b", r"\bшестисот\b"),
+            700: (r"\bсемьсот\b", r"\bсемисот\b"), 800: (r"\bвосемьсот\b", r"\bвосьмисот\b"),
             900: (r"\bдевятьсот\b", r"\bдевятисот\b"),
         }
         for value, patterns in hundred_patterns.items():
             if any(re.search(pattern, low) for pattern in patterns):
                 suppress.add(value)
-
         fractions = {
-            "half": (2, r"половин|втор"),
-            "third": (3, r"трет"),
-            "quarter": (4, r"четверт"),
-            "fifth": (5, r"пят"),
-            "sixth": (6, r"шест"),
-            "seventh": (7, r"седьм"),
-            "eighth": (8, r"восьм"),
-            "ninth": (9, r"девят"),
-            "tenth": (10, r"десят"),
-            "sixteenth": (16, r"шестнадцат"),
-            "thirty-second": (32, r"тридцат\w*втор"),
+            "half": (2, r"половин|втор"), "third": (3, r"трет"), "quarter": (4, r"четверт"),
+            "fifth": (5, r"пят"), "sixth": (6, r"шест"), "seventh": (7, r"седьм"),
+            "eighth": (8, r"восьм"), "ninth": (9, r"девят"), "tenth": (10, r"десят"),
+            "sixteenth": (16, r"шестнадцат"), "thirty-second": (32, r"тридцат\w*втор"),
             "sixty-fourth": (64, r"шестьдесят\w*четверт"),
         }
         for word, (denominator, ru_stem) in fractions.items():
             if re.search(rf"\bone\s+{re.escape(word)}\b", source, re.I):
                 if re.search(rf"\bодн\w*\s+{ru_stem}\w*\b", low) or re.search(rf"\b1\s*/\s*{denominator}\b", low):
                     suppress.add(1 + denominator)
-
         small = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9}
         match = re.search(r"\b(" + "|".join(small) + r")\s*,\s*(" + "|".join(small) + r")\s+hundred\b", source, re.I)
         if match:
@@ -311,7 +255,6 @@ class FinalV10QualityQA(HardenedV10QualityQA):
             if left in hundred_patterns and right in hundred_patterns:
                 if any(re.search(p, low) for p in hundred_patterns[left]) and any(re.search(p, low) for p in hundred_patterns[right]):
                     suppress.update({small[match.group(1).casefold()], small[match.group(2).casefold()], left, right})
-
         quantity["base_missing"] = [value for value in quantity.get("base_missing") or [] if value not in suppress]
         quantity["missing_mentions"] = [row for row in quantity.get("missing_mentions") or [] if row.get("value") not in suppress]
         quantity["ok"] = not quantity["base_missing"] and not quantity["missing_mentions"] and not quantity.get("numbered_choice_missing")
@@ -323,24 +266,25 @@ class FinalV10QualityQA(HardenedV10QualityQA):
         low_target = cls._strip_marks(target).casefold().replace("ё", "е")
         out: list[V10Issue] = []
         for name, desc in memory.characters.items():
-            if not re.search(rf"\b{re.escape(str(name))}\b", source, re.I):
+            name_s = str(name or "").strip()
+            if not name_s or not _hard_entity_kind(str(desc or "")):
                 continue
-            if not _hard_entity_kind(str(desc or "")):
-                continue
-            if _occurs_only_inside_longer_entity(source, str(name), memory):
+            source_mentions = len(re.findall(rf"(?<![A-Za-z]){re.escape(name_s)}(?![A-Za-z])", source, re.I))
+            if source_mentions <= 0:
                 continue
             ru_match = re.search(r"(?:^|;)ru=([^;]+)", str(desc or ""), re.I)
             canon = _norm(ru_match.group(1) if ru_match else memory.glossary.get(name, ""))
-            # _strip_marks decomposes Cyrillic й into и + breve. Normalize both sides
-            # identically so a valid canonical cannot fail only because target was NFD-normalized.
             stem = _canon_stem(cls._strip_marks(canon))
-            if stem and stem not in low_target:
+            if not stem:
+                continue
+            target_mentions = len(re.findall(rf"(?<![а-яё]){re.escape(stem)}[а-яё-]*", low_target, re.I))
+            if target_mentions < source_mentions:
                 out.append(V10Issue(
                     segment.id,
                     "name_canon",
                     "local",
                     "hard",
-                    f"source entity {name!r} must preserve the book-wide Russian canon {canon!r} (inflection allowed)",
+                    f"source entity {name!r} must preserve the book-wide Russian canon {canon!r} for every mention (source={source_mentions}, target={target_mentions}; inflection allowed)",
                 ))
         return out
 
@@ -357,13 +301,7 @@ class FinalV10QualityQA(HardenedV10QualityQA):
                 continue
             stem = _canon_stem(str(ru or ""))
             if stem and stem not in low_target:
-                out.append(V10Issue(
-                    segment.id,
-                    "book_term_canon",
-                    "local",
-                    "hard",
-                    f"source term {en_s!r} must preserve high-confidence book glossary term {ru!r}",
-                ))
+                out.append(V10Issue(segment.id, "book_term_canon", "local", "hard", f"source term {en_s!r} must preserve high-confidence book glossary term {ru!r}"))
         return out
 
     @staticmethod
@@ -375,13 +313,7 @@ class FinalV10QualityQA(HardenedV10QualityQA):
             left = match.group(1).casefold()
             right = match.group(2).casefold()
             if not _ru_has_stem(target, _MATERIAL_STEMS[left]) or not _ru_has_stem(target, _MATERIAL_STEMS[right]):
-                out.append(V10Issue(
-                    segment.id,
-                    "material",
-                    "local",
-                    "hard",
-                    f"source material contrast 'not {left} but {right}' must preserve both materials",
-                ))
+                out.append(V10Issue(segment.id, "material", "local", "hard", f"source material contrast 'not {left} but {right}' must preserve both materials"))
         return out
 
     def scan_segment(self, segment: Segment, target: str, memory: BookMemory) -> list[V10Issue]:
@@ -394,22 +326,14 @@ class FinalV10QualityQA(HardenedV10QualityQA):
                 continue
             filtered.append(issue)
         issues = filtered
-
         source = str(segment.text or "")
         low = str(target or "").casefold().replace("ё", "е")
         if re.search(r"\b(?:half[- ]inch|half an inch)\b", source, re.I) and re.search(r"\bполдюйм\w*\b", low):
             issues = [issue for issue in issues if issue.code != "half_inch"]
-
         issues.extend(self._book_term_issues(segment, target, memory))
         issues.extend(self._material_contrast_issues(segment, target))
-
         if self.demote_clause_order:
-            issues = [
-                V10Issue(row.id, row.code, row.mode, "soft", row.reason)
-                if row.code == "clause_order" and row.severity == "hard"
-                else row
-                for row in issues
-            ]
+            issues = [V10Issue(row.id, row.code, row.mode, "soft", row.reason) if row.code == "clause_order" and row.severity == "hard" else row for row in issues]
         unique = {(row.code, row.mode, row.severity, row.reason): row for row in issues}
         return list(unique.values())
 
@@ -418,16 +342,8 @@ class FinalDeepSeekSemanticSpecialist(HardenedDeepSeekSemanticSpecialist):
     """Route only general invariants and dynamic book-memory violations."""
 
     _GENERAL_PROVEN = frozenset({
-        "latin_leak",
-        "question",
-        "direction_relation",
-        "half_inch",
-        "material",
-        "name_canon",
-        "book_term_canon",
-        "dialogue_typography",
-        "idiom_last_but_one",
-        "character_gender",
+        "latin_leak", "question", "direction_relation", "half_inch", "material", "name_canon",
+        "book_term_canon", "dialogue_typography", "idiom_last_but_one", "character_gender",
     })
 
     @staticmethod
@@ -447,14 +363,7 @@ class ResidualHardDeepSeekRepair:
         self.provider = provider
         self.qa = qa
         self.max_segments = max(1, int(max_segments))
-        self.stats: dict[str, Any] = {
-            "calls": 0,
-            "selected": 0,
-            "selected_ids": [],
-            "accepted": 0,
-            "changed_ids": [],
-            "rejected": [],
-        }
+        self.stats: dict[str, Any] = {"calls": 0, "selected": 0, "selected_ids": [], "accepted": 0, "changed_ids": [], "rejected": []}
 
     def repair(self, targets: list[Segment], translated: dict[str, str], memory: BookMemory, issues: list[V10Issue]) -> list[str]:
         hard_by_id: dict[str, list[V10Issue]] = {}
@@ -468,14 +377,8 @@ class ResidualHardDeepSeekRepair:
             return []
         self.stats["selected"] = len(selected)
         self.stats["selected_ids"] = [segment.id for segment in selected]
-
         items = [
-            {
-                "id": segment.id,
-                "source_en": segment.text,
-                "current_ru": translated.get(segment.id, ""),
-                "hard_defects": [f"{row.code}: {row.reason}" for row in hard_by_id[segment.id]],
-            }
+            {"id": segment.id, "source_en": segment.text, "current_ru": translated.get(segment.id, ""), "hard_defects": [f"{row.code}: {row.reason}" for row in hard_by_id[segment.id]]}
             for segment in selected
         ]
         system = """Final fail-closed EN→RU literary repair. Every input row still fails a deterministic publication gate.
@@ -491,7 +394,6 @@ such as V-образный is allowed. Do not add commentary. ONLY JSON
         except Exception as exc:
             self.stats["rejected"].append({"reason": f"call_error:{type(exc).__name__}"})
             return []
-
         parsed = {str(row.get("id") or ""): row for row in (obj.get("items") or []) if isinstance(row, dict)}
         changed: list[str] = []
         for segment in selected:
@@ -509,7 +411,6 @@ such as V-образный is allowed. Do not add commentary. ONLY JSON
                 continue
             translated[sid] = candidate
             changed.append(sid)
-
         self.stats["accepted"] = len(changed)
         self.stats["changed_ids"] = changed
         return changed
