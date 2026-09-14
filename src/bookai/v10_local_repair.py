@@ -66,11 +66,12 @@ class GigaLocalRewriter:
     def _single_repair(self, row: dict[str, Any]) -> str:
         client = self.backend._ensure_client()
         system = (
-            "Ты точный редактор литературного перевода EN→RU. Дана ОДНА строка с уже доказанными локальными дефектами. "
-            "Исправь только их, но верни ПОЛНЫЙ готовый русский перевод SOURCE. Ничего не сокращай и не добавляй. "
+            "Ты точный редактор перевода книги EN→RU. Дана ОДНА строка с уже доказанными локальными дефектами. "
+            "Сохраняй текущий жанр, регистр и предметную область: не делай технический текст литературным и не упрощай художественный. "
+            "Исправь только перечисленные дефекты, но верни ПОЛНЫЙ готовый русский перевод SOURCE. Ничего не сокращай и не добавляй. "
             "Для dozen: a dozen=12, half a dozen=6, two dozen=24; НЕЛЬЗЯ переводить two dozen как «два десятка». "
             "Для number six сохрани сам выбор №6 и весь связанный смысл. "
-            "Если дефект Latin — переведи обычную английскую фразу на русский; имя/название транслитерируй только если это имя. "
+            "Если дефект Latin — переведи обычную английскую фразу на русский; сохраняй латиницу только для действительно требуемой нотации/аббревиатуры/ссылки/имени. "
             "Не добавляй скобочные пояснения, пометы 'вариант', альтернативы или комментарии переводчика. "
             "Верни только русский текст, без JSON, тегов и комментариев."
         )
@@ -126,11 +127,11 @@ class GigaLocalRewriter:
 
         self.stats["requested"] = len(rows)
         self.stats["selected_ids"] = [row["id"] for row in rows]
-        system = """You are a FAST GigaChat EN→RU local fidelity editor. Every item has a PROVEN local defect.
-Fix ONLY the listed defect(s) while preserving current Russian wording, literary tone, paragraph structure and all unrelated facts.
+        system = """You are a FAST GigaChat EN→RU local fidelity editor for books of arbitrary genre/domain. Every item has a PROVEN local defect.
+Fix ONLY the listed defect(s) while preserving current Russian wording, source-domain register, paragraph structure and all unrelated facts. Never impose literary style on academic/technical prose.
 For NUMERIC/QUANTITY defects, restore the COMPLETE proposition attached to every missing quantity. Interpret dozen exactly: a dozen=12, half a dozen=6, two dozen=24; never use «два десятка» for two dozen.
 For a numbered choice such as "number six", preserve the choice naturally in Russian together with its governing action and surrounding clause.
-For LATIN, translate ordinary English residue into Russian; only transliterate a genuine proper name/title.
+For LATIN, translate ordinary English residue into Russian; preserve Latin only where it is genuinely required by technical notation, an acronym, citation, identifier or proper name.
 For QUESTION, preserve the source interrogative force and punctuation.
 Never append explanations, alternatives, bracketed glosses or translator notes. corrected_ru MUST be the COMPLETE final Russian translation of exactly source.
 Return every supplied id. ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]}.
