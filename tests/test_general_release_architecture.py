@@ -4,6 +4,7 @@ from pathlib import Path
 
 from bookai.models import BookMemory, Segment
 from bookai.release_final import FinalDialogueDiscourseGuard, FinalV10QualityQA
+from bookai.v10_publication_release import _priority_term_candidates
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,7 +79,7 @@ def test_source_acronyms_are_allowed_in_technical_translation():
     assert not any(issue.code == "acronym_fidelity" for issue in issues)
 
 
-def test_missing_acronym_is_hard_in_technical_prose():
+def test_missing_acronym_is_hard_when_publication_policy_is_confident():
     qa = FinalV10QualityQA()
     memory = _technical_memory()
     memory.acronyms["CPU"] = "CPU"
@@ -88,6 +89,17 @@ def test_missing_acronym_is_hard_in_technical_prose():
         memory,
     )
     assert any(issue.code == "acronym_fidelity" and issue.severity == "hard" for issue in issues)
+
+
+def test_unconfigured_acronym_is_not_forced_by_release_qa():
+    qa = FinalV10QualityQA()
+    memory = _technical_memory()
+    issues = qa.scan_segment(
+        _segment("AB research advanced."),
+        "Исследования АБ продвинулись вперёд.",
+        memory,
+    )
+    assert not any(issue.code == "acronym_fidelity" for issue in issues)
 
 
 def test_acronym_policy_can_localize_instead_of_preserve_latin():
@@ -195,6 +207,21 @@ def test_dynamic_technical_glossary_accepts_inflection():
     assert not any(issue.code == "technical_term" for issue in issues)
 
 
+def test_priority_term_candidates_include_definition_and_citation_concepts():
+    memory = _technical_memory()
+    memory.glossary["adaptive sequence memory"] = "адаптивная память последовательностей"
+    segments = [
+        _segment("They introduced adaptive sequence memory or ASM to address the problem.", "s1"),
+        _segment("Kernel families (Smith et al., 1999) achieved strong results.", "s2"),
+    ]
+    rows = _priority_term_candidates(segments, memory)
+    terms = {row["source"].casefold(): row["evidence"] for row in rows}
+    assert "adaptive sequence memory" in terms
+    assert terms["adaptive sequence memory"].startswith("explicit_acronym_definition")
+    assert "kernel families" in terms
+    assert terms["kernel families"] == "citation_adjacent_concept"
+
+
 def test_citation_surname_spelling_is_preserved_in_academic_domain():
     qa = FinalV10QualityQA()
     issues = qa.scan_segment(
@@ -233,3 +260,31 @@ def test_cross_segment_source_continuation_cannot_be_closed_early():
     }
     issues = qa.scan(segments, translated, _technical_memory())
     assert any(issue.code == "segment_boundary" and issue.severity == "hard" for issue in issues)
+
+
+def test_cross_segment_source_continuation_requires_open_punctuation_even_without_period():
+    qa = FinalV10QualityQA()
+    segments = [
+        _segment("The increase in model size, due to faster CPUs,", "s1"),
+        _segment("the advent of GPUs, is an important trend.", "s2"),
+    ]
+    translated = {
+        "s1": "Рост размера моделей благодаря более быстрым CPU",
+        "s2": "появление GPU — важная тенденция.",
+    }
+    issues = qa.scan(segments, translated, _technical_memory())
+    assert any(issue.code == "segment_boundary" and issue.severity == "hard" for issue in issues)
+
+
+def test_cross_segment_open_punctuation_passes():
+    qa = FinalV10QualityQA()
+    segments = [
+        _segment("The increase in model size, due to faster CPUs,", "s1"),
+        _segment("the advent of GPUs, is an important trend.", "s2"),
+    ]
+    translated = {
+        "s1": "Рост размера моделей благодаря более быстрым CPU,",
+        "s2": "появление GPU — важная тенденция.",
+    }
+    issues = qa.scan(segments, translated, _technical_memory())
+    assert not any(issue.code == "segment_boundary" for issue in issues)
