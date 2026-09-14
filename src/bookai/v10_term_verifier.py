@@ -6,12 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from .models import BookMemory, Segment
-from .v10 import _json_from_text, _norm
+from .v10 import _giga_json, _json_from_text, _norm
 from .v10_publication_release import _priority_term_candidates, _technical_style
 from .v10_source_bible import _has_clean_russian
 
 
-_VERIFIER_CACHE_MARKER = "v10-deepseek-terminology-2"
+_VERIFIER_CACHE_MARKER = "v10-deepseek-terminology-3"
 _LOCAL_DEFINITION_RE = re.compile(
     r"\b([a-z][a-z'-]{2,16})\b\s+(?:had|has|have|is|was|were)\s+"
     r"(?:no|not|only)\b",
@@ -21,6 +21,14 @@ _COMMON_DEFINITION_WORDS = {
     "thing", "person", "people", "time", "place", "part", "side", "way", "problem", "result",
     "model", "system", "method", "work", "research", "network", "algorithm",
 }
+
+
+def _is_academic_domain(memory: BookMemory) -> bool:
+    domain = str(getattr(memory, "domain", "") or "").strip().casefold()
+    if domain:
+        return domain == "academic_technical"
+    # Legacy caches may not yet carry the explicit domain field.
+    return _technical_style(memory)
 
 
 def _local_definition_candidates(segments: list[Segment]) -> list[dict[str, Any]]:
@@ -55,9 +63,10 @@ def _verification_candidates(segments: list[Segment], memory: BookMemory) -> lis
         rows.append(row)
         seen.add(key)
 
-    # A nontechnical book only needs source-defined specialist rows. Technical or
-    # academic books benefit from the whole compact priority set.
-    if not _technical_style(memory):
+    # Literary/nontechnical books only need terms explicitly defined by source
+    # context. This prevents proper names from being mistaken for terminology merely
+    # because the style description contains words such as “technical precision”.
+    if not _is_academic_domain(memory):
         rows = [
             row for row in rows
             if str(row.get("evidence") or "").startswith("explicit_acronym_definition")
@@ -79,20 +88,23 @@ def _valid_ru_term(value: str) -> bool:
 class DeepSeekPublicationTerminologyVerifier:
     """Two tiny source-only semantic passes over a compact set of high-risk terms.
 
-    Pass 1 proposes the professional Russian canon. Pass 2 is an adversarial
-    terminology critic whose only job is to reject literal translationese, category
-    narrowing and overly broad substitutes. The resulting canon is cached per book.
+    DeepSeek creates a draft canon. An optional stronger GigaChat critic challenges
+    only those few proposals; if that critic is unavailable, the same DeepSeek
+    provider performs the critique. The verified canon is cached per book.
     """
 
-    def __init__(self, provider: Any, cache_path: Path):
+    def __init__(self, provider: Any, cache_path: Path, *, critic_backend: Any | None = None):
         self.provider = provider
         self.cache_path = Path(cache_path)
+        self.critic_backend = critic_backend
         self.stats: dict[str, Any] = {
             "cache_hit": False,
             "calls": 0,
             "candidates": 0,
             "returned": 0,
             "draft_proposals": 0,
+            "critic_backend": "",
+            "critic_fallback": False,
             "critic_returned": 0,
             "critic_revised": 0,
             "critic_omitted": 0,
@@ -156,6 +168,7 @@ Rules:
 Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|change|add|omit","ru":"...","confidence":0.0,"reason":"brief"}]} with exactly one row per supplied candidate."""
         payload = {
             "book_profile": {
+                "domain": str(getattr(memory, "domain", "") or ""),
                 "voice": str(style.narrative_voice or ""),
                 "rhythm": str(style.rhythm or ""),
                 "dialogue": str(style.dialogue or ""),
@@ -207,10 +220,9 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|ch
         self.stats["draft_proposals"] = len(proposals)
         return proposals
 
-    def _critic(self, proposals: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if not proposals:
-            return []
-        system = """Act as an adversarial senior Russian terminology editor. You are reviewing another translator's proposed EN→RU term canon, not translating prose.
+    @staticmethod
+    def _critic_system() -> str:
+        return """Act as an adversarial senior Russian terminology editor. You are reviewing another translator's proposed EN→RU term canon, not translating prose.
 For EVERY row decide keep, revise, or omit.
 
 Audit aggressively for three failure modes:
@@ -219,13 +231,36 @@ Audit aggressively for three failure modes:
 3) HEAD-NOUN CALQUE: the English head noun was translated literally even though established Russian nomenclature conventionally names the concept with a different head noun. Professional terminology takes precedence over lexical symmetry.
 
 For historical weapons/tools/objects, demand the precise established Russian historical/technical name if context supports one; reject a merely related broader object.
-For scientific/ML concepts, demand the conventional Russian textbook/research term. Do not accept an awkward phrase just because every English component is represented.
+For scientific/ML concepts, demand the conventional Russian textbook/research term. Do not accept an awkward phrase just because every English component is represented. Prefer the label a professional Russian textbook index or specialist glossary would actually use.
 `keep` only when proposed_ru is both semantically exact AND idiomatic as a recognized Russian term. `revise` supplies a better concise canonical term. `omit` when the source evidence is insufficient to impose a hard canon.
-Do not use a provided current_ru/proposed_ru as authority; they are hypotheses to challenge.
+Do not use current_ru/proposed_ru as authority; they are hypotheses to challenge.
 Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|revise|omit","ru":"canonical Russian term or empty","confidence":0.0,"reason":"brief"}]} with exactly one row per input."""
-        raw = self.provider.complete(system, json.dumps({"proposals": proposals}, ensure_ascii=False), temperature=0.0)
-        self.stats["calls"] += 1
-        obj = _json_from_text(raw)
+
+    def _critic(self, proposals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not proposals:
+            return []
+        payload = {"proposals": proposals}
+        obj: dict[str, Any] | None = None
+        backend = self.critic_backend
+        if backend is not None and getattr(backend, "available", lambda: False)():
+            self.stats["critic_backend"] = str(getattr(backend, "model", "GigaChat"))
+            try:
+                obj = _giga_json(backend, self._critic_system(), payload, max_tokens=3200)
+                self.stats["calls"] += 1
+            except Exception as exc:
+                self.stats["critic_fallback"] = True
+                print(f"[v10-term-critic] backend={self.stats['critic_backend']} error={type(exc).__name__}: {exc}; fallback=deepseek", flush=True)
+
+        if obj is None:
+            self.stats["critic_backend"] = "deepseek-fallback"
+            raw = self.provider.complete(
+                self._critic_system(),
+                json.dumps(payload, ensure_ascii=False),
+                temperature=0.0,
+            )
+            self.stats["calls"] += 1
+            obj = _json_from_text(raw)
+
         rows = [row for row in obj.get("items") or [] if isinstance(row, dict)]
         self.stats["critic_returned"] = len(rows)
         return rows
@@ -264,8 +299,6 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|re
             proposed = str(proposal.get("proposed_ru") or "").strip()
             final_ru = ""
             if review is None:
-                # Fail conservatively if the critic did not return this row. Only a
-                # very high-confidence first-pass proposal may survive on its own.
                 if float(proposal.get("draft_confidence") or 0) >= 0.90:
                     final_ru = proposed
             else:
