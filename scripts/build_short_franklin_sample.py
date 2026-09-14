@@ -118,26 +118,22 @@ def _unseen_window_c(blocks: list[str]):
     return _window_at(blocks, 0.72, "unseen-late-memoir-window-c", prior)
 
 
-def _fb2(target_paragraphs: list[str], memory_paragraphs: list[str]) -> str:
-    target_body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in target_paragraphs)
-    memory_body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in memory_paragraphs)
+def _fb2(paragraphs: list[str], *, title: str, document_id: str) -> str:
+    body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in paragraphs)
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
   <description>
     <title-info>
       <genre>biography</genre>
       <author><first-name>Benjamin</first-name><last-name>Franklin</last-name></author>
-      <book-title>Autobiography of Benjamin Franklin — short benchmark with whole-book memory</book-title>
+      <book-title>{html_lib.escape(title)}</book-title>
       <lang>en</lang>
     </title-info>
-    <document-info><id>bookai-crossbook-franklin-short</id><version>1.0</version></document-info>
+    <document-info><id>{html_lib.escape(document_id)}</id><version>1.0</version></document-info>
   </description>
   <body>
     <section><title><p>Chapter One</p></title>
-{target_body}
-    </section>
-    <section><title><p>Chapter Two</p></title>
-{memory_body}
+{body}
     </section>
   </body>
 </FictionBook>
@@ -149,15 +145,22 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     blocks = _clean_blocks(_download_text())
     if VARIANT in {"c", "fresh", "unseen-c"}:
-        selected, selection_meta, selected_indices = _unseen_window_c(blocks)
+        selected, selection_meta, _selected_indices = _unseen_window_c(blocks)
     elif VARIANT in {"b", "alt", "unseen"}:
-        selected, selection_meta, selected_indices = _unseen_window(blocks)
+        selected, selection_meta, _selected_indices = _unseen_window(blocks)
     else:
-        selected, selection_meta, selected_indices = _opening_sample(blocks)
+        selected, selection_meta, _selected_indices = _opening_sample(blocks)
     source_text = "\n\n".join(selected)
-    memory_rows = [block for i, block in enumerate(blocks) if i not in selected_indices]
 
-    (out_dir / "sample.fb2").write_text(_fb2(selected, memory_rows), "utf-8")
+    (out_dir / "sample.fb2").write_text(
+        _fb2(selected, title="Autobiography of Benjamin Franklin — short anti-overfit benchmark", document_id="bookai-crossbook-franklin-short"),
+        "utf-8",
+    )
+    # The memory source is intentionally independent of the chosen target window.
+    (out_dir / "memory-source.fb2").write_text(
+        _fb2(blocks, title="Autobiography of Benjamin Franklin — stable whole-book memory source", document_id="bookai-crossbook-franklin-memory"),
+        "utf-8",
+    )
     (out_dir / "sample-source.txt").write_text(source_text, "utf-8")
     meta = {
         "variant": VARIANT,
@@ -165,9 +168,10 @@ def main() -> None:
         "source_format": "project-gutenberg-plain-text",
         "source_chars": len(source_text),
         "segments": len(selected),
-        "memory_scope": "whole-book-minus-target-window",
-        "memory_segments": len(memory_rows),
-        "memory_chars": sum(len(row) for row in memory_rows),
+        "memory_scope": "stable-whole-book-source",
+        "memory_segments": len(blocks),
+        "memory_chars": sum(len(row) for row in blocks),
+        "memory_source": "memory-source.fb2",
         "reference_text_embedded": False,
         **selection_meta,
     }
