@@ -25,9 +25,9 @@ jobs:
       GIGACHAT_BASE_URL: https://api.giga.chat/v1
       BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
       BOOKAI_GIGACHAT_ULTRA_MODEL: GigaChat-3-Ultra
-      BOOKAI_GIGACHAT_ULTRA_TIMEOUT: '70'
-      BOOKAI_GIGACHAT_ULTRA_MAX_TOKENS: '7000'
-      BOOKAI_GIGACHAT_ULTRA_ATTEMPTS: '5'
+      BOOKAI_GIGACHAT_ULTRA_TIMEOUT: '55'
+      BOOKAI_GIGACHAT_ULTRA_MAX_TOKENS: '5000'
+      BOOKAI_GIGACHAT_ULTRA_ATTEMPTS: '3'
       BOOKAI_GIGACHAT_BATCH_SEGMENTS: '12'
       BOOKAI_GIGACHAT_BATCH_CHARS: '10000'
       BOOKAI_GIGACHAT_SPLIT_DEPTH: '4'
@@ -35,7 +35,7 @@ jobs:
       BOOKAI_GIGACHAT_RECOVERY_ROUNDS: '1'
       BOOKAI_GIGACHAT_RATE_LIMIT_ATTEMPTS: '7'
       BOOKAI_GIGACHAT_RATE_LIMIT_BACKOFF: '2.0'
-      BOOKAI_GIGACHAT_RATE_LIMIT_MAX_SLEEP: '15.0'
+      BOOKAI_GIGACHAT_RATE_LIMIT_MAX_SLEEP: '12.0'
       BOOKAI_GIGACHAT_TOKEN_CACHE: /tmp/bookai-gigachat-token.json
       BOOKAI_GIGACHAT_TOKEN_CACHE_TTL: '1440'
       BOOKAI_GIGACHAT_OAUTH_ATTEMPTS: '2'
@@ -121,8 +121,10 @@ jobs:
           python - <<'PY'
           from bookai.gigachat_ultra_provider import GigaChatUltraProvider
           p = GigaChatUltraProvider(role='preflight')
-          assert p.model
-          print('[bookai-ultra-preflight] configured_model=', p.model)
+          assert p.model == 'GigaChat-3-Ultra'
+          assert p.max_attempts <= 3
+          assert p.timeout_seconds <= 55
+          print('[bookai-ultra-preflight] configured_model=', p.model, 'attempts=', p.max_attempts, 'timeout=', p.timeout_seconds)
           print('[bookai-ultra-preflight] live request intentionally skipped; production runtime owns rate-limit retries')
           PY
           echo '[bookai] production_strategy=literary-production-v1 primary=gigachat-lightning specialist=gigachat-3-ultra fallback=deepseek source-only=yes gold-reference=no'
