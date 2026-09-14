@@ -167,13 +167,10 @@ def _symbolic_digit_counts(source_en: str) -> Counter[int]:
         seen_spans.add((start, end))
         symbolic[int(token)] += 1
 
-    # A numeral used as a function/operator token is an extraction smell, not normal
-    # quantitative prose. Mark both sides of the compact call independently.
     for match in re.finditer(r"(?<![\d.])(?P<fn>\d)\s*\(\s*(?P<arg>\d)\s*\)(?![\d.])", text):
         mark(match, "fn")
         mark(match, "arg")
 
-    # Variable-style re-use after a discourse cue: `where 4 denotes/contains ...`.
     for match in re.finditer(
         r"\b(?:where|variable|parameter|symbol|index)\s+(?P<n>\d)\s+"
         r"(?:contains?|denotes?|represents?|indexes?|is|are|stands?\s+for)\b",
@@ -182,7 +179,6 @@ def _symbolic_digit_counts(source_en: str) -> Counter[int]:
     ):
         mark(match, "n")
 
-    # Compact mathematical operator adjacency. Decimal points are excluded above.
     for match in re.finditer(r"(?<![\d.])(?P<n>\d)(?=\s*(?:=|\+|\*|/|\^|≤|≥|<|>))", text):
         mark(match, "n")
     for match in re.finditer(r"(?<=(?:=|\+|\*|/|\^|≤|≥|<|>))\s*(?P<n>\d)(?![\d.])", text):
@@ -225,14 +221,16 @@ def compare_quantity_fidelity_v2(source_en: str, target_ru: str) -> dict[str, An
             source_counts[value] -= min(count, source_counts[value])
             if source_counts[value] <= 0:
                 source_counts.pop(value, None)
-        for _ in range(count):
-            if value in base_missing:
-                base_missing.remove(value)
 
+    # Preserve the legacy tolerance for repeated lexicalized values: once Russian
+    # visibly carries a value, a second English mention need not be duplicated merely
+    # to satisfy the numeric parser. Symbolic occurrences are first removed from the
+    # source count, so a missing real quantity that only shares a digit with notation
+    # still remains a failure.
     base_missing = [
         value
         for value in base_missing
-        if source_counts.get(value, 0) > target_counts.get(value, 0)
+        if source_counts.get(value, 0) > 0 and target_counts.get(value, 0) <= 0
     ]
 
     for obligation in obligations:
