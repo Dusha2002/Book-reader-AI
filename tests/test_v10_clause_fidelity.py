@@ -32,6 +32,20 @@ def test_duplicate_content_allows_nonrepeated_clean_translation():
     assert compare_duplicate_content_fidelity(source, target)["ok"]
 
 
+def test_duplicate_content_allows_expanded_ru_phrase_for_repeated_en_bigram():
+    source = (
+        "A similar problem occurs if the hidden code is equal to the input, and in the overcomplete case "
+        "in which the hidden code is greater than the input."
+    )
+    target = (
+        "Похожая проблема возникает, если размер скрытого кода равен размеру входа, а также в случае, "
+        "когда размер скрытого кода превышает размер входа."
+    )
+    result = compare_duplicate_content_fidelity(source, target)
+    assert result["ok"]
+    assert result.get("expanded_translation_repetition") is True
+
+
 def test_runtime_glossary_allows_multiword_target_repeat_for_repeated_source_term():
     source = (
         "Back-propagation made deep training practical and helped popularize the back-propagation algorithm. "
