@@ -1,4 +1,4 @@
-name: v10-chapters-one-three-audit
+name: v10-short-dual-book-audit
 
 on:
   push:
@@ -11,6 +11,7 @@ on:
       - scripts/chapter_translation_v10_release.py
       - scripts/chapter_translation_v10_release9.py
       - scripts/build_crossbook_goodfellow_sample.py
+      - scripts/build_short_parker_sample.py
   workflow_dispatch:
 
 concurrency:
@@ -23,7 +24,7 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 20
     env:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       BOOKAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -36,20 +37,19 @@ jobs:
       GIGACHAT_SCOPE: GIGACHAT_API_PERS
       GIGACHAT_BASE_URL: https://api.giga.chat/v1
       BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
-      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '8'
+      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '7'
       BOOKAI_GIGACHAT_BATCH_CHARS: '6500'
       BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
       BOOKAI_GIGACHAT_TIMEOUT: '55'
       BOOKAI_GIGACHAT_RETRIES: '1'
-      BOOKAI_V10_NAME_MAX: '64'
+      BOOKAI_V10_NAME_MAX: '48'
       BOOKAI_V10_NAME_BATCH: '20'
       BOOKAI_V10_TERM_BATCH: '16'
-      BOOKAI_V10_DEEP_MAX: '8'
-      BOOKAI_V10_RELEASE_DEEP_MAX: '16'
-      BOOKAI_V10_RESIDUAL_DEEP_MAX: '12'
+      BOOKAI_V10_DEEP_MAX: '6'
+      BOOKAI_V10_RELEASE_DEEP_MAX: '8'
+      BOOKAI_V10_RESIDUAL_DEEP_MAX: '6'
       BOOKAI_V10_RECOVERY_BATCH: '4'
       BOOKAI_V10_JSON_RECOVERY_BATCH: '3'
-      BOOKAI_V10_BIBLE_CACHE: .bookai-cache-v10/book-bible.json
 
     steps:
       - uses: actions/checkout@v4
@@ -57,12 +57,16 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install and validate general v10 release
+      - name: Validate code and build short samples
         id: validate
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat pypdf
-          python -m compileall -q src/bookai/v10*.py src/bookai/release_final.py scripts/chapter_translation_v10.py scripts/chapter_translation_v10_release.py scripts/chapter_translation_v10_release9.py scripts/build_crossbook_goodfellow_sample.py
+          python -m compileall -q \
+            src/bookai/v10*.py src/bookai/release_final.py \
+            scripts/chapter_translation_v10_release9.py \
+            scripts/build_crossbook_goodfellow_sample.py \
+            scripts/build_short_parker_sample.py
           pytest -q \
             tests/test_v10_architecture.py \
             tests/test_v10_source_only.py \
@@ -73,141 +77,85 @@ jobs:
             tests/test_v10_release_hardening.py \
             tests/test_release_final.py \
             tests/test_general_release_architecture.py
-          # Resolve and parse the public cross-book PDF before spending any model calls.
-          rm -rf crossbook-goodfellow
-          python scripts/build_crossbook_goodfellow_sample.py crossbook-goodfellow
-          test -s crossbook-goodfellow/sample.fb2
-          test -s crossbook-goodfellow/sample-source.txt
+          rm -rf short-parker short-goodfellow
+          python scripts/build_short_parker_sample.py Devices_and_Desires.fb2 short-parker
+          python scripts/build_crossbook_goodfellow_sample.py short-goodfellow
+          test -s short-parker/sample.fb2
+          test -s short-goodfellow/sample.fb2
 
-      - name: Translate Chapters One to Three
+      - name: Translate short Parker and Goodfellow samples
         run: |
           set -uo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}"
           test -n "${DEEPSEEK_API_KEY:-}"
-          rm -rf .bookai-cache-v10 audit-three
-          mkdir -p audit-three
           overall=0
-          for chapter in "Chapter One" "Chapter Two" "Chapter Three"; do
-            slug=$(echo "$chapter" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
-            mkdir -p "audit-three/$slug"
-            echo "=== $chapter ==="
+          for sample in short-parker short-goodfellow; do
+            echo "=== $sample ==="
+            mkdir -p "$sample/run" "$sample/.bookai-cache"
             set +e
-            BOOKAI_CHAPTER_NAME="$chapter" \
-              /usr/bin/time -f '%e' -o "audit-three/$slug/wall_seconds.txt" \
-              timeout --signal=TERM --kill-after=30s 20m \
-              python scripts/chapter_translation_v10_release9.py 2>&1 | tee "audit-three/$slug/run.log"
-            status=${PIPESTATUS[0]}
+            (
+              cd "$sample/run"
+              BOOKAI_SOURCE="../sample.fb2" \
+              BOOKAI_CHAPTER_NAME="Chapter One" \
+              BOOKAI_V10_BIBLE_CACHE="../.bookai-cache/book-bible.json" \
+                /usr/bin/time -f '%e' -o wall_seconds.txt \
+                timeout --signal=TERM --kill-after=30s 7m \
+                python ../../scripts/chapter_translation_v10_release9.py 2>&1 | tee run.log
+              exit ${PIPESTATUS[0]}
+            )
+            status=$?
             set -e
-            echo "$status" > "audit-three/$slug/translation_exit_status.txt"
-            cp -f "v10-$slug-report.json" "audit-three/$slug/" 2>/dev/null || true
-            cp -f "v10-$slug-map.json" "audit-three/$slug/" 2>/dev/null || true
-            cp -f "v10-$slug-source.txt" "audit-three/$slug/" 2>/dev/null || true
-            cp -f "v10-$slug-translated.txt" "audit-three/$slug/" 2>/dev/null || true
-            cp -f "Devices_and_Desires_RU_V10_$slug.fb2" "audit-three/$slug/" 2>/dev/null || true
+            echo "$status" > "$sample/translation_exit_status.txt"
+            cp -f "$sample/run/v10-chapter-one-report.json" "$sample/report.json" 2>/dev/null || true
+            cp -f "$sample/run/v10-chapter-one-map.json" "$sample/map.json" 2>/dev/null || true
+            cp -f "$sample/run/v10-chapter-one-source.txt" "$sample/pipeline-source.txt" 2>/dev/null || true
+            cp -f "$sample/run/v10-chapter-one-translated.txt" "$sample/pipeline-translated.txt" 2>/dev/null || true
+            cp -f "$sample/.bookai-cache/book-bible.json" "$sample/book-bible.json" 2>/dev/null || true
             if [ "$status" -ne 0 ]; then overall=1; fi
           done
-          cp -f .bookai-cache-v10/book-bible.json audit-three/book-bible.json 2>/dev/null || true
           exit "$overall"
 
-      - name: Build three-chapter aggregate summary
+      - name: Build short dual-book summary
         if: always()
         run: |
-          mkdir -p audit-three
           python - <<'PY'
           import json
           from pathlib import Path
-          root = Path('audit-three')
+
           rows = []
-          totals = {
-              'segments': 0,
-              'source_chars': 0,
-              'chapter_seconds': 0.0,
-              'giga_primary_calls': 0,
-              'giga_total_calls': 0,
-              'deepseek_requests': 0,
-              'deepseek_tokens': 0,
-              'final_hard': 0,
-              'final_integrity': 0,
-              'first_pass_missing': 0,
-          }
-          for slug in ('chapter-one','chapter-two','chapter-three'):
-              p = root / slug / f'v10-{slug}-report.json'
-              if not p.exists():
-                  rows.append({'chapter': slug, 'missing_report': True})
-                  continue
-              r = json.loads(p.read_text('utf-8'))
-              row = {
-                  'chapter': r.get('chapter'),
-                  'version': r.get('version'),
-                  'chapter_selection': r.get('chapter_selection'),
-                  'segments': r.get('segments'),
-                  'source_chars': r.get('source_chars'),
-                  'timing': r.get('timing'),
-                  'book_bible': r.get('book_bible'),
-                  'primary_transport': r.get('primary_transport'),
-                  'usage': r.get('usage'),
-                  'qa_initial': r.get('qa_initial'),
-                  'qa_after_local': r.get('qa_after_local'),
-                  'deepseek_specialist': r.get('deepseek_specialist'),
-                  'qa_release_pre': r.get('qa_release_pre'),
-                  'release_local_rewriter': r.get('release_local_rewriter'),
-                  'qa_release_mid': r.get('qa_release_mid'),
-                  'release_deepseek_specialist': r.get('release_deepseek_specialist'),
-                  'qa_final': r.get('qa_final'),
-                  'final_hard': r.get('final_hard'),
-                  'final_integrity': r.get('final_integrity'),
-                  'segment_integrity': r.get('segment_integrity'),
-              }
-              rows.append(row)
-              totals['segments'] += int(r.get('segments') or 0)
-              totals['source_chars'] += int(r.get('source_chars') or 0)
-              totals['chapter_seconds'] += float((r.get('timing') or {}).get('chapter_seconds') or 0)
-              totals['giga_primary_calls'] += int(((r.get('usage') or {}).get('gigachat_primary') or {}).get('api_calls') or 0)
-              totals['giga_total_calls'] += int(((r.get('usage') or {}).get('gigachat_total') or {}).get('api_calls') or 0)
-              totals['deepseek_requests'] += int(((r.get('usage') or {}).get('deepseek') or {}).get('requests') or 0)
-              totals['deepseek_tokens'] += int(((r.get('usage') or {}).get('deepseek') or {}).get('total_tokens') or 0)
-              totals['final_hard'] += int((r.get('qa_final') or {}).get('hard') or 0)
-              totals['final_integrity'] += int((r.get('final_integrity') or {}).get('count') or 0)
-              totals['first_pass_missing'] += int((r.get('primary_transport') or {}).get('first_pass_missing') or 0)
-          payload = {'chapters': rows, 'totals': totals}
-          (root / 'aggregate-summary.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), 'utf-8')
+          for name in ('short-parker', 'short-goodfellow'):
+              root = Path(name)
+              meta = json.loads((root / 'sample-meta.json').read_text('utf-8')) if (root / 'sample-meta.json').exists() else {}
+              report = json.loads((root / 'report.json').read_text('utf-8')) if (root / 'report.json').exists() else {}
+              status = (root / 'translation_exit_status.txt').read_text('utf-8').strip() if (root / 'translation_exit_status.txt').exists() else 'missing'
+              rows.append({
+                  'sample': name,
+                  'exit_status': status,
+                  'sample_meta': meta,
+                  'segments': report.get('segments'),
+                  'source_chars': report.get('source_chars'),
+                  'timing': report.get('timing'),
+                  'book_bible': report.get('book_bible'),
+                  'primary_transport': report.get('primary_transport'),
+                  'usage': report.get('usage'),
+                  'qa_initial': report.get('qa_initial'),
+                  'qa_final': report.get('qa_final'),
+                  'final_hard': report.get('final_hard'),
+                  'final_integrity': report.get('final_integrity'),
+              })
+          payload = {'mode': 'short-dual-book-smoke', 'samples': rows}
+          Path('short-dual-summary.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), 'utf-8')
           print(json.dumps(payload, ensure_ascii=False, indent=2))
           PY
 
-      - name: Cross-book diagnostic on Deep Learning excerpt
-        if: ${{ always() && !cancelled() && steps.validate.outcome == 'success' }}
-        run: |
-          set -uo pipefail
-          mkdir -p crossbook-goodfellow/run crossbook-goodfellow/.bookai-cache
-          set +e
-          (
-            cd crossbook-goodfellow/run
-            BOOKAI_SOURCE="../sample.fb2" \
-            BOOKAI_CHAPTER_NAME="Chapter One" \
-            BOOKAI_V10_BIBLE_CACHE="../.bookai-cache/book-bible.json" \
-              /usr/bin/time -f '%e' -o wall_seconds.txt \
-              timeout --signal=TERM --kill-after=30s 12m \
-              python ../../scripts/chapter_translation_v10_release9.py 2>&1 | tee run.log
-            exit ${PIPESTATUS[0]}
-          )
-          status=$?
-          set -e
-          echo "$status" > crossbook-goodfellow/translation_exit_status.txt
-          cp -f crossbook-goodfellow/run/v10-chapter-one-report.json crossbook-goodfellow/report.json 2>/dev/null || true
-          cp -f crossbook-goodfellow/run/v10-chapter-one-map.json crossbook-goodfellow/map.json 2>/dev/null || true
-          cp -f crossbook-goodfellow/run/v10-chapter-one-source.txt crossbook-goodfellow/pipeline-source.txt 2>/dev/null || true
-          cp -f crossbook-goodfellow/run/v10-chapter-one-translated.txt crossbook-goodfellow/pipeline-translated.txt 2>/dev/null || true
-          cp -f crossbook-goodfellow/.bookai-cache/book-bible.json crossbook-goodfellow/book-bible.json 2>/dev/null || true
-          echo "cross-book diagnostic exit status=$status"
-          exit 0
-
-      - name: Upload translation audit and cross-book diagnostic
+      - name: Upload short dual-book audit
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v10-general-release-audit
+          name: v10-short-dual-book-smoke
           path: |
-            audit-three
-            crossbook-goodfellow
+            short-parker
+            short-goodfellow
+            short-dual-summary.json
           if-no-files-found: warn
           retention-days: 7
