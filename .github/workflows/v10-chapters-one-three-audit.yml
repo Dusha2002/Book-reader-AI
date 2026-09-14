@@ -6,8 +6,11 @@ on:
     paths:
       - .github/workflows/v10-chapters-one-three-audit.yml
       - src/bookai/v10*.py
+      - src/bookai/release_final.py
       - scripts/chapter_translation_v10_release.py
+      - scripts/chapter_translation_v10_release9.py
       - tests/test_v10*.py
+      - tests/test_release_final.py
   workflow_dispatch:
 
 permissions:
@@ -38,7 +41,7 @@ jobs:
       BOOKAI_V10_NAME_BATCH: '20'
       BOOKAI_V10_TERM_BATCH: '16'
       BOOKAI_V10_DEEP_MAX: '8'
-      BOOKAI_V10_RELEASE_DEEP_MAX: '8'
+      BOOKAI_V10_RELEASE_DEEP_MAX: '16'
       BOOKAI_V10_RECOVERY_BATCH: '4'
       BOOKAI_V10_JSON_RECOVERY_BATCH: '3'
       BOOKAI_V10_BIBLE_CACHE: .bookai-cache-v10/book-bible.json
@@ -49,11 +52,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install and validate clean v10 release hardening
+      - name: Install and validate clean9 focused release
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src/bookai/v10*.py scripts/chapter_translation_v10.py scripts/chapter_translation_v10_release.py
+          python -m compileall -q src/bookai/v10*.py src/bookai/release_final.py scripts/chapter_translation_v10.py scripts/chapter_translation_v10_release.py scripts/chapter_translation_v10_release9.py
           pytest -q \
             tests/test_v10_architecture.py \
             tests/test_v10_source_only.py \
@@ -61,7 +64,8 @@ jobs:
             tests/test_v10_integrity_quantity.py \
             tests/test_v10_clause_fidelity.py \
             tests/test_v10_deepseek_routing.py \
-            tests/test_v10_release_hardening.py
+            tests/test_v10_release_hardening.py \
+            tests/test_release_final.py
 
       - name: Translate Chapters One to Three
         run: |
@@ -79,7 +83,7 @@ jobs:
             BOOKAI_CHAPTER_NAME="$chapter" \
               /usr/bin/time -f '%e' -o "audit-three/$slug/wall_seconds.txt" \
               timeout --signal=TERM --kill-after=30s 20m \
-              python scripts/chapter_translation_v10_release.py 2>&1 | tee "audit-three/$slug/run.log"
+              python scripts/chapter_translation_v10_release9.py 2>&1 | tee "audit-three/$slug/run.log"
             status=${PIPESTATUS[0]}
             set -e
             echo "$status" > "audit-three/$slug/translation_exit_status.txt"
@@ -121,6 +125,7 @@ jobs:
               r = json.loads(p.read_text('utf-8'))
               row = {
                   'chapter': r.get('chapter'),
+                  'version': r.get('version'),
                   'chapter_selection': r.get('chapter_selection'),
                   'segments': r.get('segments'),
                   'source_chars': r.get('source_chars'),
@@ -160,7 +165,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v10-chapters-one-three-clean8-release
+          name: v10-chapters-one-three-clean9-focused
           path: audit-three
           if-no-files-found: warn
           retention-days: 7
