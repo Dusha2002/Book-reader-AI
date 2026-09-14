@@ -65,7 +65,7 @@ def main() -> None:
         "source_chars": sum(len(s.text) for s in targets),
         "whole_book_segments": len(all_targets),
         "selection": selection,
-        "architecture": "clean9.2:domain-aware-transport+source-bible+one-shot-semantic-terminology+focused-release-deepseek",
+        "architecture": "clean10:whole-book-memory+consensus-terms+focused-semantic-editorial",
     }, ensure_ascii=False), flush=True)
 
     giga = HardenedRobustTaggedPrimaryTransport()
@@ -77,20 +77,21 @@ def main() -> None:
     bible_seconds = time.perf_counter() - bible_started
     usage_after_bible = giga.usage.as_dict()
 
-    # One source-only semantic terminology pass runs before translation and is cached
-    # in the book bible. It is intentionally a term verifier, not another translation pass.
     provider = _provider()
     terminology_started = time.perf_counter()
     terminology_verifier = DeepSeekPublicationTerminologyVerifier(provider, BIBLE)
-    terminology_stats = terminology_verifier.verify(all_targets, memory)
+    terminology_stats = terminology_verifier.verify(all_targets, memory, focus_segments=targets)
     terminology_seconds = time.perf_counter() - terminology_started
 
+    # BookMemory is whole-book; neighboring translation context must remain local to
+    # the requested chapter/window so benchmark memory sections never leak into prose.
+    chapter_context = targets
     chapter_started = time.perf_counter()
-    translated, primary_errors = giga.translate_many(targets, memory, source_segments=all_targets)
+    translated, primary_errors = giga.translate_many(targets, memory, source_segments=chapter_context)
     usage_after_primary = giga.usage.as_dict()
 
     integrity = SegmentIntegrityGate(giga)
-    integrity_changed = integrity.repair(targets, translated, memory, source_segments=all_targets)
+    integrity_changed = integrity.repair(targets, translated, memory, source_segments=chapter_context)
     usage_after_integrity = giga.usage.as_dict()
 
     dialogue_guard = FinalDialogueDiscourseGuard()
@@ -122,14 +123,12 @@ def main() -> None:
     speaker_after_semantic = speaker_semantic.apply(targets, translated)
 
     final_integrity_guard = SegmentIntegrityGate(giga)
-    final_integrity_changed = final_integrity_guard.repair(targets, translated, memory, source_segments=all_targets)
+    final_integrity_changed = final_integrity_guard.repair(targets, translated, memory, source_segments=chapter_context)
     usage_after_final_integrity = giga.usage.as_dict()
     dialogue_after_integrity = dialogue_guard.apply(targets, translated)
     speaker_integrity = DialogueSpeakerContinuityGuard()
     speaker_after_integrity = speaker_integrity.apply(targets, translated)
 
-    # Release tail: no second Giga rewrite cascade. Evidence-aware QA first removes
-    # proven false positives; one larger DeepSeek batch receives residual HARD rows.
     release_qa = FinalV10QualityQA(demote_clause_order=True)
     release_pre_issues = release_qa.scan(targets, translated, memory)
     release_local_changed: list[str] = []
@@ -147,8 +146,6 @@ def main() -> None:
     speaker_release_semantic = DialogueSpeakerContinuityGuard()
     speaker_after_release_semantic = speaker_release_semantic.apply(targets, translated)
 
-    # Rare provider/schema-confidence collapse is rescued by one small, proof-gated
-    # call over ONLY the rows that still fail deterministic release QA.
     residual_pre_issues = release_qa.scan(targets, translated, memory)
     residual_repair = ResidualHardDeepSeekRepair(
         provider,
@@ -161,9 +158,22 @@ def main() -> None:
     speaker_after_residual = speaker_residual.apply(targets, translated)
     residual_post_issues = release_qa.scan(targets, translated, memory)
 
+    # Mandatory focused editorial review for source-only semantic hints. It runs even
+    # when deterministic QA is already green, but the specialist still accepts a rewrite
+    # only if it introduces no new HARD failures.
+    editorial_specialist = FinalDeepSeekSemanticSpecialist(
+        provider,
+        release_qa,
+        max_segments=max(4, int(os.getenv("BOOKAI_V10_EDITORIAL_MAX") or "6")),
+    )
+    editorial_changed = editorial_specialist.repair(targets, translated, memory, [])
+    dialogue_after_editorial = dialogue_guard.apply(targets, translated)
+    speaker_editorial = DialogueSpeakerContinuityGuard()
+    speaker_after_editorial = speaker_editorial.apply(targets, translated)
+
     publication_integrity = SegmentIntegrityGate(giga)
     publication_integrity_changed = publication_integrity.repair(
-        targets, translated, memory, source_segments=all_targets
+        targets, translated, memory, source_segments=chapter_context
     )
     usage_after_publication_integrity = giga.usage.as_dict()
     dialogue_after_publication_integrity = dialogue_guard.apply(targets, translated)
@@ -209,11 +219,12 @@ def main() -> None:
     MAP.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), "utf-8")
 
     report = {
-        "version": "v10-clean-9.2-domain-terms",
+        "version": "v10-clean-10-consensus-editorial",
         "chapter": chapter_name,
         "chapter_selection": selection,
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
+        "whole_book_memory_segments": len(all_targets),
         "completed": len(targets) - len(missing),
         "missing_ids": missing,
         "timing": {
@@ -225,13 +236,13 @@ def main() -> None:
             "total_cold_seconds": round(time.perf_counter() - run_started, 2),
         },
         "architecture": {
-            "chapter_selection": "numbered Chapter N boundary; internal FB2 section headings remain inside chapter",
-            "book_bible": "SOURCE-ONLY whole-book canon + publication acronym/term policy",
-            "terminology_verifier": "one cached DeepSeek source-only semantic audit over compact high-risk terms before primary translation",
-            "primary": "domain-aware GigaChat tagged batches + bounded domain-aware recovery",
-            "dialogue": "source-aware dialogue dash normalization preserving genuine nested Russian guillemets",
+            "chapter_selection": "short target window with independent whole-book source memory",
+            "book_bible": "SOURCE-ONLY whole-book canon + entity graph + publication policy",
+            "terminology_verifier": "book-wide candidate evidence + focus-window semantic profile + consensus-gated canon",
+            "primary": "domain-aware GigaChat tagged batches with target-local neighbor context",
+            "dialogue": "source-aware dialogue normalization preserving genuine nested Russian guillemets",
             "qa": "evidence-aware quantity/relation/name/terminology/acronym/citation/segment-boundary contracts",
-            "release_tail": "focused DeepSeek semantic repair plus small fail-closed rescue only if HARD remains",
+            "editorial_review": "focused DeepSeek review over source-only idiom/polysemy/archaic/register hints even when QA is green",
             "final_gate": "zero untranslated + zero structural integrity + zero HARD release QA issues",
             "reference_seed": False,
         },
@@ -254,6 +265,7 @@ def main() -> None:
             "after_release_local_changed_ids": release_local_changed,
             "after_release_semantic_changed_ids": dialogue_after_release_semantic,
             "after_residual_changed_ids": dialogue_after_residual,
+            "after_editorial_changed_ids": dialogue_after_editorial,
             "after_publication_integrity_changed_ids": dialogue_after_publication_integrity,
         },
         "speaker_guard": {
@@ -263,6 +275,7 @@ def main() -> None:
             "after_integrity": {**dict(speaker_integrity.stats), "changed_ids": speaker_after_integrity},
             "after_release_semantic": {**dict(speaker_release_semantic.stats), "changed_ids": speaker_after_release_semantic},
             "after_residual": {**dict(speaker_residual.stats), "changed_ids": speaker_after_residual},
+            "after_editorial": {**dict(speaker_editorial.stats), "changed_ids": speaker_after_editorial},
             "after_publication_integrity": {**dict(speaker_publication_integrity.stats), "changed_ids": speaker_after_publication_integrity},
         },
         "primary_transport": dict(giga.transport_stats),
@@ -289,6 +302,7 @@ def main() -> None:
         "qa_residual_pre": issue_summary(residual_pre_issues),
         "residual_deepseek_repair": dict(residual_repair.stats),
         "qa_residual_post": issue_summary(residual_post_issues),
+        "semantic_editorial_review": {**editorial_specialist.stats, "changed_ids": editorial_changed},
         "qa_final": issue_summary(final_issues),
         "final_hard": {
             "count": len(final_hard),
