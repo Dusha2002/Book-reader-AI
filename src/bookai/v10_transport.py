@@ -13,7 +13,8 @@ _CLOSE_TAG_RE = re.compile(r"</s\s*>", re.I)
 _ANY_S_TAG_RE = re.compile(r"</?s(?:\s|>)", re.I)
 _PROMPT_LABELS = (
     "CONTEXT_ONLY:", "CHARACTERS:", "GLOSSARY:", "SOURCE:", "TARGETS:",
-    "VOICE:", "RHYTHM:", "DIALOGUE:", "HUMOR:", "Глоссарий:", "Источник:",
+    "VOICE:", "RHYTHM:", "DIALOGUE:", "HUMOR:", "ACRONYM_CANON:",
+    "Глоссарий:", "Источник:",
 )
 
 
@@ -29,8 +30,23 @@ def _looks_like_prompt_leak(value: str) -> bool:
     return labels >= 2
 
 
+def _style_payload(memory: BookMemory) -> dict[str, str]:
+    style = memory.style
+    return {
+        "voice": str(style.narrative_voice or ""),
+        "rhythm": str(style.rhythm or ""),
+        "dialogue": str(style.dialogue or ""),
+        "humor": str(style.humor or ""),
+    }
+
+
+def _acronym_canon(memory: BookMemory) -> str:
+    rows = [f"{src}→{dst}" for src, dst in sorted(memory.acronyms.items()) if src and dst]
+    return "; ".join(rows) if rows else "нет"
+
+
 class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
-    """Complete tagged transport with bounded Giga-only recovery.
+    """Complete tagged transport with bounded, domain-aware Giga-only recovery.
 
     Opening tags themselves are reliable boundaries. If a block forgets its closing
     `</s>` but the next opening `<s id=...>` is present, the body can be salvaged up
@@ -52,6 +68,7 @@ class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
             "corrupt_tag_blocks": 0,
             "final_missing": 0,
             "boundary_salvage": True,
+            "domain_aware_prompts": True,
         }
 
     @staticmethod
@@ -87,6 +104,77 @@ class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
             out[sid] = value
         return out
 
+    def _tag_prompt(
+        self,
+        batch: list[Segment],
+        memory: BookMemory,
+        source_segments: list[Segment] | None,
+        *,
+        retry: bool = False,
+    ) -> str:
+        style = memory.style
+        glossary = self._relevant_glossary(batch, memory) or "нет"
+        characters = self._relevant_characters(batch, memory) or "нет"
+        context = self._context_for_batch(batch, source_segments) or "нет"
+        acronyms = _acronym_canon(memory)
+        targets = "\n".join(f'<src id="{s.id}">{s.text}</src>' for s in batch)
+        retry_note = "Это повтор только пропущенных ID; верни КАЖДЫЙ указанный ID." if retry else ""
+        return f"""Профессиональный перевод книги EN→RU. Переведи только SRC-блоки.
+Не предполагай, что книга художественная, учебная или научная: регистр и жанр определяй по STYLE и CONTEXT_ONLY.
+Не сокращай, не пересказывай и не добавляй факты. Сохраняй субъект/объект действия, числа, отрицания, причинность,
+хронологию, терминологическую широту, технический смысл, имена, формулы, обозначения и библиографические ссылки.
+Для художественного текста сохраняй голос, ритм, иронию и естественный диалог; для академического/технического —
+принятую русскую терминологию, точность категорий, нотацию и структуру аргумента.
+Если английское предложение продолжается в соседнем сегменте, не закрывай его точкой и не превращай фрагмент
+в отдельное предложение: сохрани открытый синтаксис и естественную пунктуационную связь.
+
+VOICE: {style.narrative_voice}
+RHYTHM: {style.rhythm}
+DIALOGUE: {style.dialogue}
+HUMOR: {style.humor}
+CHARACTERS: {characters}
+GLOSSARY: {glossary}
+ACRONYM_CANON: {acronyms}
+CONTEXT_ONLY: {context}
+{retry_note}
+
+TARGETS:
+{targets}
+
+ФОРМАТ: ровно по одному блоку на каждый id, без JSON и комментариев:
+<s id="s000001">полный русский перевод</s>"""
+
+    def _call_tagged(
+        self,
+        batch: list[Segment],
+        memory: BookMemory,
+        source_segments: list[Segment] | None,
+        *,
+        retry: bool = False,
+    ) -> dict[str, str]:
+        client = self._ensure_client()
+        request = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты точный профессиональный переводчик книг EN→RU для любых жанров и предметных областей. "
+                        "Следуй переданному профилю текста; не навязывай художественный стиль техническому тексту и наоборот. "
+                        "Не выводи ничего кроме требуемых <s id=...>...</s> блоков."
+                    ),
+                },
+                {"role": "user", "content": self._tag_prompt(batch, memory, source_segments, retry=retry)},
+            ],
+            "temperature": 0.05,
+            "top_p": 0.9,
+            "max_tokens": self.max_tokens,
+        }
+        response = client.chat(request)
+        self.usage.add(_usage(response), calls=1)
+        expected = {s.id for s in batch}
+        return self.parse_tagged(str(response.choices[0].message.content or ""), expected)
+
     def _tagged(self, batch: list[Segment], memory: BookMemory, source_segments, *, retry: bool) -> dict[str, str]:
         self.transport_stats["tagged_calls"] += 1
         return self._call_tagged(batch, memory, source_segments, retry=retry)
@@ -97,13 +185,18 @@ class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
         context = self._context_for_batch(batch, source_segments) or "нет"
         glossary = self._relevant_glossary(batch, memory) or "нет"
         characters = self._relevant_characters(batch, memory) or "нет"
-        system = """Recover ONLY the missing EN→RU literary translations below.
-Return a complete faithful Russian translation for every id. Preserve every proposition,
-actor/action/object relation, number, negation, chronology, technical denotation and name.
+        system = """Recover ONLY the missing EN→RU book-translation rows below.
+The source may be literary fiction, narrative nonfiction, academic/technical prose or another book genre.
+Infer and preserve its register from the supplied style/context; do not force a literary voice onto technical prose.
+Return a complete faithful Russian translation for every id. Preserve every proposition, actor/action/object relation,
+number, negation, chronology, category breadth, technical denotation, acronym policy, citation and name.
+If a source sentence continues across a segment boundary, preserve that open syntax instead of closing it early.
 No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly one row per supplied id."""
         payload = {
+            "style": _style_payload(memory),
             "context_only": context,
             "glossary": glossary,
+            "acronym_canon": dict(memory.acronyms),
             "characters": characters,
             "items": [{"id": s.id, "source": s.text} for s in batch],
         }
@@ -128,6 +221,8 @@ No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly on
         context = self._context_for_batch([segment], source_segments) or "нет"
         glossary = self._relevant_glossary([segment], memory) or "нет"
         characters = self._relevant_characters([segment], memory) or "нет"
+        style = _style_payload(memory)
+        acronyms = _acronym_canon(memory)
         client = self._ensure_client()
         request = {
             "model": self.model,
@@ -135,7 +230,10 @@ No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly on
                 {
                     "role": "system",
                     "content": (
-                        "Переведи один английский фрагмент литературной прозы на русский. "
+                        "Переведи один английский фрагмент книги на русский в регистре и предметной области исходника. "
+                        "Не считай текст художественным по умолчанию. Для технического/академического текста используй "
+                        "принятую русскую терминологию и сохраняй нотацию; для художественного — авторский голос. "
+                        "Если предложение продолжается в соседнем сегменте, не закрывай его искусственно. "
                         "Верни ТОЛЬКО полный готовый русский перевод без JSON, тегов, комментариев, "
                         "пометок 'перевод:' и альтернатив. Ничего не сокращай и не добавляй."
                     ),
@@ -143,8 +241,8 @@ No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly on
                 {
                     "role": "user",
                     "content": (
-                        f"CONTEXT_ONLY: {context}\nCHARACTERS: {characters}\nGLOSSARY: {glossary}\n\n"
-                        f"SOURCE:\n{segment.text}"
+                        f"STYLE: {style}\nCONTEXT_ONLY: {context}\nCHARACTERS: {characters}\n"
+                        f"GLOSSARY: {glossary}\nACRONYM_CANON: {acronyms}\n\nSOURCE:\n{segment.text}"
                     ),
                 },
             ],
