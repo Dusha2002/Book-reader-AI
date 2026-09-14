@@ -11,16 +11,17 @@ from bs4 import BeautifulSoup
 
 SOURCE_URL = "https://www.deeplearningbook.org/contents/intro.html"
 
-# Five prose windows cover the late third-wave discussion and sections 1.2.2–1.2.3
-# around the user's requested pp. 35–40 while deliberately skipping figure bodies.
+# Short, semantically unique anchors deliberately avoid crossing PDF-derived page
+# boundaries in the official HTML. The extracted text remains the full prose between
+# the anchors; only the locator is tolerant of layout drift.
 WINDOWS = (
     (
-        "The third wave of neural networks research began with a breakthrough in 2006.",
-        "the ability of deep models to leverage large labeled datasets.",
+        "The third wave of neural networks research began",
+        "deep models to leverage large labeled datasets.",
     ),
     (
-        "One may wonder why deep learning has only recently become recognized as a crucial technology",
-        "with unsupervised or semi-supervised learning.",
+        "One may wonder why deep learning has only recently become recognized",
+        "unsupervised or semi-supervised learning.",
     ),
     (
         "Another key reason that neural networks are wildly successful today",
@@ -31,8 +32,8 @@ WINDOWS = (
         "biological neural networks may be even larger than this plot portrays.",
     ),
     (
-        "In retrospect, it is not particularly surprising that neural networks with fewer neurons than a leech",
-        "This trend is generally expected to continue well into the future.",
+        "In retrospect, it is not particularly surprising that neural networks with fewer",
+        "expected to continue well into the future.",
     ),
 )
 
@@ -72,22 +73,39 @@ def _download() -> str:
 def _clean_page_text(raw_html: str) -> str:
     soup = BeautifulSoup(raw_html, "html.parser")
     text = _norm(soup.get_text(" ", strip=True))
-    # The official HTML is page-derived and repeats printed page headers/numbers.
-    # Remove only those structural artifacts; benchmark prose itself is untouched.
+    # Remove only repeated printed page scaffolding. Do not rewrite benchmark prose.
     text = re.sub(r"\b\d{1,3}\s+CHAPTER 1\. INTRODUCTION\b", " ", text, flags=re.I)
     text = re.sub(r"\bCHAPTER 1\. INTRODUCTION\b", " ", text, flags=re.I)
     return _norm(text)
 
 
+def _find_anchor(text: str, marker: str, *, start: int = 0) -> int:
+    marker = _norm(marker)
+    pos = text.find(marker, start)
+    if pos >= 0:
+        return pos
+
+    # Last-resort locator: tolerate punctuation/spacing inserted by generated HTML,
+    # while still requiring every anchor word in the same order and close together.
+    words = re.findall(r"[A-Za-z0-9]+", marker)
+    if not words:
+        return -1
+    pattern = r"\b" + r"[\s\W]{0,12}".join(re.escape(word) for word in words) + r"\b"
+    match = re.search(pattern, text[start:], flags=re.I)
+    return start + match.start() if match else -1
+
+
 def _extract_window(text: str, start_marker: str, end_marker: str) -> str:
     start_marker = _norm(start_marker)
     end_marker = _norm(end_marker)
-    start = text.find(start_marker)
+    start = _find_anchor(text, start_marker)
     if start < 0:
         raise RuntimeError(f"Could not resolve benchmark start marker: {start_marker!r}")
-    end = text.find(end_marker, start)
+    end = _find_anchor(text, end_marker, start=start)
     if end < 0:
         raise RuntimeError(f"Could not resolve benchmark end marker: {end_marker!r}")
+    # Exact end length is safe for exact anchors; fuzzy fallback gets a small tail and
+    # is normalized below. The marker itself is diagnostics-only, never a reference.
     end += len(end_marker)
     value = _norm(text[start:end])
     if len(value) < 100:
