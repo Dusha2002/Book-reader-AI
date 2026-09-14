@@ -24,10 +24,7 @@ def _norm(text: str) -> str:
 
 
 def _download_text() -> str:
-    request = urllib.request.Request(
-        SOURCE_URL,
-        headers={"User-Agent": "Book-reader-AI cross-domain benchmark/1.0"},
-    )
+    request = urllib.request.Request(SOURCE_URL, headers={"User-Agent": "Book-reader-AI cross-domain benchmark/1.0"})
     with urllib.request.urlopen(request, timeout=60) as response:
         raw = response.read()
     text = raw.decode("utf-8", errors="replace")
@@ -60,87 +57,87 @@ def _clean_blocks(text: str) -> list[str]:
     return cleaned
 
 
-def _opening_sample(blocks: list[str]) -> tuple[list[str], dict[str, object]]:
+def _opening_sample(blocks: list[str]):
     selected: list[str] = []
-    for block in blocks:
+    selected_indices: list[int] = []
+    for i, block in enumerate(blocks):
         if END_ANCHOR.casefold() in block.casefold():
             break
         selected.append(block)
+        selected_indices.append(i)
     joined = "\n\n".join(selected)
     if not selected or not (TARGET_MIN_CHARS <= len(joined) <= TARGET_MAX_CHARS):
         raise RuntimeError(f"Unexpected Franklin benchmark size: {len(joined)} chars")
-    required = (
-        "poverty and obscurity",
-        "second edition",
-        "Without vanity I may say",
-        "thank God for his vanity",
-        "kind providence",
-    )
+    required = ("poverty and obscurity", "second edition", "Without vanity I may say", "thank God for his vanity", "kind providence")
     missing = [phrase for phrase in required if phrase.casefold() not in joined.casefold()]
     if missing:
         raise RuntimeError(f"Franklin benchmark lost required narrative coverage: {missing}")
-    return selected, {"selection_mode": "opening-regression-a"}
+    return selected, {"selection_mode": "opening-regression-a"}, set(selected_indices)
 
 
-def _unseen_window(blocks: list[str]) -> tuple[list[str], dict[str, object]]:
-    # Use a later memoir window rather than another hand-picked idiom. This keeps
-    # the cycle source-driven and exposes different period syntax/lexicon.
+def _window_at(blocks: list[str], fraction: float, mode: str, excluded: set[int] | None = None):
     if len(blocks) < 30:
         raise RuntimeError(f"Not enough Franklin narrative blocks: {len(blocks)}")
-    center = round(0.38 * (len(blocks) - 1))
-    lo = max(0, center - 3)
-    hi = min(len(blocks), center + 4)
-    candidates = list(range(lo, hi))
+    excluded = set(excluded or ())
+    center = round(fraction * (len(blocks) - 1))
     selected_indices: list[int] = []
     chars = 0
-    for idx in sorted(candidates, key=lambda i: (abs(i - center), i)):
-        size = len(blocks[idx]) + 2
-        if chars + size > TARGET_MAX_CHARS:
-            continue
-        selected_indices.append(idx)
-        chars += size
-        if chars >= 3000 and len(selected_indices) >= 4:
+    radius = 0
+    while chars < 3000 and radius < 28:
+        candidates = (center,) if radius == 0 else (center - radius, center + radius)
+        for idx in candidates:
+            if not (0 <= idx < len(blocks)) or idx in excluded or idx in selected_indices:
+                continue
+            size = len(blocks[idx]) + 2
+            if chars + size > TARGET_MAX_CHARS:
+                continue
+            selected_indices.append(idx)
+            chars += size
+        radius += 1
+        if chars >= TARGET_MIN_CHARS and len(selected_indices) >= 4 and radius > 4:
             break
-    if chars < TARGET_MIN_CHARS:
-        radius = 4
-        while chars < TARGET_MIN_CHARS and radius < 14:
-            for idx in (center - radius, center + radius):
-                if not (0 <= idx < len(blocks)) or idx in selected_indices:
-                    continue
-                size = len(blocks[idx]) + 2
-                if chars + size <= TARGET_MAX_CHARS:
-                    selected_indices.append(idx)
-                    chars += size
-            radius += 1
     selected_indices.sort()
     selected = [blocks[idx] for idx in selected_indices]
     joined = "\n\n".join(selected)
     if not (TARGET_MIN_CHARS <= len(joined) <= TARGET_MAX_CHARS):
-        raise RuntimeError(f"Unexpected unseen Franklin benchmark size: {len(joined)} chars")
+        raise RuntimeError(f"Unexpected Franklin benchmark size: {len(joined)} chars")
     return selected, {
-        "selection_mode": "unseen-mid-memoir-window-b",
+        "selection_mode": mode,
         "center_clean_block": center,
         "selected_clean_block_indices": selected_indices,
-    }
+        "excluded_prior_variant_indices": len(excluded),
+    }, set(selected_indices)
 
 
-def _fb2(paragraphs: list[str]) -> str:
-    body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in paragraphs)
+def _unseen_window(blocks: list[str]):
+    return _window_at(blocks, 0.38, "unseen-mid-memoir-window-b")
+
+
+def _unseen_window_c(blocks: list[str]):
+    _, _, prior = _unseen_window(blocks)
+    return _window_at(blocks, 0.72, "unseen-late-memoir-window-c", prior)
+
+
+def _fb2(target_paragraphs: list[str], memory_paragraphs: list[str]) -> str:
+    target_body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in target_paragraphs)
+    memory_body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in memory_paragraphs)
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
   <description>
     <title-info>
       <genre>biography</genre>
       <author><first-name>Benjamin</first-name><last-name>Franklin</last-name></author>
-      <book-title>Autobiography of Benjamin Franklin — short narrative nonfiction benchmark</book-title>
+      <book-title>Autobiography of Benjamin Franklin — short benchmark with whole-book memory</book-title>
       <lang>en</lang>
     </title-info>
     <document-info><id>bookai-crossbook-franklin-short</id><version>1.0</version></document-info>
   </description>
   <body>
-    <section>
-      <title><p>Chapter One</p></title>
-{body}
+    <section><title><p>Chapter One</p></title>
+{target_body}
+    </section>
+    <section><title><p>Chapter Two</p></title>
+{memory_body}
     </section>
   </body>
 </FictionBook>
@@ -151,13 +148,16 @@ def main() -> None:
     out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "short-franklin")
     out_dir.mkdir(parents=True, exist_ok=True)
     blocks = _clean_blocks(_download_text())
-    if VARIANT in {"b", "alt", "unseen"}:
-        selected, selection_meta = _unseen_window(blocks)
+    if VARIANT in {"c", "fresh", "unseen-c"}:
+        selected, selection_meta, selected_indices = _unseen_window_c(blocks)
+    elif VARIANT in {"b", "alt", "unseen"}:
+        selected, selection_meta, selected_indices = _unseen_window(blocks)
     else:
-        selected, selection_meta = _opening_sample(blocks)
+        selected, selection_meta, selected_indices = _opening_sample(blocks)
     source_text = "\n\n".join(selected)
+    memory_rows = [block for i, block in enumerate(blocks) if i not in selected_indices]
 
-    (out_dir / "sample.fb2").write_text(_fb2(selected), "utf-8")
+    (out_dir / "sample.fb2").write_text(_fb2(selected, memory_rows), "utf-8")
     (out_dir / "sample-source.txt").write_text(source_text, "utf-8")
     meta = {
         "variant": VARIANT,
@@ -165,6 +165,9 @@ def main() -> None:
         "source_format": "project-gutenberg-plain-text",
         "source_chars": len(source_text),
         "segments": len(selected),
+        "memory_scope": "whole-book-minus-target-window",
+        "memory_segments": len(memory_rows),
+        "memory_chars": sum(len(row) for row in memory_rows),
         "reference_text_embedded": False,
         **selection_meta,
     }
