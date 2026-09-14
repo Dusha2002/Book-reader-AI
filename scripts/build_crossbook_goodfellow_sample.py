@@ -4,22 +4,25 @@ import html as html_lib
 import io
 import json
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import unicodedata
 import urllib.request
 from pathlib import Path
 
 from pypdf import PdfReader
 
-# Public mirror of the same MIT Press edition used for the cross-book diagnostic.
-# We still resolve physical PDF pages 35–40, but the smoke test keeps only a small
-# representative subset so model-backed iteration stays fast.
 SOURCE_URL = "https://raw.githubusercontent.com/janishar/mit-deep-learning-book-pdf/master/complete-book-bookmarked-pdf/deeplearningbook.pdf"
 PAGE_FIRST = 35
 PAGE_LAST = 40
 TARGET_MIN_CHARS = 2200
-TARGET_MAX_CHARS = 4800
-ANCHORS = ("deep learning", "neural", "LSTM", "CIFAR")
+TARGET_MAX_CHARS = 4600
+# Prose anchors only: unlike CIFAR in a figure body, these exercise terminology,
+# acronyms, cross-references and technical prose without turning the smoke test
+# into OCR/layout evaluation.
+ANCHORS = ("deep learning", "faster CPUs", "general purpose GPUs", "LSTM")
 
 _LIGATURES = str.maketrans({
     "ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl",
@@ -45,7 +48,37 @@ def _download_pdf() -> bytes:
     return data
 
 
-def _page_text(pdf_bytes: bytes) -> list[str]:
+def _page_text_poppler(pdf_bytes: bytes) -> list[str]:
+    exe = shutil.which("pdftotext")
+    if not exe:
+        return []
+    with tempfile.NamedTemporaryFile(suffix=".pdf") as handle:
+        handle.write(pdf_bytes)
+        handle.flush()
+        proc = subprocess.run(
+            [
+                exe,
+                "-f", str(PAGE_FIRST),
+                "-l", str(PAGE_LAST),
+                "-layout",
+                "-enc", "UTF-8",
+                handle.name,
+                "-",
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    raw_pages = proc.stdout.decode("utf-8", errors="replace").split("\f")
+    pages = []
+    for raw in raw_pages:
+        text = _norm(raw)
+        if len(text) >= 200:
+            pages.append(text)
+    return pages
+
+
+def _page_text_pypdf(pdf_bytes: bytes) -> list[str]:
     reader = PdfReader(io.BytesIO(pdf_bytes))
     if len(reader.pages) < PAGE_LAST:
         raise RuntimeError(f"Benchmark PDF has only {len(reader.pages)} pages")
@@ -53,33 +86,58 @@ def _page_text(pdf_bytes: bytes) -> list[str]:
     for physical_page in range(PAGE_FIRST, PAGE_LAST + 1):
         raw = reader.pages[physical_page - 1].extract_text() or ""
         text = _norm(raw)
-        text = re.sub(r"(?im)^\s*CHAPTER\s+1\.\s+INTRODUCTION\s*$", "", text)
-        text = re.sub(r"(?im)^\s*\d{1,2}\s*$", "", text)
-        text = _norm(text)
         if len(text) < 200:
             raise RuntimeError(f"Physical page {physical_page} extracted only {len(text)} chars")
         pages.append(text)
     return pages
 
 
+def _page_text(pdf_bytes: bytes) -> tuple[list[str], str]:
+    # Poppler reconstructs spaces from glyph positions substantially better than
+    # pypdf on this particular typeset PDF. pypdf remains a portability fallback.
+    pages = _page_text_poppler(pdf_bytes)
+    extractor = "pdftotext-layout" if pages else "pypdf"
+    if not pages:
+        pages = _page_text_pypdf(pdf_bytes)
+
+    cleaned: list[str] = []
+    for text in pages:
+        text = re.sub(r"(?im)^\s*CHAPTER\s+1\.\s+INTRODUCTION\s*$", "", text)
+        text = re.sub(r"(?im)^\s*\d{1,2}\s*$", "", text)
+        text = _norm(text)
+        cleaned.append(text)
+    return cleaned, extractor
+
+
 def _sentences(pages: list[str]) -> list[str]:
+    # Layout extraction leaves line breaks at column width. Join them after
+    # dehyphenation; real sentence boundaries remain punctuation-based below.
     text = " ".join(re.sub(r"\s+", " ", page).strip() for page in pages)
     rows = [row.strip() for row in re.split(r"(?<=[.!?])\s+(?=(?:[A-Z0-9]|\())", text) if row.strip()]
     return [row for row in rows if len(row) >= 35]
 
 
+def _looks_space_corrupt(text: str) -> bool:
+    # Fail fast if extraction again produces long runs of glued English words.
+    glued = re.findall(r"\b[a-z]{22,}\b", text)
+    compact_ratio = sum(len(x) for x in glued) / max(1, len(text))
+    return len(glued) >= 3 or compact_ratio > 0.025
+
+
 def _short_blocks(pages: list[str]) -> tuple[list[str], dict[str, int]]:
     rows = _sentences(pages)
+    joined = "\n".join(rows)
+    if _looks_space_corrupt(joined):
+        raise RuntimeError("Goodfellow source extraction contains glued-word corruption")
+
     anchor_index: dict[str, int] = {}
     for anchor in ANCHORS:
         index = next((i for i, row in enumerate(rows) if anchor.casefold() in row.casefold()), None)
         if index is None:
-            raise RuntimeError(f"Goodfellow short benchmark missing anchor {anchor!r}")
+            raise RuntimeError(f"Goodfellow short benchmark missing prose anchor {anchor!r}")
         anchor_index[anchor] = index
 
     selected: set[int] = set(anchor_index.values())
-    # Grow context symmetrically around the anchor sentences until the sample is
-    # substantial enough for style/terminology checks but still far below six pages.
     radius = 1
     while True:
         candidate = set(selected)
@@ -95,8 +153,6 @@ def _short_blocks(pages: list[str]) -> tuple[list[str], dict[str, int]]:
         radius += 1
 
     ordered = sorted(selected)
-    # Keep contiguous sentence runs as independent FB2 paragraphs. This preserves
-    # local context without merging unrelated page regions into one mega-segment.
     blocks: list[str] = []
     group: list[str] = []
     prev: int | None = None
@@ -143,11 +199,11 @@ def _fb2(paragraphs: list[str]) -> str:
 def main() -> None:
     out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "crossbook-goodfellow")
     out_dir.mkdir(parents=True, exist_ok=True)
-    pages = _page_text(_download_pdf())
+    pages, extractor = _page_text(_download_pdf())
     selected, anchors = _short_blocks(pages)
     source_text = "\n\n".join(selected)
 
-    required = ("deep learning", "neural", "LSTM", "CIFAR")
+    required = ("deep learning", "neural", "LSTM", "CPU", "GPU")
     missing = [term for term in required if term.casefold() not in source_text.casefold()]
     if missing:
         raise RuntimeError(f"Short benchmark lost required technical coverage; missing={missing}")
@@ -157,11 +213,12 @@ def main() -> None:
     meta = {
         "source_url": SOURCE_URL,
         "physical_pages_scanned": [PAGE_FIRST, PAGE_LAST],
+        "extractor": extractor,
         "source_chars": len(source_text),
         "segments": len(selected),
         "anchor_sentence_indices": anchors,
         "reference_text_embedded": False,
-        "selection": "short technical smoke excerpt selected from physical PDF pages 35–40; no gold translation used by pipeline",
+        "selection": "short clean technical prose smoke excerpt from physical PDF pages 35–40; no gold translation used by pipeline",
     }
     (out_dir / "sample-meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
     print(json.dumps(meta, ensure_ascii=False))
