@@ -8,7 +8,7 @@ import chapter_reference_translation_v9ah as legacy_kernel
 import chapter_reference_translation_v9y as legacy_transport
 from bookai.gigachat_runtime_guard import install_gigachat_runtime_guard
 from bookai.gigachat_ultra_provider import GigaChatUltraProvider
-from bookai.release_guards import specialist_guard_routes
+from bookai.release_guards import source_fingerprint, specialist_guard_routes
 
 
 @dataclass
@@ -79,8 +79,47 @@ class LiteraryTranslationStrategy:
         )
         return harness
 
+    @staticmethod
+    def _write_provenance(v3) -> str | None:
+        """Persist source id/hash/context ids next to every production translation map."""
+        map_path = getattr(v3, "MAP_JSON", None)
+        if map_path is None or not map_path.exists():
+            return None
+        try:
+            rows = json.loads(map_path.read_text("utf-8"))
+        except Exception:
+            return None
+        if not isinstance(rows, list):
+            return None
+
+        usable = [row for row in rows if isinstance(row, dict) and str(row.get("id") or "")]
+        artifact = []
+        for index, row in enumerate(usable):
+            sid = str(row.get("id") or "")
+            source = str(row.get("source") or "")
+            context_ids = [
+                str(other.get("id") or "")
+                for other in usable[max(0, index - 2) : index]
+                + usable[index + 1 : index + 3]
+                if str(other.get("id") or "")
+            ]
+            artifact.append(
+                {
+                    "source_id": sid,
+                    "source_hash": source_fingerprint(source),
+                    "context_ids": context_ids,
+                    "stage": "production-final",
+                }
+            )
+
+        name = map_path.stem.replace("-translation-map", "") + "-provenance.json"
+        out = map_path.with_name(name)
+        out.write_text(json.dumps(artifact, ensure_ascii=False, indent=2), "utf-8")
+        return str(out)
+
     def annotate(self) -> None:
         v3 = legacy_kernel.v9ag.v9ad.v9ac.v9ab.v3
+        provenance_file = self._write_provenance(v3)
         report = getattr(v3, "REPORT", None)
         if report is None or not report.exists():
             return
@@ -98,6 +137,8 @@ class LiteraryTranslationStrategy:
                 "legacy_emergency_fallback": self.fallback,
                 "guard_routing": ["polarity_scope", "source_contamination"],
                 "guard_stats": dict(self._guard_stats),
+                "provenance_artifact": provenance_file,
+                "provenance_fields": ["source_id", "source_hash", "context_ids", "stage"],
                 "gold_reference_available_to_pipeline": False,
                 "versioned_scripts_policy": "legacy experiment history only; production changes go through LiteraryTranslationStrategy",
             }
