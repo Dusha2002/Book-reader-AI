@@ -12,6 +12,7 @@ from .harness import TranslationHarness
 from .models import BookMemory, GateFinding, LLMProvider, Segment, StyleGuide
 from .parsers.base import load_book, save_book
 from .quality import batch_issues, candidate_issues, hard_ids
+from .release_guards import provenance_entry
 
 ProgressCallback = Callable[[dict], None]
 MODE_ALIASES = {"standard": "optimal", "high": "literary"}
@@ -197,17 +198,23 @@ def translate_book(
         state = {
             "pipeline_version": PIPELINE_VERSION,
             "translations": {},
+            "translation_provenance": {},
             "completed_chapters": [],
             "chapter_briefs": {},
             "polished_chapters": [],
             "qa_passed_chapters": [],
+            "review_required_chapters": {},
         }
         _persist(state_path, state, {}, memory)
 
     translated: dict[str, str] = dict(state.get("translations") or {})
+    translation_provenance: dict[str, dict] = dict(state.get("translation_provenance") or {})
     completed_chapters = set(state.get("completed_chapters") or [])
     polished_chapters = set(state.get("polished_chapters") or [])
     qa_passed_chapters = set(state.get("qa_passed_chapters") or [])
+    review_required_chapters: dict[str, dict] = dict(state.get("review_required_chapters") or {})
+    qa_passed_chapters.difference_update(review_required_chapters)
+    state["qa_passed_chapters"] = sorted(qa_passed_chapters)
     chapter_briefs: dict[str, str] = dict(state.get("chapter_briefs") or {})
 
     total = len(source_segments)
@@ -233,6 +240,20 @@ def translate_book(
     for chapter_index, (name, chapter) in enumerate(chapters, 1):
         chapter_existing = {s.id: translated[s.id] for s in chapter if s.id in translated}
         if name in qa_passed_chapters and len(chapter_existing) == len(chapter):
+            continue
+        if name in review_required_chapters and len(chapter_existing) == len(chapter):
+            completed_chapters.add(name)
+            state["completed_chapters"] = sorted(completed_chapters)
+            state["qa_passed_chapters"] = sorted(qa_passed_chapters)
+            _persist(state_path, state, translated, memory)
+            _notify(
+                progress,
+                phase="chapter_needs_review",
+                chapter=name,
+                chapter_index=chapter_index,
+                chapters=len(chapters),
+                review=review_required_chapters[name],
+            )
             continue
 
         if mode != "fast":
@@ -285,6 +306,9 @@ def translate_book(
             if accepted is None:
                 raise RuntimeError(f"Translation batch failed strict acceptance in chapter {name}") from last_error
             translated.update(accepted)
+            for segment in pending:
+                translation_provenance[segment.id] = provenance_entry(segment, before, after, stage="draft")
+            state["translation_provenance"] = translation_provenance
             completed = sum(s.id in translated for s in source_segments)
             _persist(state_path, state, translated, memory)
             _notify(
@@ -345,7 +369,7 @@ def translate_book(
             _persist(state_path, state, translated, memory)
 
         if mode != "fast":
-            # Pass 3 — independent bilingual Flash audit over every segment.
+            # Pass 3 — bilingual audit over every segment using the configured gate.
             findings: list[GateFinding] = []
             checked = 0
             for gate_batch in _batches(chapter, gate_chars):
@@ -361,7 +385,7 @@ def translate_book(
                 )
 
             # Pass 4 — targeted repair. Hard cases get an independently sampled
-            # Flash translation plus blind A/B choice; no stronger model is used.
+            # alternative plus blind A/B choice inside the existing specialist path.
             for repair_round in range(max_repair_rounds):
                 if not findings:
                     break
@@ -420,8 +444,10 @@ def translate_book(
 
         completed_chapters.add(name)
         qa_passed_chapters.add(name)
+        review_required_chapters.pop(name, None)
         state["completed_chapters"] = sorted(completed_chapters)
         state["qa_passed_chapters"] = sorted(qa_passed_chapters)
+        state["review_required_chapters"] = review_required_chapters
 
         # Pass 5 — update continuity after every fully checked chapter.
         if memory_updates and mode != "fast":
@@ -440,7 +466,8 @@ def translate_book(
             total=total,
         )
 
-    # Final book-wide invariant. No artifact if a target is missing/corrupted.
+    # Final book-wide deterministic invariant. Review waivers remain visible and
+    # prevent the artifact from being labelled QA-passed, but do not discard text.
     final_issues = batch_issues(source_segments, translated, memory)
     final_hard = [i for i in final_issues if i.severity == "hard"]
     missing = [s.id for s in source_segments if s.id not in translated]
@@ -452,13 +479,29 @@ def translate_book(
 
     _notify(progress, phase="building_book", progress=97, completed=total, total=total)
     save_book(document, translated, output)
+    review_names = sorted(review_required_chapters)
+    qa_status = "needs_review" if review_names else "passed"
     state["final_quality"] = {
-        "hard_issues": 0,
+        "status": qa_status,
+        "hard_issues": None if review_names else 0,
+        "deterministic_hard_issues": 0,
         "medium_deterministic_issues": len([i for i in final_issues if i.severity == "medium"]),
         "segments": total,
-        "model_ceiling": "deepseek/deepseek-v4-flash-0731",
+        "review_required_chapters": review_names,
+        "qa_passed_chapters": len(qa_passed_chapters),
+        "provenance_coverage": len(translation_provenance),
+        "model_ceiling": "configured-specialist",
         "pipeline_version": PIPELINE_VERSION,
     }
     _persist(state_path, state, translated, memory)
-    _notify(progress, phase="done", progress=100, completed=total, total=total, usage=harness.usage)
+    _notify(
+        progress,
+        phase="done",
+        progress=100,
+        completed=total,
+        total=total,
+        qa_status=qa_status,
+        review_required_chapters=review_names,
+        usage=harness.usage,
+    )
     return output
