@@ -21,20 +21,28 @@ from .v10_publication_release import (
 class FinalBookBibleBuilder(_PublicationBookBibleBuilder):
     """Final book-adaptive memory with no legacy title-specific term seeds.
 
-    Proper-name discovery is reused from the source-only builder. Specialist term
-    candidates are rebuilt here only from recurring lexical n-grams in the CURRENT
-    source, so old book-specific vocabulary cannot influence production translation.
-    Composite entities are then harmonized from independently accepted components.
+    Proper-name discovery and *explicit source-evidence* terminology (for example a
+    local definition or acronym definition) are reused from the source-only builder.
+    All other specialist candidates are rebuilt only from recurring lexical n-grams
+    in the CURRENT source, so old book-specific vocabulary cannot influence release.
+    Composite entities are harmonized from independently accepted components.
     """
 
     @staticmethod
     def _candidate_records(segments):
-        # Keep only proper-entity candidates from the inherited discovery path.
-        # Its historical technical-term seeds are intentionally excluded here.
         inherited = _PublicationBookBibleBuilder._candidate_records(segments)
-        records = [dict(row) for row in inherited if row.get("kind_hint") == "proper"]
+        allowed_evidence = {"local_definition", "acronym_definition"}
+        records = [
+            dict(row)
+            for row in inherited
+            if row.get("kind_hint") == "proper" or row.get("evidence") in allowed_evidence
+        ]
         existing = {str(row.get("candidate") or "").casefold() for row in records}
-        proper_lower = set(existing)
+        proper_lower = {
+            str(row.get("candidate") or "").casefold()
+            for row in records
+            if row.get("kind_hint") == "proper"
+        }
 
         counts: Counter[str] = Counter()
         contexts: dict[str, list[dict[str, str]]] = {}
@@ -94,11 +102,11 @@ class FinalBookBibleBuilder(_PublicationBookBibleBuilder):
 
 
 class MorphologyAwarePublicationQA(_PublicationQualityQA):
-    """Suppress only legacy book-term false positives caused by Russian inflection.
+    """Suppress only book-term false positives caused by Russian inflection.
 
     The underlying publication QA still owns terminology policy. This final facade
-    merely replaces its old first-word prefix test with the cross-domain phrase
-    matcher when a `book_term_canon` issue is emitted.
+    replaces its old first-word prefix test with the cross-domain phrase matcher when
+    a `book_term_canon` issue is emitted.
     """
 
     def scan_segment(self, segment, target, memory):
