@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
 
+from .gigachat_v3 import GigaChatLightningV3Backend
 from .models import BookMemory, Segment
 from .v10 import _giga_json, _json_from_text, _norm
 from .v10_publication_release import _priority_term_candidates, _technical_style
 from .v10_source_bible import _has_clean_russian
 
 
-_VERIFIER_CACHE_MARKER = "v10-deepseek-terminology-3"
+_VERIFIER_CACHE_MARKER = "v10-deepseek-terminology-4"
 _LOCAL_DEFINITION_RE = re.compile(
     r"\b([a-z][a-z'-]{2,16})\b\s+(?:had|has|have|is|was|were)\s+"
     r"(?:no|not|only)\b",
@@ -27,7 +29,6 @@ def _is_academic_domain(memory: BookMemory) -> bool:
     domain = str(getattr(memory, "domain", "") or "").strip().casefold()
     if domain:
         return domain == "academic_technical"
-    # Legacy caches may not yet carry the explicit domain field.
     return _technical_style(memory)
 
 
@@ -63,9 +64,6 @@ def _verification_candidates(segments: list[Segment], memory: BookMemory) -> lis
         rows.append(row)
         seen.add(key)
 
-    # Literary/nontechnical books only need terms explicitly defined by source
-    # context. This prevents proper names from being mistaken for terminology merely
-    # because the style description contains words such as “technical precision”.
     if not _is_academic_domain(memory):
         rows = [
             row for row in rows
@@ -88,9 +86,9 @@ def _valid_ru_term(value: str) -> bool:
 class DeepSeekPublicationTerminologyVerifier:
     """Two tiny source-only semantic passes over a compact set of high-risk terms.
 
-    DeepSeek creates a draft canon. An optional stronger GigaChat critic challenges
-    only those few proposals; if that critic is unavailable, the same DeepSeek
-    provider performs the critique. The verified canon is cached per book.
+    DeepSeek creates a draft canon. GigaChat 3 Ultra is used only as the adversarial
+    critic when the connected PERS account supports it; otherwise critique falls back
+    to DeepSeek. The result and explicit source domain are cached per book.
     """
 
     def __init__(self, provider: Any, cache_path: Path, *, critic_backend: Any | None = None):
@@ -99,12 +97,14 @@ class DeepSeekPublicationTerminologyVerifier:
         self.critic_backend = critic_backend
         self.stats: dict[str, Any] = {
             "cache_hit": False,
+            "domain": "",
             "calls": 0,
             "candidates": 0,
             "returned": 0,
             "draft_proposals": 0,
             "critic_backend": "",
             "critic_fallback": False,
+            "critic_usage": {},
             "critic_returned": 0,
             "critic_revised": 0,
             "critic_omitted": 0,
@@ -115,14 +115,28 @@ class DeepSeekPublicationTerminologyVerifier:
             "applied": {},
         }
 
-    def _load_cache(self, memory: BookMemory) -> bool:
+    def _cache_data(self) -> dict[str, Any]:
         if not self.cache_path.exists():
-            return False
+            return {}
         try:
             data = json.loads(self.cache_path.read_text("utf-8"))
         except Exception:
-            return False
-        if not isinstance(data, dict) or data.get("deepseek_terminology_schema") != _VERIFIER_CACHE_MARKER:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _hydrate_domain(self, memory: BookMemory) -> None:
+        if str(getattr(memory, "domain", "") or "").strip():
+            self.stats["domain"] = str(memory.domain)
+            return
+        data = self._cache_data()
+        domain = str(data.get("domain") or "").strip()
+        if domain:
+            memory.domain = domain
+        self.stats["domain"] = domain
+
+    def _load_cache(self, memory: BookMemory) -> bool:
+        data = self._cache_data()
+        if not data or data.get("deepseek_terminology_schema") != _VERIFIER_CACHE_MARKER:
             return False
         verified = data.get("deepseek_verified_glossary") or {}
         if not isinstance(verified, dict):
@@ -135,15 +149,12 @@ class DeepSeekPublicationTerminologyVerifier:
         return True
 
     def _save_cache(self, memory: BookMemory, applied: dict[str, str]) -> None:
-        try:
-            data = json.loads(self.cache_path.read_text("utf-8")) if self.cache_path.exists() else {}
-        except Exception:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
+        data = self._cache_data()
         data["glossary"] = dict(memory.glossary)
         data["deepseek_verified_glossary"] = dict(applied)
         data["deepseek_terminology_schema"] = _VERIFIER_CACHE_MARKER
+        if getattr(memory, "domain", ""):
+            data["domain"] = str(memory.domain)
         try:
             self.cache_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
         except Exception:
@@ -236,17 +247,31 @@ For scientific/ML concepts, demand the conventional Russian textbook/research te
 Do not use current_ru/proposed_ru as authority; they are hypotheses to challenge.
 Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|revise|omit","ru":"canonical Russian term or empty","confidence":0.0,"reason":"brief"}]} with exactly one row per input."""
 
+    def _ultra_backend(self) -> Any | None:
+        if self.critic_backend is not None:
+            return self.critic_backend
+        backend = GigaChatLightningV3Backend()
+        if not backend.available():
+            return None
+        backend.model = (os.getenv("BOOKAI_GIGACHAT_TERM_MODEL") or "GigaChat-3-Ultra").strip()
+        backend.max_tokens = max(1800, min(4200, int(os.getenv("BOOKAI_GIGACHAT_TERM_MAX_TOKENS") or "3200")))
+        self.critic_backend = backend
+        return backend
+
     def _critic(self, proposals: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not proposals:
             return []
         payload = {"proposals": proposals}
         obj: dict[str, Any] | None = None
-        backend = self.critic_backend
-        if backend is not None and getattr(backend, "available", lambda: False)():
+        backend = self._ultra_backend()
+        if backend is not None:
             self.stats["critic_backend"] = str(getattr(backend, "model", "GigaChat"))
             try:
                 obj = _giga_json(backend, self._critic_system(), payload, max_tokens=3200)
                 self.stats["calls"] += 1
+                usage = getattr(backend, "usage", None)
+                if usage is not None and hasattr(usage, "as_dict"):
+                    self.stats["critic_usage"] = usage.as_dict()
             except Exception as exc:
                 self.stats["critic_fallback"] = True
                 print(f"[v10-term-critic] backend={self.stats['critic_backend']} error={type(exc).__name__}: {exc}; fallback=deepseek", flush=True)
@@ -266,6 +291,7 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|re
         return rows
 
     def verify(self, segments: list[Segment], memory: BookMemory) -> dict[str, Any]:
+        self._hydrate_domain(memory)
         if self._load_cache(memory):
             return dict(self.stats)
 
