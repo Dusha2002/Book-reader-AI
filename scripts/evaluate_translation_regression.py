@@ -16,6 +16,16 @@ _NEG_SRC = re.compile(
     re.I,
 )
 _NEG_RU = re.compile(r"\b(?:не|нет|ни|никогд|без|нельзя|невозмож)\w*", re.I)
+_POLARITY_SCOPE_SRC = re.compile(
+    r"\b(?:i\s+)?(?:do\s+not|don't|cannot|can't)\s+(?:really\s+)?see\s+why\s+not\b|"
+    r"\b(?:there(?:'s| is)\s+)?no\s+reason\s+(?:why\s+)?not\b",
+    re.I,
+)
+_POLARITY_SCOPE_RU_OK = re.compile(
+    r"(?:не\s+виж\w*\s+причин\w*|почему\s+бы\s+(?:и\s+)?нет|не\s+виж\w*[^.!?]{0,35}почему\s+нет|"
+    r"нет\s+причин\w*[^.!?]{0,25}не|вполне\s+можно)",
+    re.I,
+)
 _TIME_FACTS = (
     (
         re.compile(r"\bthis afternoon\b", re.I),
@@ -91,6 +101,8 @@ def _categories(source: str) -> list[str]:
         out.append("time")
     if _NEG_SRC.search(source):
         out.append("negation")
+    if _POLARITY_SCOPE_SRC.search(source):
+        out.append("polarity_scope")
     if _CAUSAL_RE.search(source):
         out.append("causality")
     if _REF_RE.search(source):
@@ -112,6 +124,8 @@ def _risk_score(source: str, cats: list[str]) -> float:
         score += 2.0
     if "reference_resolution" in cats:
         score += 1.0
+    if "polarity_scope" in cats:
+        score += 3.0
     if "numbers" in cats or "time" in cats:
         score += 0.5
     return score
@@ -181,6 +195,8 @@ def _automatic_checks(source: str, target: str) -> list[str]:
             break
     if _NEG_SRC.search(source) and not _NEG_RU.search(target):
         failures.append("negation_marker_missing")
+    if _POLARITY_SCOPE_SRC.search(source) and not _POLARITY_SCOPE_RU_OK.search(target):
+        failures.append("polarity_scope:i_dont_see_why_not")
     for source_re, target_re, code in _TIME_FACTS:
         if source_re.search(source) and not target_re.search(target):
             failures.append("time_marker:" + code)
@@ -205,10 +221,12 @@ def main() -> int:
     parser.add_argument("--dataset", default="eval/literary_regression_v1.json")
     parser.add_argument("--output", default="chapter-v9-regression.json")
     parser.add_argument("--fail-on-hard", action="store_true")
+    parser.add_argument("--fail-on-objective", action="store_true")
     args = parser.parse_args()
 
     dataset = json.loads(Path(args.dataset).read_text("utf-8"))
     mapping = _load_maps(args.maps)
+    mapped_chapters = {str(row.get("chapter") or "") for row in mapping.values() if row.get("chapter")}
     curated = list(dataset.get("cases") or [])
     curated_ids = {str(x.get("id") or "") for x in curated}
     target_size = int(dataset.get("auto_candidate_target") or len(curated))
@@ -216,12 +234,14 @@ def main() -> int:
 
     results = []
     hard_failures = []
+    objective_failures = []
     auto_counts = Counter()
     category_total = Counter()
     category_auto_fail = Counter()
     curated_pass = 0
     curated_total = 0
     missing = 0
+    deferred_curated = 0
 
     for case in cases:
         sid = str(case.get("id") or "")
@@ -234,22 +254,33 @@ def main() -> int:
 
         if not row:
             missing += 1
-            result = {
-                "id": sid,
-                "curated": bool(case.get("expectations")),
-                "categories": cats,
-                "status": "missing",
-                "automatic_failures": ["missing_translation_map_row"],
-                "curated_failures": [],
-            }
-            results.append(result)
-            if bool((case.get("expectations") or {}).get("hard")):
-                hard_failures.append(sid + ":missing")
+            case_chapter = str(case.get("chapter") or "")
+            chapter_in_scope = not case_chapter or case_chapter in mapped_chapters
+            if case.get("expectations") and not chapter_in_scope:
+                deferred_curated += 1
+                status = "not_evaluated"
+                failures = []
+            else:
+                status = "missing"
+                failures = ["missing_translation_map_row"]
+                if bool((case.get("expectations") or {}).get("hard")):
+                    hard_failures.append(sid + ":missing")
+            results.append(
+                {
+                    "id": sid,
+                    "curated": bool(case.get("expectations")),
+                    "categories": cats,
+                    "status": status,
+                    "automatic_failures": failures,
+                    "curated_failures": [],
+                }
+            )
             continue
 
         auto = _automatic_checks(source, target)
         for code in auto:
             auto_counts[code] += 1
+            objective_failures.append(sid + ":" + code)
         if auto:
             for cat in cats:
                 category_auto_fail[cat] += 1
@@ -275,17 +306,21 @@ def main() -> int:
             }
         )
 
-    auto_pass = sum(1 for row in results if not row["automatic_failures"])
+    evaluated = [row for row in results if row["status"] != "not_evaluated"]
+    auto_pass = sum(1 for row in evaluated if not row["automatic_failures"])
     summary = {
         "dataset_version": dataset.get("version"),
-        "evaluated_cases": len(cases),
+        "target_size": target_size,
+        "evaluated_cases": len(evaluated),
         "curated_cases": curated_total,
         "curated_pass": curated_pass,
         "curated_pass_rate": round(curated_pass / max(1, curated_total), 4),
         "hard_curated_failures": hard_failures,
+        "objective_failures": objective_failures,
         "automatic_objective_pass": auto_pass,
-        "automatic_objective_pass_rate": round(auto_pass / max(1, len(cases)), 4),
+        "automatic_objective_pass_rate": round(auto_pass / max(1, len(evaluated)), 4),
         "missing": missing,
+        "deferred_curated_outside_current_chapters": deferred_curated,
         "automatic_failures_by_code": dict(auto_counts),
         "by_category": {
             cat: {
@@ -295,8 +330,9 @@ def main() -> int:
             for cat in sorted(category_total)
         },
         "note": (
-            "Automatic category checks are conservative report-only heuristics. "
-            "Only curated hard assertions may fail CI. Gold/reference text is not used."
+            "Release mode can fail on curated hard assertions and conservative objective invariants. "
+            "Curated cases from chapters not present in the supplied maps are retained but deferred. "
+            "Gold/reference text is never used by runtime translation."
         ),
     }
     payload = {"summary": summary, "cases": results}
@@ -304,6 +340,8 @@ def main() -> int:
     print("[literary-regression] " + json.dumps(summary, ensure_ascii=False))
     if args.fail_on_hard and hard_failures:
         return 2
+    if args.fail_on_objective and objective_failures:
+        return 3
     return 0
 
 
