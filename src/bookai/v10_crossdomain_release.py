@@ -15,7 +15,7 @@ from .v10_universal_release import (
     ResidualHardDeepSeekRepair,
 )
 
-_CROSSDOMAIN_CACHE_MARKER = "v10-crossdomain-1"
+_CROSSDOMAIN_CACHE_MARKER = "v10-crossdomain-2"
 _TECH_STYLE_WORDS = (
     "technical", "academic", "scientific", "expository", "textbook", "engineering", "research",
 )
@@ -48,11 +48,7 @@ def _ru_stem(word: str) -> str:
 def _word_family_match(expected: str, actual: str) -> bool:
     left = str(expected or "").casefold().replace("ё", "е")
     right = str(actual or "").casefold().replace("ё", "е")
-    if left == right:
-        return True
-    left_stem = _ru_stem(left)
-    right_stem = _ru_stem(right)
-    if left_stem == right_stem:
+    if left == right or _ru_stem(left) == _ru_stem(right):
         return True
     common = 0
     for a, b in zip(left, right):
@@ -101,10 +97,10 @@ def _citation_surnames(source: str) -> set[str]:
 
 
 def _source_acronyms(source: str) -> set[str]:
-    out: set[str] = set()
-    for match in re.finditer(r"\b([A-Z]{3,})(?:s)?\b", str(source or "")):
-        out.add(match.group(1))
-    return out
+    return {
+        match.group(1)
+        for match in re.finditer(r"\b([A-Z]{2,})(?:s)?\b", str(source or ""))
+    }
 
 
 def _has_academic_citation(source: str) -> bool:
@@ -112,15 +108,15 @@ def _has_academic_citation(source: str) -> bool:
 
 
 class FinalBookBibleBuilder(_UniversalBookBibleBuilder):
-    """Adds one source-only domain terminology pass for academic/technical books."""
+    """Adds a source-only terminology audit for academic/technical books."""
 
-    def _augment_domain_glossary(self, segments: list[Segment], memory: BookMemory) -> int:
+    def _augment_domain_glossary(self, segments: list[Segment], memory: BookMemory) -> tuple[int, int]:
         if not _technical_style(memory):
-            return 0
+            return 0, 0
 
         joined = "\n".join(str(segment.text or "") for segment in segments)
         if not joined.strip():
-            return 0
+            return 0, 0
 
         sample_count = min(20, len(segments))
         excerpts: list[str] = []
@@ -130,23 +126,30 @@ class FinalBookBibleBuilder(_UniversalBookBibleBuilder):
             if text:
                 excerpts.append(text[:700])
 
-        system = """SOURCE-ONLY EN→RU terminology canon builder for an academic or technical book.
-Extract only specialist terms whose mistranslation would materially change technical meaning or established Russian usage.
-Include important one-off terms, not only repeated terms. Prefer established professional Russian terminology over literal calques.
-Copy `source` EXACTLY from the supplied English excerpts. Do not include author names, brands, institutions, ordinary prose, or standalone acronyms.
-Return ONLY JSON {\"terms\":[{\"source\":\"exact English term\",\"ru\":\"canonical Russian term\",\"confidence\":0.0}]}.
-Return at most 18 terms and omit anything genuinely ambiguous."""
+        system = """SOURCE-ONLY EN→RU terminology auditor for an academic or technical book.
+You receive English excerpts plus an existing automatically built EN→RU glossary.
+Do two things only: (1) correct an existing specialist term if its Russian canonical is incomplete, overly literal or nonstandard; (2) add a missing high-value specialist term, including important one-off terms.
+Prefer established professional Russian terminology. Preserve every semantic component of a term. Do not spend slots repeating existing entries that are already good.
+Copy `source` EXACTLY from the English excerpts. Do not include author names, brands, institutions, ordinary prose or standalone acronyms.
+Return ONLY JSON {\"terms\":[{\"source\":\"exact English term\",\"ru\":\"best canonical Russian term\",\"confidence\":0.0}]}.
+Return at most 18 terms and omit genuinely ambiguous candidates."""
         try:
-            obj = _giga_json(self.backend, system, {"excerpts": excerpts}, max_tokens=2200)
+            obj = _giga_json(
+                self.backend,
+                system,
+                {"excerpts": excerpts, "existing_glossary": dict(memory.glossary)},
+                max_tokens=2400,
+            )
             self.stats["analysis_calls"] = int(self.stats.get("analysis_calls") or 0) + 1
             self.stats["domain_term_calls"] = int(self.stats.get("domain_term_calls") or 0) + 1
         except Exception as exc:
             print(f"[v10-crossdomain-terms] error={type(exc).__name__}", flush=True)
-            return 0
+            return 0, 0
 
         proposed = [item for item in obj.get("terms") or [] if isinstance(item, dict)]
         self.stats["domain_terms_proposed"] = len(proposed)
         added = 0
+        refined = 0
         for item in proposed:
             source = str(item.get("source") or "").strip()
             ru = _norm(item.get("ru") or "")
@@ -159,12 +162,16 @@ Return at most 18 terms and omit anything genuinely ambiguous."""
             if not _has_clean_russian(ru) or len(ru.split()) > 8:
                 continue
             key = source.casefold()
-            if key in memory.glossary:
+            old = str(memory.glossary.get(key) or "").strip()
+            if old:
+                if confidence >= 0.84 and ru.casefold() != old.casefold():
+                    memory.glossary[key] = ru
+                    refined += 1
                 continue
             memory.glossary[key] = ru
             added += 1
-        print(f"[v10-crossdomain-terms] proposed={len(proposed)} added={added}", flush=True)
-        return added
+        print(f"[v10-crossdomain-terms] proposed={len(proposed)} added={added} refined={refined}", flush=True)
+        return added, refined
 
     def build(self, segments: list[Segment]) -> tuple[BookMemory, dict[str, Any]]:
         memory, stats = super().build(segments)
@@ -178,8 +185,9 @@ Return at most 18 terms and omit anything genuinely ambiguous."""
             data = {}
 
         added = 0
+        refined = 0
         if cached_marker != _CROSSDOMAIN_CACHE_MARKER:
-            added = self._augment_domain_glossary(segments, memory)
+            added, refined = self._augment_domain_glossary(segments, memory)
             try:
                 if not isinstance(data, dict):
                     data = {}
@@ -190,6 +198,7 @@ Return at most 18 terms and omit anything genuinely ambiguous."""
                 pass
 
         stats["domain_terms_added"] = added
+        stats["domain_terms_refined"] = refined
         stats["domain_terms_proposed"] = int(self.stats.get("domain_terms_proposed") or 0)
         stats["crossdomain_release_schema"] = _CROSSDOMAIN_CACHE_MARKER
         return memory, stats
@@ -209,12 +218,38 @@ class FinalV10QualityQA(_UniversalQualityQA):
                         protected.add(token)
         return protected
 
+    @classmethod
+    def _latin_issues(cls, segment: Segment, target: str, memory: BookMemory) -> list[V10Issue]:
+        issues = list(super()._latin_issues(segment, target, memory))
+        if not _technical_style(memory):
+            return issues
+        source = str(segment.text or "")
+        allowed = {token.casefold() for token in _source_acronyms(source)}
+        if _has_academic_citation(source):
+            allowed.update({"et", "al", "and"})
+        cleaned: list[V10Issue] = []
+        for issue in issues:
+            if issue.code != "latin_leak" or "untranslated Latin prose/name remains:" not in issue.reason:
+                cleaned.append(issue)
+                continue
+            raw = issue.reason.split(":", 1)[1]
+            tokens = [token.strip() for token in raw.split(",") if token.strip()]
+            residual = [token for token in tokens if token.casefold() not in allowed]
+            if residual:
+                cleaned.append(V10Issue(
+                    issue.id,
+                    issue.code,
+                    issue.mode,
+                    issue.severity,
+                    "untranslated Latin prose/name remains: " + ", ".join(residual),
+                ))
+        return cleaned
+
     @staticmethod
     def _dimension_relation_issues(segment: Segment, target: str) -> list[V10Issue]:
         out = list(_UniversalQualityQA._dimension_relation_issues(segment, target))
         source = str(segment.text or "")
         low = str(target or "").casefold().replace("ё", "е")
-
         dual = bool(re.search(
             r"\b[a-z0-9/]+[- ]inch\b[^.!?]{0,120},[^.!?]{0,120}\b(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+feet?\s+long\b",
             source,
@@ -241,7 +276,6 @@ class FinalV10QualityQA(_UniversalQualityQA):
         source = str(segment.text or "")
         target_text = str(target or "")
         out: list[V10Issue] = []
-
         missing_acronyms = [token for token in sorted(_source_acronyms(source)) if token not in target_text]
         if missing_acronyms:
             out.append(V10Issue(
@@ -251,7 +285,6 @@ class FinalV10QualityQA(_UniversalQualityQA):
                 "hard",
                 "source technical acronym/identifier lost: " + ", ".join(missing_acronyms[:6]),
             ))
-
         missing_citations = [token for token in sorted(_citation_surnames(source)) if token not in target_text]
         if missing_citations:
             out.append(V10Issue(
