@@ -2,6 +2,7 @@ from bookai.models import BookMemory, Segment
 from bookai.v10_clause_fidelity import (
     compare_clause_order_fidelity,
     compare_duplicate_content_fidelity,
+    scan_clause_fidelity,
 )
 from bookai.v10_quality import V10QualityQA
 
@@ -29,6 +30,31 @@ def test_duplicate_content_allows_nonrepeated_clean_translation():
     source = "He looked at her, then looked away."
     target = "Он посмотрел на неё, а затем отвёл взгляд."
     assert compare_duplicate_content_fidelity(source, target)["ok"]
+
+
+def test_runtime_glossary_allows_multiword_target_repeat_for_repeated_source_term():
+    source = (
+        "Back-propagation made deep training practical and helped popularize the back-propagation algorithm. "
+        "The algorithm remains widely used."
+    )
+    target = (
+        "Обратное распространение ошибки сделало глубокое обучение практичным и помогло популяризировать "
+        "алгоритм обратного распространения ошибки. Алгоритм по-прежнему широко применяется."
+    )
+    memory = BookMemory(glossary={"back-propagation": "обратное распространение ошибки"})
+    issues = scan_clause_fidelity(seg(source), target, memory)
+    assert not any(issue.code == "duplicate_content" for issue in issues)
+
+
+def test_runtime_glossary_does_not_hide_unrelated_invented_repetition():
+    source = "Back-propagation made deep training practical. The algorithm remains widely used."
+    target = (
+        "Обратное распространение ошибки сделало глубокое обучение практичным. "
+        "Алгоритм остаётся широко применяемым, глубокое обучение практичным, алгоритм остаётся широко применяемым."
+    )
+    memory = BookMemory(glossary={"back-propagation": "обратное распространение ошибки"})
+    issues = scan_clause_fidelity(seg(source), target, memory)
+    assert any(issue.code == "duplicate_content" for issue in issues)
 
 
 def test_clause_order_ignores_natural_name_reordering_inside_one_clause():
