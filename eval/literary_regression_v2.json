@@ -1,0 +1,129 @@
+{
+  "version": 2,
+  "description": "Release-gate core for literary EN→RU regression. Curated failure cases are augmented to 150 real runtime source segments by risk sampling. Chapter Nine cases preserve known production failures and become active whenever that chapter is supplied. No gold/reference translation is used by runtime or automatic candidate selection.",
+  "auto_candidate_target": 150,
+  "target_size": 150,
+  "current_books": ["Devices_and_Desires"],
+  "cases": [
+    {
+      "id": "s000010",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter One",
+      "categories": ["causality","negation","numbers","reference_resolution","terminology","time"],
+      "source": "It was typical of Valens' father that he insisted on his son learning the new fencing; the stock, the tuck, the small-sword and the rapier. It was elegant, refined, difficult, endlessly time-consuming and, of course, useless. A brigandine or even a thick winter coat would turn one of those exquisite points; if you wanted to have any chance of doing useful work, you had to aim for the holes in the face, targets no bigger than an eight-mark coin. Against a farm worker with a hedging tool, you stood no chance whatsoever. But, for ten years, Valens had flounced and stretched up and down a chalk line in a draughty shed that hadn't been cleaned out since it was still a stable. When he could hit the apple, the instructor had hung up a plum, and then a damson. Now he could get the damson nine times out of ten, and so the ring had taken its place. Once he'd mastered that, he wondered what he'd be faced with next. The eye of a darning-needle, probably.",
+      "expectations": {"hard": true, "required_regex": ["(?:бригандин|бригантин)", "(?:тернослив|т[её]рн|слив)", "ушк.{0,30}игл"], "note": "armour/fruit/needle-part terminology"}
+    },
+    {
+      "id": "s000012",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter One",
+      "categories": ["causality","negation","numbers","reference_resolution","time"],
+      "source": "It was typical of Valens that he suffered through his weekly lesson, face frozen and murder in his heart, always striving to do better even though he knew the whole thing was an exercise in fatuity. Fencing was last lesson but one on a Monday; on Wednesday evening, when he actually had an hour free, he usually went hawking.",
+      "expectations": {"hard": true, "required_regex": ["предпослед"], "note": "last lesson but one"}
+    },
+    {
+      "id": "s000130",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter One",
+      "categories": ["causality","negation","numbers","reference_resolution","time"],
+      "source": "He was still trying to find some words when the doctor came in; and he carried on trying to find them for the next four years, until his father died, in the middle of the night, on the eve of Valens' twenty-third birthday. But all that time Valens never said a word, so that the last thing he told his father was a lie: I won't go up to the round wood with you this afternoon, I've got a splitting headache coming on. Not that it mattered; if he'd been there, his father would still have ridden ahead after the boar, the outcome would have been the same in all material respects.",
+      "expectations": {"hard": true, "required_regex": ["(?:сегодня.{0,35}(?:дн|после полудня)|(?:дн|после полудня).{0,35}сегодня)"], "forbidden_regex": ["сегодня\\s+утр"], "note": "this afternoon chronology"}
+    },
+    {
+      "id": "s000172",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter Two",
+      "categories": ["dialogue","negation","participant_roles","reference_resolution","terminology"],
+      "source": "'The prisoner has suggested,' the advocate said, 'that his offence is trivial. Let us examine his claim. Let us reflect on what is trivial and what is serious, and see if we can come to a better understanding of these concepts.'",
+      "expectations": {"hard": true, "required_regex": ["обвинит"], "forbidden_regex": ["\\bадвокат\\b", "\\bзащитник\\b"], "note": "advocate functions as prosecution"}
+    },
+    {
+      "id": "s000174",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter Two",
+      "categories": ["causality","dialogue","negation","participant_roles","reference_resolution","terminology"],
+      "source": "'The prisoner, Ziani Vaatzes,' the advocate went on, 'admits to having created an abomination. He admitted as much to the investigator who inspected it. He signed a deposition confessing that the thing was made by him, and agreeing in detail the departures from Specification. In this court, he has admitted that he made it. We are therefore concerned not with whether the prisoner made an abomination, but with whether the abomination he made was serious or trivial.'",
+      "expectations": {"hard": true, "required_regex": ["обвинит"], "forbidden_regex": ["\\bадвокат\\b", "\\bзащитник\\b"], "note": "same prosecuting advocate"}
+    },
+    {
+      "id": "s000179",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter Two",
+      "categories": ["causality","dialogue","negation","numbers","participant_roles","reference_resolution","terminology"],
+      "source": "Advocate Sphrantzes paused for a moment to stare ferociously at the dock; then he continued. 'Three distinct deviations; so much, I think we can safely say, for the argument that it was only a little abomination, a trivial departure. Now, if the prisoner had argued that he is an inept metalworker, incapable of following simple instructions, this might have had some bearing on the case. But he does not. On the contrary, he claims to be a skilled craftsman.'",
+      "expectations": {"hard": true, "required_regex": ["обвинит"], "forbidden_regex": ["\\bадвокат\\b", "\\bзащитник\\b"], "note": "Advocate Sphrantzes prosecuting role"}
+    },
+    {
+      "id": "s000197",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter Two",
+      "categories": ["causality","dialogue","negation","numbers","reference_resolution","time"],
+      "source": "'Evil,' Ziani replied, as blandly as he could. 'I was in the market one day, years ago now, and there was this man selling lamps. They were cheap and I needed one, so I bought one. Got it home, unscrewed the cap to fill it up with oil, and this thing came out of it. Like a puff of white smoke, it was. Well, I must've passed out, because the next thing I remember was waking up, and it was pitch dark outside the window; and ever since then I get these terrible uncontrollable urges to do really bad, wicked things. Absolutely nothing I can do about it, can't control it, just have to go with the flow. And look where I've ended up.' He sighed. 'My life ruined, just like that. Only goes to show, you can't be too careful.'",
+      "expectations": {"hard": false, "required_regex": ["осторож"], "note": "can't be too careful; semantic marker only"}
+    },
+    {
+      "id": "s000412",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter Three",
+      "categories": ["dialogue","numbers","reference_resolution"],
+      "source": "'You were standing over the crumpled body of the Duke,' Orsea said. 'Outnumbered five to one-'",
+      "expectations": {"hard": true, "required_regex": ["пят"], "note": "outnumbered five to one"}
+    },
+    {
+      "id": "s000413",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter Three",
+      "categories": ["dialogue","numbers"],
+      "source": "'Seven.'",
+      "expectations": {"hard": true, "required_regex": ["сем"], "note": "Seven correction"}
+    },
+    {
+      "id": "s000491",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter Three",
+      "categories": ["dialogue"],
+      "source": "'Indulge me.'",
+      "expectations": {"hard": false, "forbidden_regex": ["\\bты\\b", "\\bтеб"], "note": "formal register around Indulge me"}
+    },
+    {
+      "id": "s000545",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter Three",
+      "categories": ["causality","dialogue","negation","numbers","reference_resolution","terminology"],
+      "source": "'Naturally.' The man was quiet for a while. 'I can't be sure,' he said, 'but I don't think that's the real reason. I think maybe my reason is that if they can order me to be killed when I really didn't do anything wrong, then perhaps the whole system needs to be got rid of, to stop them doing it again. And also,' he added, with a slight grin, 'there's the fact that I've got a living to make. I need a job, I'm an engineer. Not many openings for someone in my line outside the City, unless I make one for myself. And we hadn't discussed it, but I wasn't really thinking of doing all that work for free.'",
+      "expectations": {"hard": true, "required_regex": ["(?:зарабат|на жизнь)", "работ", "инженер"], "note": "make a living / need a job / engineer"}
+    },
+    {
+      "id": "s000547",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter Three",
+      "categories": ["dialogue","negation","numbers","reference_resolution","time"],
+      "source": "'Yes,' the man said. 'It's a state of mind more than anything. You can't help thinking in mechanisms; always in three dimensions, and always five stages ahead. It takes a little while to learn.'",
+      "expectations": {"hard": true, "required_regex": ["науч"], "note": "explicit learning must survive"}
+    },
+    {
+      "id": "s000549",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter Three",
+      "categories": ["dialogue","negation","numbers","reference_resolution"],
+      "source": "'One daughter,' the man replied. 'I won't see either of them again, I don't suppose.'",
+      "expectations": {"hard": false, "required_regex": ["(?:их|обоих|обеих|ни\\s+одн\\w+\\s+из\\s+них)"], "note": "either of them must remain plural/two-referent"}
+    },
+    {
+      "id": "s001369",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter Nine",
+      "categories": ["source_contamination","reference_resolution"],
+      "source": "A little later they brought him up some food (it was a depressing thought that the garbage on his plate probably counted as the best this country could offer);",
+      "expectations": {"hard": true, "forbidden_regex": ["Дукас", "уби(?:ть|л)"], "note": "known cross-segment contamination regression: do not import events from adjacent source"}
+    },
+    {
+      "id": "s001445",
+      "book": "Devices_and_Desires",
+      "chapter": "Chapter Nine",
+      "categories": ["dialogue","negation","polarity_scope"],
+      "source": "'I don't see why not,' Calaphates said. 'If necessary.'",
+      "expectations": {"hard": true, "required_regex": ["(?:не\\s+виж\\w*\\s+причин|почему\\s+бы\\s+(?:и\\s+)?нет|вполне\\s+можно)"], "forbidden_regex": ["вижу\\s+причин\\s+не\\s+видеть"], "note": "known polarity inversion regression"}
+    }
+  ]
+}
