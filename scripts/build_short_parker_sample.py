@@ -3,14 +3,15 @@ from __future__ import annotations
 import html as html_lib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
 from bookai.parsers.base import load_book
 
 
-# Variant A is the original targeted regression. Variant B deliberately samples
-# unrelated, distributed prose so short-cycle work cannot overfit known anchors.
+# Variant A is the original targeted regression. B and C are disjoint distributed
+# prose windows. C is used for the current anti-overfit cycle.
 ANCHORS = (
     "last lesson but one",
     "brass bushing",
@@ -23,15 +24,16 @@ MAX_SOURCE_CHARS = 4800
 VARIANT = (os.getenv("BOOKAI_SHORT_VARIANT") or "a").strip().casefold()
 
 
-def _fb2(paragraphs: list[str]) -> str:
-    body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in paragraphs)
+def _fb2(target_paragraphs: list[str], memory_paragraphs: list[str]) -> str:
+    target_body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in target_paragraphs)
+    memory_body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in memory_paragraphs)
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
   <description>
     <title-info>
       <genre>sf_fantasy</genre>
       <author><first-name>K. J.</first-name><last-name>Parker</last-name></author>
-      <book-title>Devices and Desires — short regression excerpt</book-title>
+      <book-title>Devices and Desires — short benchmark with whole-book memory</book-title>
       <lang>en</lang>
     </title-info>
     <document-info><id>bookai-short-parker</id><version>1.0</version></document-info>
@@ -39,7 +41,11 @@ def _fb2(paragraphs: list[str]) -> str:
   <body>
     <section>
       <title><p>Chapter One</p></title>
-{body}
+{target_body}
+    </section>
+    <section>
+      <title><p>Chapter Two</p></title>
+{memory_body}
     </section>
   </body>
 </FictionBook>
@@ -71,7 +77,7 @@ def _targeted_sample(segments):
     return chosen, {"matched_anchors": matched, "selection_mode": "targeted-regression-a"}
 
 
-def _unseen_spread_sample(segments):
+def _eligible_prose(segments):
     old = tuple(anchor.casefold() for anchor in ANCHORS)
     eligible = []
     for segment in segments:
@@ -81,21 +87,25 @@ def _unseen_spread_sample(segments):
             continue
         if any(anchor in low for anchor in old):
             continue
-        # Reject headings/list-like fragments; retain ordinary continuous prose.
         if text.count(" ") < 45 or sum(ch.isalpha() for ch in text) / max(1, len(text)) < 0.62:
             continue
         eligible.append(segment)
+    return eligible
+
+
+def _spread_sample(segments, fractions: tuple[float, ...], mode: str, excluded_ids: set[str] | None = None):
+    eligible = _eligible_prose(segments)
+    excluded_ids = set(excluded_ids or ())
     if len(eligible) < 20:
         raise RuntimeError(f"Not enough Parker prose for unseen spread sample: {len(eligible)}")
 
-    fractions = (0.13, 0.31, 0.49, 0.67, 0.85)
     chosen = []
     seen: set[str] = set()
     chars = 0
     for fraction in fractions:
         center = round(fraction * (len(eligible) - 1))
         offsets = [0]
-        for delta in range(1, 24):
+        for delta in range(1, 32):
             offsets.extend((delta, -delta))
         match = None
         for offset in offsets:
@@ -104,7 +114,7 @@ def _unseen_spread_sample(segments):
                 continue
             candidate = eligible[pos]
             text = str(candidate.text or "").strip()
-            if candidate.id in seen:
+            if candidate.id in seen or candidate.id in excluded_ids:
                 continue
             if chars + len(text) > MAX_SOURCE_CHARS:
                 continue
@@ -119,11 +129,38 @@ def _unseen_spread_sample(segments):
     if len(chosen) < 4 or chars < 2200:
         raise RuntimeError(f"Unseen Parker sample too small: segments={len(chosen)} chars={chars}")
     return chosen, {
-        "selection_mode": "unseen-distributed-b",
+        "selection_mode": mode,
         "fractions": list(fractions),
         "eligible_segments": len(eligible),
         "excluded_known_anchors": True,
+        "excluded_prior_variant_ids": len(excluded_ids),
     }
+
+
+def _unseen_spread_sample(segments):
+    return _spread_sample(segments, (0.13, 0.31, 0.49, 0.67, 0.85), "unseen-distributed-b")
+
+
+def _unseen_spread_sample_c(segments):
+    prior, _ = _unseen_spread_sample(segments)
+    return _spread_sample(
+        segments,
+        (0.06, 0.23, 0.42, 0.73, 0.94),
+        "unseen-distributed-c",
+        {segment.id for segment in prior},
+    )
+
+
+def _memory_paragraphs(segments, chosen_ids: set[str]) -> list[str]:
+    rows: list[str] = []
+    for segment in segments:
+        if segment.id in chosen_ids:
+            continue
+        text = str(segment.text or "").strip()
+        if not text or re.fullmatch(r"Chapter\s+\S+", text, re.I):
+            continue
+        rows.append(text)
+    return rows
 
 
 def main() -> None:
@@ -133,14 +170,17 @@ def main() -> None:
 
     document = load_book(source)
     segments = [s for s in document.segments if str(s.text or "").strip()]
-    if VARIANT in {"b", "alt", "unseen"}:
+    if VARIANT in {"c", "fresh", "unseen-c"}:
+        chosen, selection_meta = _unseen_spread_sample_c(segments)
+    elif VARIANT in {"b", "alt", "unseen"}:
         chosen, selection_meta = _unseen_spread_sample(segments)
     else:
         chosen, selection_meta = _targeted_sample(segments)
 
     paragraphs = [str(s.text or "").strip() for s in chosen]
+    memory_rows = _memory_paragraphs(segments, {s.id for s in chosen})
     source_text = "\n\n".join(paragraphs)
-    (out_dir / "sample.fb2").write_text(_fb2(paragraphs), "utf-8")
+    (out_dir / "sample.fb2").write_text(_fb2(paragraphs, memory_rows), "utf-8")
     (out_dir / "sample-source.txt").write_text(source_text, "utf-8")
     meta = {
         "variant": VARIANT,
@@ -149,6 +189,9 @@ def main() -> None:
         "source_chars": len(source_text),
         "source_segment_ids": [s.id for s in chosen],
         "source_chapters": [s.chapter for s in chosen],
+        "memory_scope": "whole-book-minus-target-window",
+        "memory_segments": len(memory_rows),
+        "memory_chars": sum(len(row) for row in memory_rows),
         "reference_text_embedded": False,
         **selection_meta,
     }
