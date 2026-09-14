@@ -117,11 +117,12 @@ class FinalV10QualityQA(_GeneralQualityQA):
     @classmethod
     def _latin_issues(cls, segment: Segment, target: str) -> list[V10Issue]:
         source = str(segment.text or "")
+        target_text = str(target or "")
         protected = cls._protected_latin(source)
         out: list[V10Issue] = []
 
         mixed = []
-        for token in _MIXED_TOKEN_RE.findall(str(target or "")):
+        for token in _MIXED_TOKEN_RE.findall(target_text):
             if not re.search(r"[A-Za-z]", token) or not re.search(r"[А-Яа-яЁё]", token):
                 continue
             # Standard one-letter engineering notation is not an untranslated leak.
@@ -138,10 +139,16 @@ class FinalV10QualityQA(_GeneralQualityQA):
             ))
 
         leaks = []
-        for token in _LATIN_TOKEN_RE.findall(str(target or "")):
+        for match in _LATIN_TOKEN_RE.finditer(target_text):
+            token = match.group(0)
             if token.casefold() == "chapter":
                 continue
             if token in protected and _source_has_exact_token(source, token):
+                continue
+            # The Latin-token regex sees the leading letter of `V-образный` as a
+            # standalone V. Keep the same narrow engineering-notation exemption as
+            # the mixed-script scanner rather than weakening Latin detection broadly.
+            if len(token) == 1 and re.match(r"-[А-Яа-яЁё]", target_text[match.end():]):
                 continue
             leaks.append(token)
         if leaks:
