@@ -63,6 +63,28 @@ def compare_duplicate_content_fidelity(source_en: str, target_ru: str) -> dict[s
     }
 
 
+def _glossary_supports_repetition(source_en: str, target_ru: str, memory: BookMemory) -> dict[str, str] | None:
+    """Allow repeated Russian terminology when the same source term also repeats.
+
+    The duplicate n-gram detector is intentionally language-agnostic, so a repeated
+    multiword Russian translation can look suspicious even when English repeats a
+    one-token/hyphenated technical term. Runtime BookMemory gives us a source-derived
+    alignment without hard-coding any book vocabulary.
+    """
+    source_low = str(source_en or "").casefold()
+    target_low = " ".join(str(target_ru or "").casefold().replace("ё", "е").split())
+    for en, ru in memory.glossary.items():
+        en_s = str(en or "").strip().casefold()
+        ru_s = " ".join(str(ru or "").strip().casefold().replace("ё", "е").split())
+        if not en_s or not ru_s or len(ru_s) < 8:
+            continue
+        source_count = len(re.findall(rf"(?<![A-Za-z0-9]){re.escape(en_s)}(?![A-Za-z0-9])", source_low, re.I))
+        target_count = target_low.count(ru_s)
+        if source_count >= 2 and target_count >= 2:
+            return {"source_term": en_s, "target_term": ru_s}
+    return None
+
+
 def _find_once(text: str, needle: str) -> int | None:
     hay = str(text or "").casefold().replace("ё", "е")
     ndl = str(needle or "").casefold().replace("ё", "е").strip()
@@ -131,13 +153,7 @@ def _canon_from_memory(memory: BookMemory) -> list[tuple[str, str, bool]]:
 
 
 def compare_clause_order_fidelity(source_en: str, target_ru: str, memory: BookMemory) -> dict[str, Any]:
-    """Compare order of uniquely alignable anchors across discourse clauses.
-
-    Surface word order inside one clause is intentionally ignored: Russian may
-    reorder subject/object/name phrases while preserving meaning. We only flag a
-    proven inversion when two anchors belong to different source clauses and their
-    target clause order is reversed.
-    """
+    """Compare order of uniquely alignable anchors across discourse clauses."""
     source = str(source_en or "")
     target = str(target_ru or "")
     anchors: list[tuple[str, int, int, int, int]] = []
@@ -177,7 +193,6 @@ def compare_clause_order_fidelity(source_en: str, target_ru: str, memory: BookMe
 
     inversions: list[dict[str, Any]] = []
     for left, right in zip(ordered, ordered[1:]):
-        # Ignore rearrangement within the same source clause.
         if left[3] == right[3]:
             continue
         if left[3] < right[3] and left[4] > right[4]:
@@ -193,8 +208,18 @@ def scan_clause_fidelity(segment: Segment, target_ru: str, memory: BookMemory) -
     out: list[ClauseFidelityIssue] = []
     duplicate = compare_duplicate_content_fidelity(segment.text, target_ru)
     if not duplicate.get("ok", True):
-        out.append(ClauseFidelityIssue("duplicate_content", str(duplicate.get("reason") or "invented target repetition"), duplicate))
+        support = _glossary_supports_repetition(segment.text, target_ru, memory)
+        if not support:
+            out.append(ClauseFidelityIssue(
+                "duplicate_content",
+                str(duplicate.get("reason") or "invented target repetition"),
+                duplicate,
+            ))
     order = compare_clause_order_fidelity(segment.text, target_ru, memory)
     if not order.get("ok", True):
-        out.append(ClauseFidelityIssue("clause_order", "reliable semantic anchors appear in a different discourse-clause order from source", order))
+        out.append(ClauseFidelityIssue(
+            "clause_order",
+            "reliable semantic anchors appear in a different discourse-clause order from source",
+            order,
+        ))
     return out
