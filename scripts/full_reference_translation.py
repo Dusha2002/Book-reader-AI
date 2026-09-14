@@ -7,7 +7,7 @@ from bookai.models import Segment
 from bookai.parsers.base import load_book, save_book
 from bookai.pipeline import PIPELINE_VERSION, _cache_path, _chapter_groups, _should_translate, translate_book
 from bookai.reference_harness import build_reference_harness
-from bookai.resume import first_complete_unchecked_chapter, sanitize_resume_state
+from bookai.resume import sanitize_resume_state
 
 
 SOURCE = Path("Devices_and_Desires.fb2")
@@ -27,6 +27,7 @@ def _sanitize_resume_cache(source: Path, cache_dir: Path, mode: str = "optimal")
         "removed_invalid_or_stale": 0,
         "partial_chapters": [],
         "qa_passed_chapters": 0,
+        "review_required_chapters": [],
     }
     if not state_path.exists():
         return empty
@@ -76,12 +77,12 @@ def _waivable_failure(error: BaseException) -> tuple[str, str] | None:
 
 
 def _record_best_effort_waiver(error: BaseException) -> dict | None:
-    """Continue past any late-stage error once the whole chapter has usable text.
+    """Preserve a complete chapter without ever certifying it as QA-passed.
 
-    The full-reference harness is intentionally strict, but for a long resumable
-    run we prefer checkpointed whole-book progress over throwing away a chapter
-    whose translations are already complete. Hard deterministic translation
-    failures still raise because they happen before this waiver point.
+    A waived late-stage failure becomes review_required. The pipeline knows how to
+    skip that chapter on the next resumable iteration so the rest of the book can
+    progress, but final quality remains needs_review until the marker is cleared by
+    a successful re-check.
     """
     failure = _waivable_failure(error)
     if failure is None:
@@ -98,29 +99,35 @@ def _record_best_effort_waiver(error: BaseException) -> dict | None:
     if not all(str(translations.get(segment.id) or "").strip() for segment in chapter):
         return None
 
-    waivers = list(state.get("best_effort_waivers") or [])
     entry = {
         "phase": phase,
         "chapter": chapter_name,
         "reason": str(error)[:1200],
     }
+    waivers = list(state.get("best_effort_waivers") or [])
     waivers.append(entry)
     state["best_effort_waivers"] = waivers[-64:]
-    if phase == "polish":
-        polished = set(state.get("polished_chapters") or [])
-        polished.add(chapter_name)
-        state["polished_chapters"] = sorted(polished)
-    if phase == "qa":
-        passed = set(state.get("qa_passed_chapters") or [])
-        passed.add(chapter_name)
-        state["qa_passed_chapters"] = sorted(passed)
+
+    review_required = dict(state.get("review_required_chapters") or {})
+    review_required[chapter_name] = entry
+    state["review_required_chapters"] = review_required
+
+    completed = set(state.get("completed_chapters") or [])
+    completed.add(chapter_name)
+    state["completed_chapters"] = sorted(completed)
+
+    qa_passed = set(state.get("qa_passed_chapters") or [])
+    qa_passed.discard(chapter_name)
+    state["qa_passed_chapters"] = sorted(qa_passed)
+    state.pop("final_quality", None)
+
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), "utf-8")
     return entry
 
 
 def _write_latest_artifact(error: BaseException | None) -> None:
-    """Materialize the latest checkpoint into a usable FB2 even after timeout/failure."""
+    """Materialize the latest checkpoint even after timeout/failure."""
     document = load_book(SOURCE)
     targets = [segment for segment in document.segments if _should_translate(segment.text)]
     state = _cached_state(SOURCE, CACHE)
@@ -134,8 +141,15 @@ def _write_latest_artifact(error: BaseException | None) -> None:
     completed = sum(segment.id in translations for segment in targets)
     remaining = max(0, len(targets) - completed)
     first_pending = next((segment.id for segment in targets if segment.id not in translations), None)
+    review_required = dict(state.get("review_required_chapters") or {})
+    if remaining:
+        status = "partial"
+    elif review_required:
+        status = "needs_review"
+    else:
+        status = "complete"
     report = {
-        "status": "complete" if remaining == 0 else "partial",
+        "status": status,
         "completed": completed,
         "total": len(targets),
         "remaining": remaining,
@@ -145,6 +159,7 @@ def _write_latest_artifact(error: BaseException | None) -> None:
         "cache": str(CACHE),
         "error": None if error is None else f"{type(error).__name__}: {error}",
         "best_effort_waivers": state.get("best_effort_waivers") or [],
+        "review_required_chapters": sorted(review_required),
         "final_quality": state.get("final_quality") or {},
     }
     PROGRESS_REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
@@ -166,15 +181,14 @@ def main() -> None:
                     harness,
                     mode="optimal",
                     cache_dir=CACHE,
-                    quality_gate=True,
-                    allow_waivers=False,
+                    progress=progress,
                 )
                 break
             except BaseException as exc:
                 waiver = _record_best_effort_waiver(exc)
                 if waiver is None:
                     raise
-                print("[full-reference] best_effort_waiver=" + json.dumps(waiver, ensure_ascii=False), flush=True)
+                print("[full-reference] needs_review=" + json.dumps(waiver, ensure_ascii=False), flush=True)
         _write_latest_artifact(None)
     except BaseException as exc:
         _write_latest_artifact(exc)
