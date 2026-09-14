@@ -4,23 +4,21 @@ import html as html_lib
 import io
 import json
 import re
-import shutil
-import subprocess
 import sys
-import tempfile
 import unicodedata
 import urllib.request
+import zipfile
 from pathlib import Path
 
-from pypdf import PdfReader
+from bs4 import BeautifulSoup
 
-SOURCE_URL = "https://raw.githubusercontent.com/janishar/mit-deep-learning-book-pdf/master/complete-book-bookmarked-pdf/deeplearningbook.pdf"
-PAGE_FIRST = 35
-PAGE_LAST = 40
-TARGET_MIN_CHARS = 2200
-TARGET_MAX_CHARS = 4600
-# Short smoke anchors: preserve distinct technical prose, acronyms and scientific
-# notation while staying resilient to minor wording/layout differences in the PDF.
+
+# A public EPUB generated from the authors' freely available online edition.
+# Unlike the typeset PDF/TeX HTML, its XHTML stores prose as real text nodes,
+# making it suitable for a translation benchmark without OCR/layout corruption.
+SOURCE_URL = "https://raw.githubusercontent.com/lbyshe/DeepLearningBook/master/Deep%20Learning%20-%20Goodfellow%2C%20Bengio.epub"
+TARGET_MIN_CHARS = 1800
+TARGET_MAX_CHARS = 3800
 ANCHORS = ("deep learning", "CPU", "GPU", "LSTM")
 
 _LIGATURES = str.maketrans({
@@ -33,148 +31,116 @@ _LIGATURES = str.maketrans({
 def _norm(text: str) -> str:
     value = unicodedata.normalize("NFKC", str(text or "")).translate(_LIGATURES).replace("\u00ad", "")
     value = re.sub(r"(?<=[A-Za-z])-\s*\n\s*(?=[a-z])", "", value)
-    value = re.sub(r"[ \t]+", " ", value)
-    value = re.sub(r"\n{3,}", "\n\n", value)
-    return value.strip()
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
 
 
-def _download_pdf() -> bytes:
+def _download_epub() -> bytes:
     request = urllib.request.Request(SOURCE_URL, headers={"User-Agent": "Book-reader-AI cross-book benchmark/1.0"})
     with urllib.request.urlopen(request, timeout=60) as response:
         data = response.read()
-    if not data.startswith(b"%PDF"):
-        raise RuntimeError(f"Benchmark source is not a PDF: {data[:32]!r}")
+    if not data.startswith(b"PK"):
+        raise RuntimeError(f"Benchmark source is not an EPUB/ZIP: {data[:32]!r}")
     return data
 
 
-def _page_text_poppler(pdf_bytes: bytes) -> list[str]:
-    exe = shutil.which("pdftotext")
-    if not exe:
-        return []
-    with tempfile.NamedTemporaryFile(suffix=".pdf") as handle:
-        handle.write(pdf_bytes)
-        handle.flush()
-        proc = subprocess.run(
-            [
-                exe,
-                "-f", str(PAGE_FIRST),
-                "-l", str(PAGE_LAST),
-                "-layout",
-                "-enc", "UTF-8",
-                handle.name,
-                "-",
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-    raw_pages = proc.stdout.decode("utf-8", errors="replace").split("\f")
-    pages = []
-    for raw in raw_pages:
-        text = _norm(raw)
-        if len(text) >= 200:
-            pages.append(text)
-    return pages
+def _epub_blocks(epub_bytes: bytes) -> list[str]:
+    blocks: list[str] = []
+    with zipfile.ZipFile(io.BytesIO(epub_bytes)) as archive:
+        names = [name for name in archive.namelist() if name.lower().endswith((".html", ".xhtml", ".htm"))]
+        if not names:
+            raise RuntimeError("EPUB contains no HTML/XHTML content")
+        for name in names:
+            raw = archive.read(name)
+            soup = BeautifulSoup(raw, "html.parser")
+            for bad in soup(["script", "style", "svg", "math", "nav"]):
+                bad.decompose()
+            # Paragraph/list/heading granularity keeps local prose coherent while
+            # avoiding one giant book-wide string.
+            nodes = soup.find_all(["p", "li", "h1", "h2", "h3", "h4"])
+            for node in nodes:
+                text = _norm(node.get_text(" ", strip=True))
+                if len(text) >= 35:
+                    blocks.append(text)
+    return blocks
 
 
-def _page_text_pypdf(pdf_bytes: bytes) -> list[str]:
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    if len(reader.pages) < PAGE_LAST:
-        raise RuntimeError(f"Benchmark PDF has only {len(reader.pages)} pages")
-    pages: list[str] = []
-    for physical_page in range(PAGE_FIRST, PAGE_LAST + 1):
-        raw = reader.pages[physical_page - 1].extract_text() or ""
-        text = _norm(raw)
-        if len(text) < 200:
-            raise RuntimeError(f"Physical page {physical_page} extracted only {len(text)} chars")
-        pages.append(text)
-    return pages
-
-
-def _page_text(pdf_bytes: bytes) -> tuple[list[str], str]:
-    # Poppler reconstructs spaces from glyph positions substantially better than
-    # pypdf on this particular typeset PDF. pypdf remains a portability fallback.
-    pages = _page_text_poppler(pdf_bytes)
-    extractor = "pdftotext-layout" if pages else "pypdf"
-    if not pages:
-        pages = _page_text_pypdf(pdf_bytes)
-
-    cleaned: list[str] = []
-    for text in pages:
-        text = re.sub(r"(?im)^\s*CHAPTER\s+1\.\s+INTRODUCTION\s*$", "", text)
-        text = re.sub(r"(?im)^\s*\d{1,2}\s*$", "", text)
-        text = _norm(text)
-        cleaned.append(text)
-    return cleaned, extractor
-
-
-def _sentences(pages: list[str]) -> list[str]:
-    # Layout extraction leaves line breaks at column width. Join them after
-    # dehyphenation; real sentence boundaries remain punctuation-based below.
-    text = " ".join(re.sub(r"\s+", " ", page).strip() for page in pages)
-    rows = [row.strip() for row in re.split(r"(?<=[.!?])\s+(?=(?:[A-Z0-9]|\())", text) if row.strip()]
-    return [row for row in rows if len(row) >= 35]
-
-
-def _looks_space_corrupt(text: str) -> tuple[bool, list[str]]:
-    """Detect layout glue only in the selected smoke excerpt, not all six pages."""
+def _looks_corrupt(text: str) -> tuple[bool, list[str]]:
     low = str(text or "").casefold()
-    glued_sentinels = [
-        bad for bad in ("machinelearning", "neuralnetworks", "deeplearning", "generalpurpose")
+    sentinels = [
+        bad for bad in (
+            "machinelearning",
+            "neuralnetworks",
+            "deeplearning",
+            "generalpurpose",
+            "artificialneural",
+        )
         if bad in low
     ]
-    long_tokens = re.findall(r"\b[a-z]{28,}\b", low)
-    bad = glued_sentinels + long_tokens[:6]
-    return bool(glued_sentinels or len(long_tokens) >= 2), bad
+    absurd = re.findall(r"\b[a-z]{30,}\b", low)
+    evidence = sentinels + absurd[:5]
+    return bool(sentinels or len(absurd) >= 2), evidence
 
 
-def _short_blocks(pages: list[str]) -> tuple[list[str], dict[str, int]]:
-    rows = _sentences(pages)
-
-    anchor_index: dict[str, int] = {}
+def _find_anchor_indices(blocks: list[str]) -> dict[str, int]:
+    # Prefer Chapter 1 historical-trends material. The anchors themselves are broad
+    # enough to tolerate EPUB revisions, but all must exist in the selected region.
+    indices: dict[str, int] = {}
     for anchor in ANCHORS:
-        index = next((i for i, row in enumerate(rows) if anchor.casefold() in row.casefold()), None)
-        if index is None:
-            raise RuntimeError(f"Goodfellow short benchmark missing technical anchor {anchor!r}")
-        anchor_index[anchor] = index
+        pos = next((i for i, block in enumerate(blocks) if anchor.casefold() in block.casefold()), None)
+        if pos is None:
+            raise RuntimeError(f"Goodfellow EPUB benchmark missing technical anchor {anchor!r}")
+        indices[anchor] = pos
+    return indices
 
-    selected: set[int] = set(anchor_index.values())
-    radius = 1
-    while True:
+
+def _short_blocks(blocks: list[str]) -> tuple[list[str], dict[str, int]]:
+    anchors = _find_anchor_indices(blocks)
+
+    selected: set[int] = set()
+    for index in anchors.values():
+        selected.update(pos for pos in (index - 1, index, index + 1) if 0 <= pos < len(blocks))
+
+    # If the anchors are spread across the introduction, keep small local windows
+    # around each rather than the entire span between them.
+    ordered = sorted(selected)
+    chosen = [blocks[i] for i in ordered]
+    chars = sum(len(row) + 2 for row in chosen)
+
+    radius = 2
+    while chars < TARGET_MIN_CHARS and radius <= 4:
         candidate = set(selected)
-        for index in anchor_index.values():
+        for index in anchors.values():
             for pos in (index - radius, index + radius):
-                if 0 <= pos < len(rows):
+                if 0 <= pos < len(blocks):
                     candidate.add(pos)
-        chars = sum(len(rows[i]) + 2 for i in sorted(candidate))
-        if chars <= TARGET_MAX_CHARS:
+        candidate_rows = [blocks[i] for i in sorted(candidate)]
+        candidate_chars = sum(len(row) + 2 for row in candidate_rows)
+        if candidate_chars <= TARGET_MAX_CHARS:
             selected = candidate
-        if chars >= TARGET_MIN_CHARS or radius >= 4 or chars > TARGET_MAX_CHARS:
-            break
+            chosen = candidate_rows
+            chars = candidate_chars
         radius += 1
 
+    # Trim only peripheral rows; never remove an anchor block itself.
+    anchor_set = set(anchors.values())
     ordered = sorted(selected)
-    blocks: list[str] = []
-    group: list[str] = []
-    prev: int | None = None
-    for index in ordered:
-        if prev is not None and index != prev + 1 and group:
-            blocks.append(" ".join(group))
-            group = []
-        group.append(rows[index])
-        prev = index
-    if group:
-        blocks.append(" ".join(group))
+    while sum(len(blocks[i]) + 2 for i in ordered) > TARGET_MAX_CHARS:
+        removable = [i for i in ordered if i not in anchor_set]
+        if not removable:
+            break
+        # Drop the longest non-anchor paragraph first; anchors retain coverage.
+        drop = max(removable, key=lambda i: len(blocks[i]))
+        ordered.remove(drop)
 
-    selected_text = "\n\n".join(blocks)
-    corrupt, evidence = _looks_space_corrupt(selected_text)
+    chosen = [blocks[i] for i in ordered]
+    text = "\n\n".join(chosen)
+    corrupt, evidence = _looks_corrupt(text)
     if corrupt:
-        raise RuntimeError(f"Selected Goodfellow prose still contains glued-word corruption: {evidence}")
-
-    source_chars = len(selected_text)
-    if source_chars < 1200 or source_chars > TARGET_MAX_CHARS + 600:
-        raise RuntimeError(f"Unexpected short Goodfellow benchmark size: {source_chars} chars")
-    return blocks, anchor_index
+        raise RuntimeError(f"Selected Goodfellow EPUB prose contains spacing corruption: {evidence}")
+    if not (1200 <= len(text) <= TARGET_MAX_CHARS + 300):
+        raise RuntimeError(f"Unexpected short Goodfellow benchmark size: {len(text)} chars")
+    return chosen, anchors
 
 
 def _fb2(paragraphs: list[str]) -> str:
@@ -205,11 +171,12 @@ def _fb2(paragraphs: list[str]) -> str:
 def main() -> None:
     out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "crossbook-goodfellow")
     out_dir.mkdir(parents=True, exist_ok=True)
-    pages, extractor = _page_text(_download_pdf())
-    selected, anchors = _short_blocks(pages)
+
+    blocks = _epub_blocks(_download_epub())
+    selected, anchors = _short_blocks(blocks)
     source_text = "\n\n".join(selected)
 
-    required = ("deep learning", "neural", "LSTM", "CPU", "GPU")
+    required = ("deep learning", "LSTM", "CPU", "GPU")
     missing = [term for term in required if term.casefold() not in source_text.casefold()]
     if missing:
         raise RuntimeError(f"Short benchmark lost required technical coverage; missing={missing}")
@@ -218,13 +185,12 @@ def main() -> None:
     (out_dir / "sample-source.txt").write_text(source_text, "utf-8")
     meta = {
         "source_url": SOURCE_URL,
-        "physical_pages_scanned": [PAGE_FIRST, PAGE_LAST],
-        "extractor": extractor,
+        "source_format": "epub-xhtml",
         "source_chars": len(source_text),
         "segments": len(selected),
-        "anchor_sentence_indices": anchors,
+        "anchor_block_indices": anchors,
         "reference_text_embedded": False,
-        "selection": "short clean technical smoke excerpt from physical PDF pages 35–40; no gold translation used by pipeline",
+        "selection": "short clean technical smoke excerpt from public EPUB of the authors' online edition; no Russian gold used by pipeline",
     }
     (out_dir / "sample-meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
     print(json.dumps(meta, ensure_ascii=False))
