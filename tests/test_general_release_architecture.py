@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from bookai.models import BookMemory, Segment
-from bookai.release_final import FinalV10QualityQA
+from bookai.release_final import FinalDialogueDiscourseGuard, FinalV10QualityQA
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,9 +19,9 @@ def _technical_memory() -> BookMemory:
     return memory
 
 
-def test_release_facade_delegates_to_crossdomain_layer():
+def test_release_facade_delegates_to_general_publication_layer():
     text = (ROOT / "src/bookai/release_final.py").read_text("utf-8")
-    assert "v10_crossdomain_release" in text
+    assert ("v10_publication_release" in text) or ("v10_crossdomain_release" in text)
     assert "class FinalV10QualityQA" not in text
 
 
@@ -30,6 +30,7 @@ def test_general_release_has_no_fixture_book_vocabulary():
         ROOT / "src/bookai/v10_general_release.py",
         ROOT / "src/bookai/v10_universal_release.py",
         ROOT / "src/bookai/v10_crossdomain_release.py",
+        ROOT / "src/bookai/v10_publication_release.py",
         ROOT / "src/bookai/release_final.py",
     ]
     text = "\n".join(path.read_text("utf-8").casefold() for path in paths)
@@ -66,10 +67,12 @@ def test_unknown_book_name_is_not_forced_without_runtime_memory():
 
 def test_source_acronyms_are_allowed_in_technical_translation():
     qa = FinalV10QualityQA()
+    memory = _technical_memory()
+    memory.acronyms.update({"LSTM": "LSTM", "GPU": "GPU"})
     issues = qa.scan_segment(
         _segment("An LSTM can run on a GPU."),
         "LSTM может выполняться на GPU.",
-        _technical_memory(),
+        memory,
     )
     assert not any(issue.code == "latin_leak" for issue in issues)
     assert not any(issue.code == "acronym_fidelity" for issue in issues)
@@ -77,12 +80,32 @@ def test_source_acronyms_are_allowed_in_technical_translation():
 
 def test_missing_acronym_is_hard_in_technical_prose():
     qa = FinalV10QualityQA()
+    memory = _technical_memory()
+    memory.acronyms["CPU"] = "CPU"
     issues = qa.scan_segment(
         _segment("The model runs on faster CPUs."),
         "Модель работает на более быстрых процессорах.",
-        _technical_memory(),
+        memory,
     )
     assert any(issue.code == "acronym_fidelity" and issue.severity == "hard" for issue in issues)
+
+
+def test_acronym_policy_can_localize_instead_of_preserve_latin():
+    qa = FinalV10QualityQA()
+    memory = _technical_memory()
+    memory.acronyms["AI"] = "ИИ"
+    good = qa.scan_segment(
+        _segment("AI research advanced."),
+        "Исследования ИИ продвинулись вперед.",
+        memory,
+    )
+    bad = qa.scan_segment(
+        _segment("AI research advanced."),
+        "Исследования искусственного интеллекта продвинулись вперед.",
+        memory,
+    )
+    assert not any(issue.code == "acronym_fidelity" for issue in good)
+    assert any(issue.code == "acronym_fidelity" and issue.severity == "hard" for issue in bad)
 
 
 def test_quoted_single_letter_symbol_is_allowed_when_source_defines_it():
@@ -180,6 +203,22 @@ def test_citation_surname_spelling_is_preserved_in_academic_domain():
         _technical_memory(),
     )
     assert any(issue.code == "citation_fidelity" and issue.severity == "hard" for issue in issues)
+
+
+def test_publication_guard_restores_inline_author_year_citation():
+    guard = FinalDialogueDiscourseGuard()
+    segment = _segment("Hochreiter and Schmidhuber (1997) introduced the model.")
+    translated = {segment.id: "Хохрайтер и Шмидхубер (1997) представили модель."}
+    guard.apply([segment], translated)
+    assert translated[segment.id].startswith("Hochreiter and Schmidhuber (1997)")
+
+
+def test_publication_guard_restores_parenthetical_citation_group():
+    guard = FinalDialogueDiscourseGuard()
+    segment = _segment("Results improved (LeCun et al., 1998b; Bengio et al., 2001).")
+    translated = {segment.id: "Результаты улучшились (Лекун и др., 1998b; Бенгио и др., 2001)."}
+    guard.apply([segment], translated)
+    assert "(LeCun et al., 1998b; Bengio et al., 2001)" in translated[segment.id]
 
 
 def test_cross_segment_source_continuation_cannot_be_closed_early():
