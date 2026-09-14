@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +10,7 @@ from .models import BookMemory, Segment
 from .v10 import _json_from_text, _norm
 
 
-_SCHEMA = "v10-semantic-profile-1"
+_SCHEMA = "v10-semantic-profile-2-focus-terms"
 _ALLOWED_DOMAINS = {
     "literary_fiction",
     "narrative_nonfiction",
@@ -54,12 +55,28 @@ def _exact_source_phrase(joined: str, requested: str) -> str:
     return joined[index:index + len(phrase)]
 
 
+def _valid_focus_term(source: str) -> bool:
+    phrase = str(source or "").strip()
+    if not phrase or len(phrase) > 100:
+        return False
+    if re.fullmatch(r"[A-Z][A-Z0-9.+/-]{1,15}", phrase):
+        return False
+    words = re.findall(r"[A-Za-z][A-Za-z'-]*", phrase)
+    if not 1 <= len(words) <= 7:
+        return False
+    if len(words) == 1 and len(words[0]) < 7 and "-" not in words[0]:
+        return False
+    return True
+
+
 class SourceSemanticProfileVerifier:
     """One cached source-only pass per translated span.
 
-    It independently verifies domain and records only semantic *meaning hints* for
-    source phrases likely to fail under literal translation. Hints remain English and
-    never contain target/reference wording, so they cannot leak an external gold text.
+    It independently verifies domain, records semantic meaning hints for risky source
+    phrases, and — for academic/technical prose — discovers high-value terminology in
+    the *actual translation window*. All discovery remains English-only. Russian canon
+    is decided later by the independent terminology consensus stage, so this profiler
+    cannot silently inject a target translation.
     """
 
     def __init__(self, provider: Any, cache_path: Path):
@@ -74,6 +91,8 @@ class SourceSemanticProfileVerifier:
             "domain_changed": False,
             "hints": 0,
             "hint_kinds": {},
+            "technical_term_count": 0,
+            "technical_terms": [],
         }
 
     def _cache_data(self) -> dict[str, Any]:
@@ -83,7 +102,14 @@ class SourceSemanticProfileVerifier:
             data = {}
         return data if isinstance(data, dict) else {}
 
-    def _save_cache(self, key: str, memory: BookMemory, hints: dict[str, str], raw_rows: list[dict[str, Any]]) -> None:
+    def _save_cache(
+        self,
+        key: str,
+        memory: BookMemory,
+        hints: dict[str, str],
+        raw_rows: list[dict[str, Any]],
+        technical_terms: list[dict[str, Any]],
+    ) -> None:
         data = self._cache_data()
         profiles = data.get("semantic_profiles")
         if not isinstance(profiles, dict):
@@ -93,6 +119,7 @@ class SourceSemanticProfileVerifier:
             "domain": str(memory.domain or ""),
             "semantic_hints": dict(hints),
             "rows": raw_rows,
+            "technical_terms": technical_terms,
         }
         data["semantic_profiles"] = profiles
         if memory.domain:
@@ -115,10 +142,14 @@ class SourceSemanticProfileVerifier:
             hints = cached.get("semantic_hints") or {}
             if isinstance(hints, dict):
                 memory.semantic_hints = {str(k): str(v) for k, v in hints.items() if k and v}
+            cached_terms = cached.get("technical_terms") or []
+            technical_terms = [dict(row) for row in cached_terms if isinstance(row, dict)]
             self.stats.update({
                 "cache_hit": True,
                 "verified_domain": str(memory.domain or ""),
                 "hints": len(memory.semantic_hints),
+                "technical_term_count": len(technical_terms),
+                "technical_terms": technical_terms,
             })
             return dict(self.stats)
 
@@ -136,12 +167,13 @@ Task A — independently classify the source span by what it IS, not merely by p
 - other: only when none fits.
 A first-person narrative is NOT automatically fiction. Autobiographical claims, real-life recollection, descendants/ancestors, historical testimony and memoir framing are evidence for narrative_nonfiction.
 
-Task B — find at most 12 exact English source phrases that are unusually risky under literal EN→RU translation because of an idiom, archaic/historical sense, polysemy, non-compositional metaphor, deceptive syntactic attachment, or register-specific meaning. Do NOT list ordinary clear phrases, names, technical terms that belong in a terminology glossary, or stylistic preferences with no semantic risk.
-For each risk, copy `source` exactly from an excerpt and give `meaning` as a concise plain-ENGLISH contextual sense, not a Russian translation. Examples of the TYPE of note wanted: “surviving family members, not corpses”; “treat it tolerantly/fairly, not literally provide lodging”. Do not use these example phrases unless the supplied source actually contains them.
+Task B — find at most 12 exact English source phrases that are unusually risky under literal EN→RU translation because of an idiom, archaic/historical sense, polysemy, non-compositional metaphor, deceptive syntactic attachment, or register-specific meaning. Do NOT list ordinary clear phrases, names, or stylistic preferences with no semantic risk. For each risk, copy `source` exactly from an excerpt and give `meaning` as a concise plain-ENGLISH contextual sense, not a Russian translation.
+
+Task C — ONLY when the source is academic_technical, find at most 12 exact English specialist terms or compact noun phrases in these excerpts for which established Russian professional terminology matters. Include important one-off terms: do not require whole-book recurrence. Prefer terms whose accepted field label may differ from a literal word-by-word rendering, whose head noun is easy to calque incorrectly, or whose precise conventional wording is important for a textbook. Do NOT include people, organizations, brands, citations, standalone acronyms, mathematical variable names, generic words such as model/system/method alone, or whole sentences. Copy `source` EXACTLY and give only a short ENGLISH denotation in `meaning`; do not propose Russian wording.
 
 Return ONLY JSON:
-{"domain":"literary_fiction|narrative_nonfiction|academic_technical|general_nonfiction|other","domain_confidence":0.0,"domain_reason":"brief source evidence","risks":[{"source":"exact source substring","meaning":"concise English contextual meaning","kind":"idiom|archaic_sense|polysemy|attachment|register|metaphor","confidence":0.0}]}.
-Only include risks with confidence >= 0.75."""
+{"domain":"literary_fiction|narrative_nonfiction|academic_technical|general_nonfiction|other","domain_confidence":0.0,"domain_reason":"brief source evidence","risks":[{"source":"exact source substring","meaning":"concise English contextual meaning","kind":"idiom|archaic_sense|polysemy|attachment|register|metaphor","confidence":0.0}],"technical_terms":[{"source":"exact technical term","meaning":"concise English denotation","confidence":0.0}]}.
+Only include risks/terms with confidence >= 0.75. For non-academic text return technical_terms: []."""
         payload = {
             "current_domain_guess": str(memory.domain or ""),
             "current_style": {
@@ -150,6 +182,7 @@ Only include risks with confidence >= 0.75."""
                 "dialogue": str(memory.style.dialogue or ""),
                 "humor": str(memory.style.humor or ""),
             },
+            "existing_glossary_sources": list(memory.glossary.keys())[:120],
             "excerpts": excerpts,
         }
         try:
@@ -191,8 +224,6 @@ Only include risks with confidence >= 0.75."""
             meaning = _norm(row.get("meaning") or "")
             if not source or not meaning or len(meaning) > 180:
                 continue
-            # Keep meaning notes English-only enough to avoid accidentally turning
-            # this source-only layer into a hidden target translation dictionary.
             if any("А" <= ch <= "я" or ch in "Ёё" for ch in meaning):
                 continue
             hints[source] = meaning
@@ -201,10 +232,36 @@ Only include risks with confidence >= 0.75."""
             if len(hints) >= 12:
                 break
 
+        technical_terms: list[dict[str, Any]] = []
+        seen_terms: set[str] = set()
+        if memory.domain == "academic_technical":
+            for row in obj.get("technical_terms") or []:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    confidence = float(row.get("confidence") or 0.0)
+                except Exception:
+                    confidence = 0.0
+                if confidence < 0.78:
+                    continue
+                source = _exact_source_phrase(joined, str(row.get("source") or ""))
+                meaning = _norm(row.get("meaning") or "")
+                key = source.casefold()
+                if not source or key in seen_terms or not _valid_focus_term(source):
+                    continue
+                if not meaning or len(meaning) > 180 or any("А" <= ch <= "я" or ch in "Ёё" for ch in meaning):
+                    continue
+                technical_terms.append({"source": source, "meaning": meaning, "confidence": confidence})
+                seen_terms.add(key)
+                if len(technical_terms) >= 12:
+                    break
+
         memory.semantic_hints = hints
         self.stats["hints"] = len(hints)
         self.stats["hint_kinds"] = kind_counts
-        self._save_cache(key, memory, hints, rows_for_cache)
+        self.stats["technical_term_count"] = len(technical_terms)
+        self.stats["technical_terms"] = technical_terms
+        self._save_cache(key, memory, hints, rows_for_cache, technical_terms)
         print("[v10-semantic-profile] " + json.dumps(self.stats, ensure_ascii=False), flush=True)
         return dict(self.stats)
 
