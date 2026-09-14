@@ -56,7 +56,7 @@ jobs:
       BOOKAI_V10_RESIDUAL_DEEP_MAX: '4'
       BOOKAI_V10_RECOVERY_BATCH: '4'
       BOOKAI_V10_JSON_RECOVERY_BATCH: '3'
-      BOOKAI_SHORT_VARIANT: 'b'
+      BOOKAI_SHORT_VARIANT: 'c'
 
     steps:
       - uses: actions/checkout@v4
@@ -156,7 +156,7 @@ jobs:
                   'final_hard': report.get('final_hard'),
                   'final_integrity': report.get('final_integrity'),
               })
-          payload = {'mode': 'short-three-book-smoke-unseen-b', 'samples': rows}
+          payload = {'mode': 'short-three-book-smoke-unseen-c-whole-book-memory', 'samples': rows}
           Path('short-three-book-summary.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), 'utf-8')
           print(json.dumps(payload, ensure_ascii=False, indent=2))
           PY
