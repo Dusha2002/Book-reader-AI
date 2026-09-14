@@ -8,6 +8,7 @@ from pathlib import Path
 
 from bookai.llm import OpenAICompatibleProvider
 from bookai.parsers.base import load_book, save_book
+from bookai.pipeline import _should_translate
 from bookai.release_final import (
     FinalBookBibleBuilder,
     FinalDeepSeekSemanticSpecialist,
@@ -27,6 +28,8 @@ from bookai.v10_term_verifier import DeepSeekPublicationTerminologyVerifier
 
 
 SOURCE = Path(os.getenv("BOOKAI_SOURCE") or "Devices_and_Desires.fb2")
+_MEMORY_SOURCE_VALUE = (os.getenv("BOOKAI_MEMORY_SOURCE") or "").strip()
+MEMORY_SOURCE = Path(_MEMORY_SOURCE_VALUE) if _MEMORY_SOURCE_VALUE else None
 CHAPTER_NAME = os.getenv("BOOKAI_CHAPTER_NAME") or "Chapter One"
 SLUG = re.sub(r"[^a-z0-9]+", "-", CHAPTER_NAME.casefold()).strip("-") or "chapter"
 OUTPUT = Path(f"Devices_and_Desires_RU_V10_{SLUG}.fb2")
@@ -55,17 +58,32 @@ def _hard_issues(issues) -> list:
     return [issue for issue in issues if issue.severity == "hard"]
 
 
+def _memory_targets(document, fallback_targets):
+    if MEMORY_SOURCE is None:
+        return list(fallback_targets), str(SOURCE)
+    if not MEMORY_SOURCE.exists():
+        raise RuntimeError(f"BOOKAI_MEMORY_SOURCE does not exist: {MEMORY_SOURCE}")
+    memory_document = load_book(MEMORY_SOURCE)
+    rows = [segment for segment in memory_document.segments if _should_translate(segment.text)]
+    if not rows:
+        raise RuntimeError(f"BOOKAI_MEMORY_SOURCE contains no translatable segments: {MEMORY_SOURCE}")
+    return rows, str(MEMORY_SOURCE)
+
+
 def main() -> None:
     run_started = time.perf_counter()
     document = load_book(SOURCE)
-    all_targets, chapter_name, targets, selection = select_numbered_chapter(document, CHAPTER_NAME)
+    target_document_segments, chapter_name, targets, selection = select_numbered_chapter(document, CHAPTER_NAME)
+    memory_targets, memory_source_label = _memory_targets(document, target_document_segments)
     print("[v10-release9] " + json.dumps({
         "chapter": chapter_name,
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
-        "whole_book_segments": len(all_targets),
+        "whole_book_segments": len(memory_targets),
+        "memory_source": memory_source_label,
+        "memory_source_external": MEMORY_SOURCE is not None,
         "selection": selection,
-        "architecture": "clean10:whole-book-memory+consensus-terms+focused-semantic-editorial",
+        "architecture": "clean10.1:stable-whole-book-memory+consensus-terms+focused-semantic-editorial",
     }, ensure_ascii=False), flush=True)
 
     giga = HardenedRobustTaggedPrimaryTransport()
@@ -73,18 +91,18 @@ def main() -> None:
         raise RuntimeError("GIGACHAT_AUTH_KEY is missing")
 
     bible_started = time.perf_counter()
-    memory, bible_stats = FinalBookBibleBuilder(giga, BIBLE).build(all_targets)
+    memory, bible_stats = FinalBookBibleBuilder(giga, BIBLE).build(memory_targets)
     bible_seconds = time.perf_counter() - bible_started
     usage_after_bible = giga.usage.as_dict()
 
     provider = _provider()
     terminology_started = time.perf_counter()
     terminology_verifier = DeepSeekPublicationTerminologyVerifier(provider, BIBLE)
-    terminology_stats = terminology_verifier.verify(all_targets, memory, focus_segments=targets)
+    terminology_stats = terminology_verifier.verify(memory_targets, memory, focus_segments=targets)
     terminology_seconds = time.perf_counter() - terminology_started
 
-    # BookMemory is whole-book; neighboring translation context must remain local to
-    # the requested chapter/window so benchmark memory sections never leak into prose.
+    # BookMemory is whole-book; neighboring translation context remains local to the
+    # requested chapter/window, so the stable memory source never leaks into prose.
     chapter_context = targets
     chapter_started = time.perf_counter()
     translated, primary_errors = giga.translate_many(targets, memory, source_segments=chapter_context)
@@ -219,12 +237,14 @@ def main() -> None:
     MAP.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), "utf-8")
 
     report = {
-        "version": "v10-clean-10-consensus-editorial",
+        "version": "v10-clean-10.1-stable-memory",
         "chapter": chapter_name,
         "chapter_selection": selection,
         "segments": len(targets),
         "source_chars": sum(len(s.text) for s in targets),
-        "whole_book_memory_segments": len(all_targets),
+        "whole_book_memory_segments": len(memory_targets),
+        "memory_source": memory_source_label,
+        "memory_source_external": MEMORY_SOURCE is not None,
         "completed": len(targets) - len(missing),
         "missing_ids": missing,
         "timing": {
@@ -236,8 +256,8 @@ def main() -> None:
             "total_cold_seconds": round(time.perf_counter() - run_started, 2),
         },
         "architecture": {
-            "chapter_selection": "short target window with independent whole-book source memory",
-            "book_bible": "SOURCE-ONLY whole-book canon + entity graph + publication policy",
+            "chapter_selection": "short target window independent from stable whole-book memory source",
+            "book_bible": "SOURCE-ONLY fingerprinted whole-book canon + entity graph + publication policy",
             "terminology_verifier": "book-wide candidate evidence + focus-window semantic profile + consensus-gated canon",
             "primary": "domain-aware GigaChat tagged batches with target-local neighbor context",
             "dialogue": "source-aware dialogue normalization preserving genuine nested Russian guillemets",
