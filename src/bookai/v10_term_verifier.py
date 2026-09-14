@@ -14,7 +14,7 @@ from .v10_semantic_profile import SourceSemanticProfileVerifier
 from .v10_source_bible import _has_clean_russian
 
 
-_VERIFIER_CACHE_MARKER = "v10-deepseek-terminology-5"
+_VERIFIER_CACHE_MARKER = "v10-deepseek-terminology-6-consensus"
 _LOCAL_DEFINITION_RE = re.compile(
     r"\b([a-z][a-z'-]{2,16})\b\s+(?:had|has|have|is|was|were)\s+"
     r"(?:no|not|only)\b",
@@ -85,13 +85,14 @@ def _valid_ru_term(value: str) -> bool:
 
 
 class DeepSeekPublicationTerminologyVerifier:
-    """Source-only semantic preflight plus compact terminology verification.
+    """Source-only semantic preflight plus consensus-gated terminology canon.
 
-    A first DeepSeek pass independently verifies book domain and records English-only
-    contextual meaning hints for idioms/polysemy. Then DeepSeek creates a terminology
-    draft canon. GigaChat 3 Ultra is an optional, fail-fast adversarial critic; if it is
-    unavailable or slow, critique immediately falls back to DeepSeek. Everything is
-    cached in the per-book bible and no Russian reference translation is ever used.
+    Book-wide source supplies terminology evidence, while an optional focus window
+    supplies local semantic hints for the text being translated. A term becomes a
+    hard canon only after a draft and an adversarial review agree; critic revisions
+    require one compact confirmation. If consensus is unavailable, the risky term is
+    deliberately de-canonicalized rather than imposing a plausible but wrong calque.
+    No Russian reference translation is used.
     """
 
     def __init__(self, provider: Any, cache_path: Path, *, critic_backend: Any | None = None):
@@ -112,11 +113,16 @@ class DeepSeekPublicationTerminologyVerifier:
             "critic_returned": 0,
             "critic_revised": 0,
             "critic_omitted": 0,
+            "consensus_confirm_calls": 0,
+            "consensus_confirmed": 0,
+            "consensus_rejected": 0,
+            "decanonicalized": 0,
             "added": 0,
             "refined": 0,
             "kept": 0,
             "omitted": 0,
             "applied": {},
+            "uncertain": [],
         }
 
     def _cache_data(self) -> dict[str, Any]:
@@ -143,19 +149,24 @@ class DeepSeekPublicationTerminologyVerifier:
         if not data or data.get("deepseek_terminology_schema") != _VERIFIER_CACHE_MARKER:
             return False
         verified = data.get("deepseek_verified_glossary") or {}
-        if not isinstance(verified, dict):
+        uncertain = data.get("deepseek_uncertain_terms") or []
+        if not isinstance(verified, dict) or not isinstance(uncertain, list):
             return False
+        for key in uncertain:
+            memory.glossary.pop(str(key).casefold(), None)
         for source, ru in verified.items():
             if source and ru:
-                memory.glossary[str(source)] = str(ru)
+                memory.glossary[str(source).casefold()] = str(ru)
         self.stats["cache_hit"] = True
         self.stats["applied"] = {str(k): str(v) for k, v in verified.items() if k and v}
+        self.stats["uncertain"] = [str(k) for k in uncertain]
         return True
 
-    def _save_cache(self, memory: BookMemory, applied: dict[str, str]) -> None:
+    def _save_cache(self, memory: BookMemory, applied: dict[str, str], uncertain: set[str]) -> None:
         data = self._cache_data()
         data["glossary"] = dict(memory.glossary)
         data["deepseek_verified_glossary"] = dict(applied)
+        data["deepseek_uncertain_terms"] = sorted(uncertain)
         data["deepseek_terminology_schema"] = _VERIFIER_CACHE_MARKER
         if getattr(memory, "domain", ""):
             data["domain"] = str(memory.domain)
@@ -260,8 +271,6 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|re
             return None
         backend.model = (os.getenv("BOOKAI_GIGACHAT_TERM_MODEL") or "GigaChat-3-Ultra").strip()
         backend.max_tokens = max(1800, min(4200, int(os.getenv("BOOKAI_GIGACHAT_TERM_MAX_TOKENS") or "3200")))
-        # Ultra is an optional critic, never a critical path. A slow/unavailable
-        # OAuth endpoint must fall back quickly instead of adding ~2 minutes/book.
         backend.timeout_seconds = max(8, min(20, int(os.getenv("BOOKAI_GIGACHAT_TERM_TIMEOUT") or "12")))
         backend.max_retries = 0
         backend.retry_backoff = 0.2
@@ -289,26 +298,64 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|re
 
         if obj is None:
             self.stats["critic_backend"] = "deepseek-fallback"
-            raw = self.provider.complete(
-                self._critic_system(),
-                json.dumps(payload, ensure_ascii=False),
-                temperature=0.0,
-            )
+            raw = self.provider.complete(self._critic_system(), json.dumps(payload, ensure_ascii=False), temperature=0.0)
             self.stats["calls"] += 1
             obj = _json_from_text(raw)
-
         rows = [row for row in obj.get("items") or [] if isinstance(row, dict)]
         self.stats["critic_returned"] = len(rows)
         return rows
 
-    def verify(self, segments: list[Segment], memory: BookMemory) -> dict[str, Any]:
+    def _confirm_revisions(self, rows: list[dict[str, Any]], memory: BookMemory) -> dict[str, str]:
+        if not rows:
+            return {}
+        system = """You are the final SOURCE-ONLY terminology consensus judge. Another editor revised proposed EN→RU canonical terms.
+For each row decide accept or reject. Accept only if the revised Russian term is a conventional professional label in the stated domain, preserves the exact breadth/denotation of the English source, and is preferable to both the prior canon and draft proposal. Reject literal-but-nonstandard calques, subtype narrowing, broadened neighboring concepts, and uncertain guesses. Return ONLY JSON {"items":[{"source":"exact source","decision":"accept|reject","confidence":0.0,"reason":"brief"}]} with one row per input."""
+        payload = {
+            "domain": str(getattr(memory, "domain", "") or ""),
+            "rows": rows,
+        }
+        try:
+            raw = self.provider.complete(system, json.dumps(payload, ensure_ascii=False), temperature=0.0)
+            self.stats["calls"] += 1
+            self.stats["consensus_confirm_calls"] += 1
+            obj = _json_from_text(raw)
+        except Exception as exc:
+            print(f"[v10-term-consensus] error={type(exc).__name__}: {exc}", flush=True)
+            return {}
+        out: dict[str, str] = {}
+        expected = {str(row.get("source") or "").casefold(): row for row in rows}
+        for item in obj.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("source") or "").strip().casefold()
+            row = expected.get(key)
+            if not row or str(item.get("decision") or "").strip().casefold() != "accept":
+                continue
+            try:
+                confidence = float(item.get("confidence") or 0)
+            except Exception:
+                confidence = 0.0
+            threshold = 0.90 if self.stats.get("critic_backend") == "deepseek-fallback" else 0.82
+            if confidence >= threshold:
+                out[key] = str(row.get("revised_ru") or "").strip()
+        self.stats["consensus_confirmed"] += len(out)
+        return out
+
+    def verify(
+        self,
+        segments: list[Segment],
+        memory: BookMemory,
+        *,
+        focus_segments: list[Segment] | None = None,
+    ) -> dict[str, Any]:
         self._hydrate_domain(memory)
 
-        # Independently verify domain and map phrase-level semantic risks BEFORE
-        # terminology routing, so both candidate selection and transport see the
-        # corrected source profile. This is source-only and cached separately.
+        # Book-wide evidence drives names/terms, but semantic hints are generated for
+        # the actual translation window. This keeps short-window translation informed
+        # by whole-book memory without losing local idiom/polysemy review.
         semantic_profile = SourceSemanticProfileVerifier(self.provider, self.cache_path)
-        self.stats["semantic_profile"] = semantic_profile.analyze(segments, memory)
+        semantic_focus = list(focus_segments or segments)
+        self.stats["semantic_profile"] = semantic_profile.analyze(semantic_focus, memory)
         self.stats["domain"] = str(memory.domain or "")
 
         if self._load_cache(memory):
@@ -317,7 +364,7 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|re
         candidates = _verification_candidates(segments, memory)
         self.stats["candidates"] = len(candidates)
         if not candidates:
-            self._save_cache(memory, {})
+            self._save_cache(memory, {}, set())
             return dict(self.stats)
 
         try:
@@ -328,43 +375,66 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|re
 
         proposal_map = {str(row.get("source") or "").casefold(): row for row in proposals}
         final_terms: dict[str, str] = {}
+        uncertain = {str(row.get("source") or "").casefold() for row in candidates if row.get("source")}
         try:
             critic_rows = self._critic(proposals)
         except Exception as exc:
             print(f"[v10-term-verifier-critic] error={type(exc).__name__}: {exc}", flush=True)
             critic_rows = []
 
-        critic_map = {
-            str(row.get("source") or "").casefold(): row
-            for row in critic_rows
-            if isinstance(row, dict)
-        }
+        critic_map = {str(row.get("source") or "").casefold(): row for row in critic_rows if isinstance(row, dict)}
+        revisions_to_confirm: list[dict[str, Any]] = []
         for key, proposal in proposal_map.items():
             review = critic_map.get(key)
             proposed = str(proposal.get("proposed_ru") or "").strip()
-            final_ru = ""
+            draft_conf = float(proposal.get("draft_confidence") or 0)
             if review is None:
-                if float(proposal.get("draft_confidence") or 0) >= 0.90:
-                    final_ru = proposed
-            else:
-                decision = str(review.get("decision") or "").strip().casefold()
-                try:
-                    confidence = float(review.get("confidence") or 0)
-                except Exception:
-                    confidence = 0.0
-                if decision == "omit":
-                    self.stats["critic_omitted"] += 1
+                self.stats["consensus_rejected"] += 1
+                continue
+            decision = str(review.get("decision") or "").strip().casefold()
+            try:
+                confidence = float(review.get("confidence") or 0)
+            except Exception:
+                confidence = 0.0
+            if decision == "omit":
+                self.stats["critic_omitted"] += 1
+                self.stats["consensus_rejected"] += 1
+                continue
+            keep_threshold = 0.90 if self.stats.get("critic_backend") == "deepseek-fallback" else 0.80
+            if decision == "keep" and draft_conf >= 0.82 and confidence >= keep_threshold and _valid_ru_term(proposed):
+                final_terms[key] = proposed
+                uncertain.discard(key)
+                continue
+            if decision == "revise" and confidence >= 0.82:
+                revised = _norm(review.get("ru") or "")
+                if _valid_ru_term(revised):
+                    self.stats["critic_revised"] += int(revised.casefold() != proposed.casefold())
+                    revisions_to_confirm.append({
+                        "source": proposal.get("source"),
+                        "contexts": proposal.get("contexts") or [],
+                        "current_ru": proposal.get("current_ru") or "",
+                        "draft_ru": proposed,
+                        "revised_ru": revised,
+                        "draft_confidence": draft_conf,
+                        "critic_confidence": confidence,
+                    })
                     continue
-                if decision == "keep" and confidence >= 0.72:
-                    final_ru = proposed
-                elif decision == "revise" and confidence >= 0.80:
-                    revised = _norm(review.get("ru") or "")
-                    if _valid_ru_term(revised):
-                        final_ru = revised
-                        if revised.casefold() != proposed.casefold():
-                            self.stats["critic_revised"] += 1
-            if final_ru and _valid_ru_term(final_ru):
-                final_terms[key] = final_ru
+            self.stats["consensus_rejected"] += 1
+
+        for key, ru in self._confirm_revisions(revisions_to_confirm, memory).items():
+            if _valid_ru_term(ru):
+                final_terms[key] = ru
+                uncertain.discard(key)
+        self.stats["consensus_rejected"] += sum(
+            1 for row in revisions_to_confirm if str(row.get("source") or "").casefold() not in final_terms
+        )
+
+        # Fail closed: an explicitly reviewed high-risk term without consensus must
+        # not remain a hard canon merely because an earlier single model guessed it.
+        for key in sorted(uncertain):
+            if key in memory.glossary:
+                memory.glossary.pop(key, None)
+                self.stats["decanonicalized"] += 1
 
         applied: dict[str, str] = {}
         for key, ru in final_terms.items():
@@ -372,6 +442,7 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|re
             if old:
                 if old.casefold() == ru.casefold():
                     self.stats["kept"] += 1
+                    applied[key] = ru
                     continue
                 memory.glossary[key] = ru
                 self.stats["refined"] += 1
@@ -381,7 +452,8 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|re
             applied[key] = ru
 
         self.stats["applied"] = dict(applied)
-        self._save_cache(memory, applied)
+        self.stats["uncertain"] = sorted(uncertain)
+        self._save_cache(memory, applied, uncertain)
         print("[v10-term-verifier] " + json.dumps(self.stats, ensure_ascii=False), flush=True)
         return dict(self.stats)
 
