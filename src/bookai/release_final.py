@@ -18,6 +18,36 @@ from .v10_publication_release import (
 )
 
 
+_YEAR = r"(?:18|19|20)\d{2}[a-z]?"
+_PAREN_CITATION_RE = re.compile(
+    rf"\((?=[^()\n]{{0,320}}\b{_YEAR}\b)(?=[^()\n]{{0,320}}\b[A-Z][A-Za-z'’.-]{{2,}}\b)[^()\n]{{1,320}}\)"
+)
+_INLINE_CITATION_RE = re.compile(
+    rf"\b[A-Z][A-Za-z'’.-]+(?:\s+(?:and\s+[A-Z][A-Za-z'’.-]+|et\s+al\.))?\s*\({_YEAR}\)"
+)
+
+
+def _citation_spans(source: str) -> list[tuple[int, int]]:
+    text = str(source or "")
+    spans = [(match.start(), match.end()) for match in _PAREN_CITATION_RE.finditer(text)]
+    spans.extend((match.start(), match.end()) for match in _INLINE_CITATION_RE.finditer(text))
+    return spans
+
+
+def _entity_occurs_only_in_citations(source: str, entity: str) -> bool:
+    text = str(source or "")
+    name = str(entity or "").strip()
+    if not text or not name:
+        return False
+    occurrences = list(re.finditer(rf"(?<![A-Za-z]){re.escape(name)}(?![A-Za-z])", text, re.I))
+    if not occurrences:
+        return False
+    spans = _citation_spans(text)
+    if not spans:
+        return False
+    return all(any(start <= match.start() and match.end() <= end for start, end in spans) for match in occurrences)
+
+
 class FinalBookBibleBuilder(_PublicationBookBibleBuilder):
     """Final book-adaptive memory with no legacy title-specific term seeds.
 
@@ -43,6 +73,49 @@ class FinalBookBibleBuilder(_PublicationBookBibleBuilder):
             for row in records
             if row.get("kind_hint") == "proper"
         }
+
+        # If a recurring composite proper name also exposes one component on its own,
+        # give that component a chance to establish an independent canon even when its
+        # standalone frequency is only one. The name model still decides whether it is
+        # genuinely a proper entity; nothing is hard-coded from a particular book.
+        joined = "\n".join(str(segment.text or "") for segment in segments)
+        component_rows = []
+        for row in list(records):
+            composite = str(row.get("candidate") or "").strip()
+            if row.get("kind_hint") != "proper" or not (2 <= len(composite.split()) <= 4):
+                continue
+            full_count = len(re.findall(rf"(?<![A-Za-z]){re.escape(composite)}(?![A-Za-z])", joined))
+            if full_count < 1:
+                continue
+            for part in composite.split():
+                key = part.casefold()
+                if key in existing or key in _STOPWORDS or len(part) < 3:
+                    continue
+                total = len(re.findall(rf"(?<![A-Za-z]){re.escape(part)}(?![A-Za-z])", joined))
+                standalone = total - full_count
+                if standalone < 1:
+                    continue
+                contexts = []
+                for segment in segments:
+                    text = str(segment.text or "")
+                    if re.search(rf"(?<![A-Za-z]){re.escape(part)}(?![A-Za-z])", text) and not re.fullmatch(
+                        rf"\s*{re.escape(composite)}[\s'’.,;:!?-]*", text
+                    ):
+                        contexts.append({"chapter": str(segment.chapter or ""), "text": _norm(text)[:520]})
+                    if len(contexts) >= 3:
+                        break
+                component_rows.append({
+                    "candidate": part,
+                    "kind_hint": "proper",
+                    "frequency": standalone,
+                    "mid_frequency": standalone,
+                    "title_evidence": 0,
+                    "component_of": composite,
+                    "contexts": contexts,
+                })
+                existing.add(key)
+                proper_lower.add(key)
+        records.extend(component_rows)
 
         counts: Counter[str] = Counter()
         contexts: dict[str, list[dict[str, str]]] = {}
@@ -102,11 +175,11 @@ class FinalBookBibleBuilder(_PublicationBookBibleBuilder):
 
 
 class MorphologyAwarePublicationQA(_PublicationQualityQA):
-    """Suppress only book-term false positives caused by Russian inflection.
+    """Final publication QA with morphology and citation-aware entity policy.
 
-    The underlying publication QA still owns terminology policy. This final facade
-    replaces its old first-word prefix test with the cross-domain phrase matcher when
-    a `book_term_canon` issue is emitted.
+    Russian inflection may legitimately change a glossary surface form, while names in
+    protected author-year citation spans may legitimately remain in source Latin even
+    if narrative occurrences use a Russian canon. Both exceptions are source-derived.
     """
 
     def scan_segment(self, segment, target, memory):
@@ -117,6 +190,13 @@ class MorphologyAwarePublicationQA(_PublicationQualityQA):
             for key, value in memory.glossary.items()
         }
         for issue in issues:
+            if issue.code == "name_canon":
+                match = re.search(r"source entity '([^']+)' must preserve", str(issue.reason or ""))
+                if match and _entity_occurs_only_in_citations(str(segment.text or ""), match.group(1)):
+                    continue
+                filtered.append(issue)
+                continue
+
             if issue.code != "book_term_canon":
                 filtered.append(issue)
                 continue
