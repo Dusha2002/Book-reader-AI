@@ -64,16 +64,7 @@ def _epub_blocks(epub_bytes: bytes) -> list[str]:
 
 def _looks_corrupt(text: str) -> tuple[bool, list[str]]:
     low = str(text or "").casefold()
-    sentinels = [
-        bad for bad in (
-            "machinelearning",
-            "neuralnetworks",
-            "deeplearning",
-            "generalpurpose",
-            "artificialneural",
-        )
-        if bad in low
-    ]
+    sentinels = [bad for bad in ("machinelearning", "neuralnetworks", "deeplearning", "generalpurpose", "artificialneural") if bad in low]
     absurd = re.findall(r"\b[a-z]{30,}\b", low)
     evidence = sentinels + absurd[:5]
     return bool(sentinels or len(absurd) >= 2), evidence
@@ -106,12 +97,11 @@ def _merge_syntactic_continuations(rows: list[str]) -> list[str]:
     return merged
 
 
-def _short_blocks(blocks: list[str]) -> tuple[list[str], dict[str, object]]:
+def _short_blocks(blocks: list[str]) -> tuple[list[str], dict[str, object], set[int]]:
     anchors = _find_anchor_indices(blocks)
     span = max(anchors.values()) - min(anchors.values())
     if span > 40:
         raise RuntimeError(f"Goodfellow smoke anchors are unexpectedly far apart: {anchors}")
-
     selected: set[int] = set()
     for index in anchors.values():
         selected.update(pos for pos in (index - 1, index, index + 1) if 0 <= pos < len(blocks))
@@ -138,15 +128,12 @@ def _short_blocks(blocks: list[str]) -> tuple[list[str], dict[str, object]]:
         removable = [i for i in ordered if i not in anchor_set]
         if not removable:
             break
-        drop = max(removable, key=lambda i: len(blocks[i]))
-        ordered.remove(drop)
+        ordered.remove(max(removable, key=lambda i: len(blocks[i])))
     chosen = _merge_syntactic_continuations([blocks[i] for i in ordered])
-    return chosen, {"selection_mode": "targeted-regression-a", "anchor_block_indices": anchors}
+    return chosen, {"selection_mode": "targeted-regression-a", "anchor_block_indices": anchors}, set(ordered)
 
 
-def _unseen_local_window(blocks: list[str]) -> tuple[list[str], dict[str, object]]:
-    # Select a later technical body window without naming a concept we already fixed.
-    # Long prose-only nodes avoid TOC/index/formula noise while keeping the excerpt short.
+def _eligible_indices(blocks: list[str]) -> list[int]:
     eligible = []
     for i, block in enumerate(blocks):
         if not (180 <= len(block) <= 1200):
@@ -159,15 +146,21 @@ def _unseen_local_window(blocks: list[str]) -> tuple[list[str], dict[str, object
         if any(anchor.casefold() in low for anchor in ANCHORS):
             continue
         eligible.append(i)
+    return eligible
+
+
+def _unseen_local_window_at(blocks: list[str], fraction: float, mode: str, excluded: set[int] | None = None):
+    eligible = _eligible_indices(blocks)
+    excluded = set(excluded or ())
+    eligible = [idx for idx in eligible if idx not in excluded]
     if len(eligible) < 40:
         raise RuntimeError(f"Not enough clean Goodfellow prose blocks for unseen sample: {len(eligible)}")
-
-    pivot = eligible[round(0.64 * (len(eligible) - 1))]
+    pivot = eligible[round(fraction * (len(eligible) - 1))]
     nearby = sorted(eligible, key=lambda idx: (abs(idx - pivot), idx))
     selected: list[int] = []
     chars = 0
     for idx in nearby:
-        if abs(idx - pivot) > 18 and chars >= TARGET_MIN_CHARS:
+        if abs(idx - pivot) > 20 and chars >= TARGET_MIN_CHARS:
             break
         size = len(blocks[idx]) + 2
         if chars + size > TARGET_MAX_CHARS:
@@ -179,12 +172,23 @@ def _unseen_local_window(blocks: list[str]) -> tuple[list[str], dict[str, object
     selected.sort()
     chosen = _merge_syntactic_continuations([blocks[i] for i in selected])
     return chosen, {
-        "selection_mode": "unseen-local-window-b",
+        "selection_mode": mode,
         "eligible_blocks": len(eligible),
         "pivot_block": pivot,
         "selected_block_indices": selected,
         "excluded_known_anchors": True,
-    }
+        "excluded_prior_variant_indices": len(excluded),
+    }, set(selected)
+
+
+def _unseen_local_window(blocks: list[str]):
+    return _unseen_local_window_at(blocks, 0.64, "unseen-local-window-b")
+
+
+def _unseen_local_window_c(blocks: list[str]):
+    _, _, prior = _unseen_local_window(blocks)
+    # A far earlier region gives a genuinely different concept distribution.
+    return _unseen_local_window_at(blocks, 0.28, "unseen-local-window-c", prior)
 
 
 def _validate_selected(chosen: list[str]) -> str:
@@ -197,8 +201,9 @@ def _validate_selected(chosen: list[str]) -> str:
     return text
 
 
-def _fb2(paragraphs: list[str]) -> str:
-    body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in paragraphs)
+def _fb2(target_paragraphs: list[str], memory_paragraphs: list[str]) -> str:
+    target_body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in target_paragraphs)
+    memory_body = "\n".join(f"      <p>{html_lib.escape(row)}</p>" for row in memory_paragraphs)
     return f'''<?xml version="1.0" encoding="utf-8"?>
 <FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0">
   <description>
@@ -207,38 +212,55 @@ def _fb2(paragraphs: list[str]) -> str:
       <author><first-name>Ian</first-name><last-name>Goodfellow</last-name></author>
       <author><first-name>Yoshua</first-name><last-name>Bengio</last-name></author>
       <author><first-name>Aaron</first-name><last-name>Courville</last-name></author>
-      <book-title>Deep Learning — short cross-book benchmark excerpt</book-title>
+      <book-title>Deep Learning — short benchmark with whole-book memory</book-title>
       <lang>en</lang>
     </title-info>
     <document-info><id>bookai-crossbook-goodfellow-short</id><version>1.0</version></document-info>
   </description>
   <body>
-    <section>
-      <title><p>Chapter One</p></title>
-{body}
+    <section><title><p>Chapter One</p></title>
+{target_body}
+    </section>
+    <section><title><p>Chapter Two</p></title>
+{memory_body}
     </section>
   </body>
 </FictionBook>
 '''
 
 
+def _memory_rows(blocks: list[str], selected_indices: set[int]) -> list[str]:
+    rows: list[str] = []
+    for i, block in enumerate(blocks):
+        if i in selected_indices:
+            continue
+        text = _norm(block)
+        if len(text) < 45:
+            continue
+        rows.append(text)
+    return rows
+
+
 def main() -> None:
     out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "crossbook-goodfellow")
     out_dir.mkdir(parents=True, exist_ok=True)
     blocks = _epub_blocks(_download_epub())
-    if VARIANT in {"b", "alt", "unseen"}:
-        selected, selection_meta = _unseen_local_window(blocks)
+    if VARIANT in {"c", "fresh", "unseen-c"}:
+        selected, selection_meta, selected_indices = _unseen_local_window_c(blocks)
+    elif VARIANT in {"b", "alt", "unseen"}:
+        selected, selection_meta, selected_indices = _unseen_local_window(blocks)
     else:
-        selected, selection_meta = _short_blocks(blocks)
+        selected, selection_meta, selected_indices = _short_blocks(blocks)
     source_text = _validate_selected(selected)
+    memory_rows = _memory_rows(blocks, selected_indices)
 
-    if VARIANT not in {"b", "alt", "unseen"}:
+    if VARIANT not in {"b", "alt", "unseen", "c", "fresh", "unseen-c"}:
         required = ("deep learning", "LSTM", "CPU", "GPU")
         missing = [term for term in required if term.casefold() not in source_text.casefold()]
         if missing:
             raise RuntimeError(f"Short benchmark lost required technical coverage; missing={missing}")
 
-    (out_dir / "sample.fb2").write_text(_fb2(selected), "utf-8")
+    (out_dir / "sample.fb2").write_text(_fb2(selected, memory_rows), "utf-8")
     (out_dir / "sample-source.txt").write_text(source_text, "utf-8")
     meta = {
         "variant": VARIANT,
@@ -246,6 +268,9 @@ def main() -> None:
         "source_format": "epub-xhtml",
         "source_chars": len(source_text),
         "segments": len(selected),
+        "memory_scope": "whole-book-minus-target-window",
+        "memory_segments": len(memory_rows),
+        "memory_chars": sum(len(row) for row in memory_rows),
         "reference_text_embedded": False,
         **selection_meta,
     }
