@@ -19,7 +19,9 @@ from bs4 import BeautifulSoup
 SOURCE_URL = "https://raw.githubusercontent.com/lbyshe/DeepLearningBook/master/Deep%20Learning%20-%20Goodfellow%2C%20Bengio.epub"
 TARGET_MIN_CHARS = 1800
 TARGET_MAX_CHARS = 3800
-ANCHORS = ("deep learning", "CPU", "GPU", "LSTM")
+# Keep all anchors inside the historical-trends part of Chapter 1. This avoids
+# accidentally sampling a table-of-contents heading just because it says Deep Learning.
+ANCHORS = ("second wave of neural networks", "CPU", "GPU", "LSTM")
 
 _LIGATURES = str.maketrans({
     "ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl",
@@ -55,8 +57,6 @@ def _epub_blocks(epub_bytes: bytes) -> list[str]:
             soup = BeautifulSoup(raw, "html.parser")
             for bad in soup(["script", "style", "svg", "math", "nav"]):
                 bad.decompose()
-            # Paragraph/list/heading granularity keeps local prose coherent while
-            # avoiding one giant book-wide string.
             nodes = soup.find_all(["p", "li", "h1", "h2", "h3", "h4"])
             for node in nodes:
                 text = _norm(node.get_text(" ", strip=True))
@@ -83,8 +83,6 @@ def _looks_corrupt(text: str) -> tuple[bool, list[str]]:
 
 
 def _find_anchor_indices(blocks: list[str]) -> dict[str, int]:
-    # Prefer Chapter 1 historical-trends material. The anchors themselves are broad
-    # enough to tolerate EPUB revisions, but all must exist in the selected region.
     indices: dict[str, int] = {}
     for anchor in ANCHORS:
         pos = next((i for i, block in enumerate(blocks) if anchor.casefold() in block.casefold()), None)
@@ -97,12 +95,16 @@ def _find_anchor_indices(blocks: list[str]) -> dict[str, int]:
 def _short_blocks(blocks: list[str]) -> tuple[list[str], dict[str, int]]:
     anchors = _find_anchor_indices(blocks)
 
+    # The four anchors must be from one local Chapter-1 region, not distant TOC/body
+    # matches. A large span signals that the EPUB structure/source changed.
+    span = max(anchors.values()) - min(anchors.values())
+    if span > 40:
+        raise RuntimeError(f"Goodfellow smoke anchors are unexpectedly far apart: {anchors}")
+
     selected: set[int] = set()
     for index in anchors.values():
         selected.update(pos for pos in (index - 1, index, index + 1) if 0 <= pos < len(blocks))
 
-    # If the anchors are spread across the introduction, keep small local windows
-    # around each rather than the entire span between them.
     ordered = sorted(selected)
     chosen = [blocks[i] for i in ordered]
     chars = sum(len(row) + 2 for row in chosen)
@@ -122,14 +124,12 @@ def _short_blocks(blocks: list[str]) -> tuple[list[str], dict[str, int]]:
             chars = candidate_chars
         radius += 1
 
-    # Trim only peripheral rows; never remove an anchor block itself.
     anchor_set = set(anchors.values())
     ordered = sorted(selected)
     while sum(len(blocks[i]) + 2 for i in ordered) > TARGET_MAX_CHARS:
         removable = [i for i in ordered if i not in anchor_set]
         if not removable:
             break
-        # Drop the longest non-anchor paragraph first; anchors retain coverage.
         drop = max(removable, key=lambda i: len(blocks[i]))
         ordered.remove(drop)
 
@@ -190,7 +190,7 @@ def main() -> None:
         "segments": len(selected),
         "anchor_block_indices": anchors,
         "reference_text_embedded": False,
-        "selection": "short clean technical smoke excerpt from public EPUB of the authors' online edition; no Russian gold used by pipeline",
+        "selection": "short clean Chapter-1 technical smoke excerpt from public EPUB of the authors' online edition; no Russian gold used by pipeline",
     }
     (out_dir / "sample-meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
     print(json.dumps(meta, ensure_ascii=False))
