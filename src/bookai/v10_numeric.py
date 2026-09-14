@@ -32,6 +32,7 @@ _RU_HUNDRED_PREPOSITIONAL = {
     "восьмистах": 800,
     "девятистах": 900,
 }
+_RU_ONE_OBLIQUE_RE = re.compile(r"\b(?:одной|одною)\b", re.I)
 
 
 def _extra_ru_values(target_ru: str) -> set[int]:
@@ -43,6 +44,12 @@ def _extra_ru_values(target_ru: str) -> set[int]:
     for token, value in _RU_HUNDRED_PREPOSITIONAL.items():
         if re.search(rf"\b{re.escape(token)}\b", text):
             values.add(value)
+    # The legacy parser covers один/одна/одно/одну/одного/... but historically
+    # missed the very common feminine genitive/dative/instrumental form «одной».
+    # Treat it as evidence for source value 1 rather than forcing an editor to add
+    # a bogus digit or parenthetical marker merely to satisfy the numeric gate.
+    if _RU_ONE_OBLIQUE_RE.search(text):
+        values.add(1)
     return values
 
 
