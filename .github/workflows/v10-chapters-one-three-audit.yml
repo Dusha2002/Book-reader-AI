@@ -16,6 +16,7 @@ on:
       - tests/test_general_release_architecture.py
       - tests/test_v10_clause_fidelity.py
       - tests/test_v10_entity_graph.py
+      - tests/test_v10_semantic_profile.py
   workflow_dispatch:
 
 concurrency:
@@ -46,6 +47,7 @@ jobs:
       BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
       BOOKAI_GIGACHAT_TIMEOUT: '55'
       BOOKAI_GIGACHAT_RETRIES: '1'
+      BOOKAI_GIGACHAT_TERM_TIMEOUT: '12'
       BOOKAI_V10_NAME_MAX: '48'
       BOOKAI_V10_NAME_BATCH: '20'
       BOOKAI_V10_TERM_BATCH: '16'
@@ -82,7 +84,8 @@ jobs:
             tests/test_v10_release_hardening.py \
             tests/test_release_final.py \
             tests/test_general_release_architecture.py \
-            tests/test_v10_entity_graph.py
+            tests/test_v10_entity_graph.py \
+            tests/test_v10_semantic_profile.py
           rm -rf short-parker short-goodfellow short-franklin
           python scripts/build_short_parker_sample.py Devices_and_Desires.fb2 short-parker
           python scripts/build_crossbook_goodfellow_sample.py short-goodfellow
