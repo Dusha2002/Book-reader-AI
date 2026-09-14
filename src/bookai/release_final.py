@@ -70,9 +70,11 @@ class FinalV10QualityQA(HardenedV10QualityQA):
             suppress.add(11)
 
         # Natural range: "another two, three hundred" -> "ещё двести-триста".
+        # The legacy parser sees the comma-separated "two" as a standalone 2 and
+        # "three hundred" as 300, while Russian correctly lexicalises both endpoints.
         if re.search(r"\btwo\s*,\s*three\s+hundred\b", source, re.I):
             if re.search(r"\bдвест\w*\b", low) and re.search(r"\bтрист\w*\b", low):
-                suppress.update({200, 300})
+                suppress.update({2, 3, 200, 300})
 
         base_missing = [value for value in quantity.get("base_missing") or [] if value not in suppress]
         missing_mentions = [
