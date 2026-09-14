@@ -7,11 +7,16 @@ on:
       - .github/workflows/v10-chapters-one-three-audit.yml
       - src/bookai/v10*.py
       - src/bookai/release_final.py
+      - src/bookai/semantic_fidelity.py
       - scripts/chapter_translation_v10_release.py
       - scripts/chapter_translation_v10_release9.py
-      - tests/test_v10*.py
-      - tests/test_release_final.py
   workflow_dispatch:
+
+# Expensive model-backed translation must never fan out across stale commits.
+# Any newer translation audit on this branch cancels the older one.
+concurrency:
+  group: v10-translation-audit-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -42,6 +47,7 @@ jobs:
       BOOKAI_V10_TERM_BATCH: '16'
       BOOKAI_V10_DEEP_MAX: '8'
       BOOKAI_V10_RELEASE_DEEP_MAX: '16'
+      BOOKAI_V10_RESIDUAL_DEEP_MAX: '12'
       BOOKAI_V10_RECOVERY_BATCH: '4'
       BOOKAI_V10_JSON_RECOVERY_BATCH: '3'
       BOOKAI_V10_BIBLE_CACHE: .bookai-cache-v10/book-bible.json
@@ -52,11 +58,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install and validate clean9 focused release
+      - name: Install and validate general v10 release
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src/bookai/v10*.py src/bookai/release_final.py scripts/chapter_translation_v10.py scripts/chapter_translation_v10_release.py scripts/chapter_translation_v10_release9.py
+          python -m compileall -q src/bookai/v10*.py src/bookai/release_final.py scripts/chapter_translation_v10.py scripts/chapter_translation_v10_release.py scripts/chapter_translation_v10_release9.py scripts/build_crossbook_goodfellow_sample.py
           pytest -q \
             tests/test_v10_architecture.py \
             tests/test_v10_source_only.py \
@@ -65,7 +71,8 @@ jobs:
             tests/test_v10_clause_fidelity.py \
             tests/test_v10_deepseek_routing.py \
             tests/test_v10_release_hardening.py \
-            tests/test_release_final.py
+            tests/test_release_final.py \
+            tests/test_general_release_architecture.py
 
       - name: Translate Chapters One to Three
         run: |
@@ -100,6 +107,7 @@ jobs:
       - name: Build three-chapter aggregate summary
         if: always()
         run: |
+          mkdir -p audit-three
           python - <<'PY'
           import json
           from pathlib import Path
@@ -161,11 +169,42 @@ jobs:
           print(json.dumps(payload, ensure_ascii=False, indent=2))
           PY
 
-      - name: Upload Chapters One to Three audit
+      - name: Cross-book diagnostic on Deep Learning excerpt
+        if: always()
+        run: |
+          set -uo pipefail
+          rm -rf crossbook-goodfellow
+          python scripts/build_crossbook_goodfellow_sample.py crossbook-goodfellow
+          mkdir -p crossbook-goodfellow/run crossbook-goodfellow/.bookai-cache
+          set +e
+          (
+            cd crossbook-goodfellow/run
+            BOOKAI_SOURCE="../sample.fb2" \
+            BOOKAI_CHAPTER_NAME="Chapter One" \
+            BOOKAI_V10_BIBLE_CACHE="../.bookai-cache/book-bible.json" \
+              /usr/bin/time -f '%e' -o wall_seconds.txt \
+              timeout --signal=TERM --kill-after=30s 12m \
+              python ../../scripts/chapter_translation_v10_release9.py 2>&1 | tee run.log
+            exit ${PIPESTATUS[0]}
+          )
+          status=$?
+          set -e
+          echo "$status" > crossbook-goodfellow/translation_exit_status.txt
+          cp -f crossbook-goodfellow/run/v10-chapter-one-report.json crossbook-goodfellow/report.json 2>/dev/null || true
+          cp -f crossbook-goodfellow/run/v10-chapter-one-map.json crossbook-goodfellow/map.json 2>/dev/null || true
+          cp -f crossbook-goodfellow/run/v10-chapter-one-source.txt crossbook-goodfellow/pipeline-source.txt 2>/dev/null || true
+          cp -f crossbook-goodfellow/run/v10-chapter-one-translated.txt crossbook-goodfellow/pipeline-translated.txt 2>/dev/null || true
+          echo "cross-book diagnostic exit status=$status"
+          # Diagnostic only: retain output even when the publication gate finds transferable defects.
+          exit 0
+
+      - name: Upload translation audit and cross-book diagnostic
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v10-chapters-one-three-clean9-focused
-          path: audit-three
+          name: v10-general-release-audit
+          path: |
+            audit-three
+            crossbook-goodfellow
           if-no-files-found: warn
           retention-days: 7
