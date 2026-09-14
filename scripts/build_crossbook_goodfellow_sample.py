@@ -92,6 +92,29 @@ def _find_anchor_indices(blocks: list[str]) -> dict[str, int]:
     return indices
 
 
+def _merge_syntactic_continuations(rows: list[str]) -> list[str]:
+    """Undo XHTML-only node breaks that split one source sentence.
+
+    We merge conservatively only when the previous node is syntactically open and
+    the next begins with a lowercase word. Real paragraph boundaries that end a
+    sentence remain untouched.
+    """
+    merged: list[str] = []
+    for row in rows:
+        current = _norm(row)
+        if not current:
+            continue
+        if merged:
+            previous = merged[-1]
+            open_left = bool(re.search(r"[,;:]\s*$", previous)) or not bool(re.search(r"[.!?][\"'’”)]?\s*$", previous))
+            lower_right = bool(re.match(r"^[a-z]", current))
+            if open_left and lower_right:
+                merged[-1] = _norm(previous + " " + current)
+                continue
+        merged.append(current)
+    return merged
+
+
 def _short_blocks(blocks: list[str]) -> tuple[list[str], dict[str, int]]:
     anchors = _find_anchor_indices(blocks)
 
@@ -133,7 +156,7 @@ def _short_blocks(blocks: list[str]) -> tuple[list[str], dict[str, int]]:
         drop = max(removable, key=lambda i: len(blocks[i]))
         ordered.remove(drop)
 
-    chosen = [blocks[i] for i in ordered]
+    chosen = _merge_syntactic_continuations([blocks[i] for i in ordered])
     text = "\n\n".join(chosen)
     corrupt, evidence = _looks_corrupt(text)
     if corrupt:
