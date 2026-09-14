@@ -1,4 +1,4 @@
-name: v10-short-dual-book-audit
+name: v10-short-three-book-audit
 
 on:
   push:
@@ -12,6 +12,7 @@ on:
       - scripts/chapter_translation_v10_release9.py
       - scripts/build_crossbook_goodfellow_sample.py
       - scripts/build_short_parker_sample.py
+      - scripts/build_short_franklin_sample.py
       - tests/test_general_release_architecture.py
       - tests/test_v10_clause_fidelity.py
   workflow_dispatch:
@@ -68,7 +69,8 @@ jobs:
             src/bookai/v10*.py src/bookai/release_final.py \
             scripts/chapter_translation_v10_release9.py \
             scripts/build_crossbook_goodfellow_sample.py \
-            scripts/build_short_parker_sample.py
+            scripts/build_short_parker_sample.py \
+            scripts/build_short_franklin_sample.py
           pytest -q \
             tests/test_v10_architecture.py \
             tests/test_v10_source_only.py \
@@ -79,19 +81,21 @@ jobs:
             tests/test_v10_release_hardening.py \
             tests/test_release_final.py \
             tests/test_general_release_architecture.py
-          rm -rf short-parker short-goodfellow
+          rm -rf short-parker short-goodfellow short-franklin
           python scripts/build_short_parker_sample.py Devices_and_Desires.fb2 short-parker
           python scripts/build_crossbook_goodfellow_sample.py short-goodfellow
+          python scripts/build_short_franklin_sample.py short-franklin
           test -s short-parker/sample.fb2
           test -s short-goodfellow/sample.fb2
+          test -s short-franklin/sample.fb2
 
-      - name: Translate short Parker and Goodfellow samples
+      - name: Translate short Parker, Goodfellow and Franklin samples
         run: |
           set -uo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}"
           test -n "${DEEPSEEK_API_KEY:-}"
           overall=0
-          for sample in short-parker short-goodfellow; do
+          for sample in short-parker short-goodfellow short-franklin; do
             echo "=== $sample ==="
             mkdir -p "$sample/run" "$sample/.bookai-cache"
             set +e
@@ -117,7 +121,7 @@ jobs:
           done
           exit "$overall"
 
-      - name: Build short dual-book summary
+      - name: Build short three-book summary
         if: always()
         run: |
           python - <<'PY'
@@ -125,7 +129,7 @@ jobs:
           from pathlib import Path
 
           rows = []
-          for name in ('short-parker', 'short-goodfellow'):
+          for name in ('short-parker', 'short-goodfellow', 'short-franklin'):
               root = Path(name)
               meta = json.loads((root / 'sample-meta.json').read_text('utf-8')) if (root / 'sample-meta.json').exists() else {}
               report = json.loads((root / 'report.json').read_text('utf-8')) if (root / 'report.json').exists() else {}
@@ -138,6 +142,7 @@ jobs:
                   'source_chars': report.get('source_chars'),
                   'timing': report.get('timing'),
                   'book_bible': report.get('book_bible'),
+                  'terminology_verifier': report.get('terminology_verifier'),
                   'primary_transport': report.get('primary_transport'),
                   'usage': report.get('usage'),
                   'qa_initial': report.get('qa_initial'),
@@ -145,19 +150,20 @@ jobs:
                   'final_hard': report.get('final_hard'),
                   'final_integrity': report.get('final_integrity'),
               })
-          payload = {'mode': 'short-dual-book-smoke', 'samples': rows}
-          Path('short-dual-summary.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), 'utf-8')
+          payload = {'mode': 'short-three-book-smoke', 'samples': rows}
+          Path('short-three-book-summary.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), 'utf-8')
           print(json.dumps(payload, ensure_ascii=False, indent=2))
           PY
 
-      - name: Upload short dual-book audit
+      - name: Upload short three-book audit
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: v10-short-dual-book-smoke
+          name: v10-short-three-book-smoke
           path: |
             short-parker
             short-goodfellow
-            short-dual-summary.json
+            short-franklin
+            short-three-book-summary.json
           if-no-files-found: warn
           retention-days: 7
