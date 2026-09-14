@@ -26,6 +26,28 @@ def test_canon_only_fallback_is_not_treated_as_character_name():
     assert "name_canon" in _codes(qa.scan_segment(_seg("Miel said that."), "Миль это сказал.", memory))
 
 
+def test_entity_canon_does_not_override_protected_author_year_citation():
+    memory = BookMemory(
+        glossary={"Bengio": "Бенгио"},
+        characters={"Bengio": "ru=Бенгио;gender=unknown;kind=person;role=author"},
+    )
+    qa = FinalV10QualityQA()
+    source = "Bengio et al. (1994) identified several mathematical difficulties."
+    target = "Bengio et al. (1994) выявили несколько математических трудностей."
+    assert "name_canon" not in _codes(qa.scan_segment(_seg(source), target, memory))
+
+
+def test_entity_canon_still_applies_outside_citation_spans():
+    memory = BookMemory(
+        glossary={"Bengio": "Бенгио"},
+        characters={"Bengio": "ru=Бенгио;gender=unknown;kind=person;role=author"},
+    )
+    qa = FinalV10QualityQA()
+    source = "Bengio discussed the result after Bengio et al. (1994)."
+    target = "Bengio обсудил результат после Bengio et al. (1994)."
+    assert "name_canon" in _codes(qa.scan_segment(_seg(source), target, memory))
+
+
 def test_natural_russian_quantity_forms_do_not_block_release():
     qa = FinalV10QualityQA()
     memory = BookMemory()
