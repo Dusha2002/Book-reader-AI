@@ -60,8 +60,8 @@ def test_composite_entity_is_not_invented_when_no_component_is_confirmed():
 
 def test_recurring_composite_exposes_standalone_component_to_name_analysis():
     segments = [
-        Segment(id="s1", text="Aren Vale entered the room.", locator="x", chapter="Chapter One"),
-        Segment(id="s2", text="Later Aren Vale smiled, but Aren stayed silent.", locator="y", chapter="Chapter One"),
+        Segment(id="s1", text="The captain greeted Aren Vale at the door.", locator="x", chapter="Chapter One"),
+        Segment(id="s2", text="The clerk saw Aren Vale smile, but Aren stayed silent.", locator="y", chapter="Chapter One"),
     ]
 
     records = FinalBookBibleBuilder._candidate_records(segments)
