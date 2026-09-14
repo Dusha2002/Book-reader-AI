@@ -14,7 +14,7 @@ from .v10_semantic_profile import SourceSemanticProfileVerifier
 from .v10_source_bible import _has_clean_russian
 
 
-_VERIFIER_CACHE_MARKER = "v10-deepseek-terminology-6-consensus"
+_VERIFIER_CACHE_MARKER = "v10-deepseek-terminology-7-focus-consensus"
 _LOCAL_DEFINITION_RE = re.compile(
     r"\b([a-z][a-z'-]{2,16})\b\s+(?:had|has|have|is|was|were)\s+"
     r"(?:no|not|only)\b",
@@ -53,9 +53,69 @@ def _local_definition_candidates(segments: list[Segment]) -> list[dict[str, Any]
     return rows
 
 
-def _verification_candidates(segments: list[Segment], memory: BookMemory) -> list[dict[str, Any]]:
-    rows = [dict(row) for row in _priority_term_candidates(segments, memory)]
+def _focus_profile_candidates(
+    technical_terms: list[dict[str, Any]] | None,
+    focus_segments: list[Segment],
+    memory: BookMemory,
+) -> list[dict[str, Any]]:
+    """Convert English-only focus discoveries into terminology-review candidates.
+
+    This layer still supplies no Russian answer. It only promotes exact source phrases
+    discovered by the semantic profiler into the existing draft -> critic -> consensus
+    pipeline. Thus one-off textbook terms gain recall without becoming hard canon from
+    a single model call.
+    """
+    if not _is_academic_domain(memory) or not technical_terms:
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in technical_terms:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or "").strip()
+        key = source.casefold()
+        if not source or key in seen:
+            continue
+        contexts: list[str] = []
+        for segment in focus_segments:
+            text = str(segment.text or "")
+            if source.casefold() in text.casefold():
+                contexts.append(_norm(text)[:800])
+                if len(contexts) >= 2:
+                    break
+        if not contexts:
+            continue
+        rows.append({
+            "source": source,
+            "current_ru": str(memory.glossary.get(key) or ""),
+            "evidence": "focus_semantic_term",
+            "source_meaning": _norm(item.get("meaning") or "")[:180],
+            "contexts": contexts,
+        })
+        seen.add(key)
+    return rows
+
+
+def _verification_candidates(
+    segments: list[Segment],
+    memory: BookMemory,
+    *,
+    focus_terms: list[dict[str, Any]] | None = None,
+    focus_segments: list[Segment] | None = None,
+) -> list[dict[str, Any]]:
+    # Focus-window discoveries are intentionally first: the book-wide glossary may
+    # already be excellent while a rare but important term occurs only in this window.
+    rows = _focus_profile_candidates(focus_terms, list(focus_segments or []), memory)
     seen = {str(row.get("source") or "").casefold() for row in rows}
+
+    for row in _priority_term_candidates(segments, memory):
+        candidate = dict(row)
+        key = str(candidate.get("source") or "").casefold()
+        if not key or key in seen:
+            continue
+        rows.append(candidate)
+        seen.add(key)
+
     for row in _local_definition_candidates(segments):
         key = str(row.get("source") or "").casefold()
         if key in seen:
@@ -88,11 +148,11 @@ class DeepSeekPublicationTerminologyVerifier:
     """Source-only semantic preflight plus consensus-gated terminology canon.
 
     Book-wide source supplies terminology evidence, while an optional focus window
-    supplies local semantic hints for the text being translated. A term becomes a
-    hard canon only after a draft and an adversarial review agree; critic revisions
-    require one compact confirmation. If consensus is unavailable, the risky term is
-    deliberately de-canonicalized rather than imposing a plausible but wrong calque.
-    No Russian reference translation is used.
+    supplies local semantic hints and rare technical terms for the text being translated.
+    A term becomes a hard canon only after a draft and an adversarial review agree;
+    critic revisions require one compact confirmation. If consensus is unavailable,
+    the risky term is deliberately de-canonicalized rather than imposing a plausible
+    but wrong calque. No Russian reference translation is used.
     """
 
     def __init__(self, provider: Any, cache_path: Path, *, critic_backend: Any | None = None):
@@ -103,6 +163,7 @@ class DeepSeekPublicationTerminologyVerifier:
             "cache_hit": False,
             "domain": "",
             "semantic_profile": {},
+            "focus_term_candidates": 0,
             "calls": 0,
             "candidates": 0,
             "returned": 0,
@@ -185,6 +246,7 @@ Rules:
 - Choose the established professional Russian term used in the relevant field, not a compositional word-for-word calque.
 - Preserve semantic category breadth exactly. A broad family/class in English must NOT become one subtype, implementation or example in Russian.
 - English head nouns such as machine, family, approach, method, model or memory are NOT required to map to their most literal Russian dictionary noun. Use the conventional Russian field label for the concept as a whole.
+- `source_meaning`, when supplied, is an ENGLISH source-only denotation hint; use it to disambiguate, never as target wording.
 - For a term explicitly defined with an acronym, choose the conventional Russian term used with that acronym while preserving every semantic component.
 - For an archaic/specialist object defined by its properties in literary prose, prefer the precise historical/technical Russian object name over transliteration or a broader neighboring object class.
 - `keep` means current_ru is already professionally acceptable and semantically exact.
@@ -242,6 +304,7 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|ch
                 "draft_decision": decision,
                 "draft_confidence": confidence,
                 "evidence": candidate.get("evidence"),
+                "source_meaning": candidate.get("source_meaning") or "",
                 "contexts": candidate.get("contexts") or [],
             })
         self.stats["draft_proposals"] = len(proposals)
@@ -258,7 +321,7 @@ Audit aggressively for three failure modes:
 3) HEAD-NOUN CALQUE: the English head noun was translated literally even though established Russian nomenclature conventionally names the concept with a different head noun. Professional terminology takes precedence over lexical symmetry.
 
 For historical weapons/tools/objects, demand the precise established Russian historical/technical name if context supports one; reject a merely related broader object.
-For scientific/ML concepts, demand the conventional Russian textbook/research term. Do not accept an awkward phrase just because every English component is represented. Prefer the label a professional Russian textbook index or specialist glossary would actually use.
+For scientific/technical concepts, demand the conventional Russian textbook/research term. Do not accept an awkward phrase just because every English component is represented. Prefer the label a professional Russian textbook index or specialist glossary would actually use.
 `keep` only when proposed_ru is both semantically exact AND idiomatic as a recognized Russian term. `revise` supplies a better concise canonical term. `omit` when the source evidence is insufficient to impose a hard canon.
 Do not use current_ru/proposed_ru as authority; they are hypotheses to challenge.
 Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|revise|omit","ru":"canonical Russian term or empty","confidence":0.0,"reason":"brief"}]} with exactly one row per input."""
@@ -310,10 +373,7 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|re
             return {}
         system = """You are the final SOURCE-ONLY terminology consensus judge. Another editor revised proposed EN→RU canonical terms.
 For each row decide accept or reject. Accept only if the revised Russian term is a conventional professional label in the stated domain, preserves the exact breadth/denotation of the English source, and is preferable to both the prior canon and draft proposal. Reject literal-but-nonstandard calques, subtype narrowing, broadened neighboring concepts, and uncertain guesses. Return ONLY JSON {"items":[{"source":"exact source","decision":"accept|reject","confidence":0.0,"reason":"brief"}]} with one row per input."""
-        payload = {
-            "domain": str(getattr(memory, "domain", "") or ""),
-            "rows": rows,
-        }
+        payload = {"domain": str(getattr(memory, "domain", "") or ""), "rows": rows}
         try:
             raw = self.provider.complete(system, json.dumps(payload, ensure_ascii=False), temperature=0.0)
             self.stats["calls"] += 1
@@ -350,18 +410,28 @@ For each row decide accept or reject. Accept only if the revised Russian term is
     ) -> dict[str, Any]:
         self._hydrate_domain(memory)
 
-        # Book-wide evidence drives names/terms, but semantic hints are generated for
-        # the actual translation window. This keeps short-window translation informed
-        # by whole-book memory without losing local idiom/polysemy review.
         semantic_profile = SourceSemanticProfileVerifier(self.provider, self.cache_path)
         semantic_focus = list(focus_segments or segments)
-        self.stats["semantic_profile"] = semantic_profile.analyze(semantic_focus, memory)
+        profile_stats = semantic_profile.analyze(semantic_focus, memory)
+        self.stats["semantic_profile"] = profile_stats
         self.stats["domain"] = str(memory.domain or "")
 
         if self._load_cache(memory):
             return dict(self.stats)
 
-        candidates = _verification_candidates(segments, memory)
+        focus_terms = [
+            dict(row) for row in profile_stats.get("technical_terms") or []
+            if isinstance(row, dict)
+        ]
+        candidates = _verification_candidates(
+            segments,
+            memory,
+            focus_terms=focus_terms,
+            focus_segments=semantic_focus,
+        )
+        self.stats["focus_term_candidates"] = sum(
+            str(row.get("evidence") or "") == "focus_semantic_term" for row in candidates
+        )
         self.stats["candidates"] = len(candidates)
         if not candidates:
             self._save_cache(memory, {}, set())
@@ -429,8 +499,6 @@ For each row decide accept or reject. Accept only if the revised Russian term is
             1 for row in revisions_to_confirm if str(row.get("source") or "").casefold() not in final_terms
         )
 
-        # Fail closed: an explicitly reviewed high-risk term without consensus must
-        # not remain a hard canon merely because an earlier single model guessed it.
         for key in sorted(uncertain):
             if key in memory.glossary:
                 memory.glossary.pop(key, None)
