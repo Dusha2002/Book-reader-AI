@@ -45,20 +45,38 @@ def _ru_stem(word: str) -> str:
     return value
 
 
+def _word_family_match(expected: str, actual: str) -> bool:
+    left = str(expected or "").casefold().replace("ё", "е")
+    right = str(actual or "").casefold().replace("ё", "е")
+    if left == right:
+        return True
+    left_stem = _ru_stem(left)
+    right_stem = _ru_stem(right)
+    if left_stem == right_stem:
+        return True
+    common = 0
+    for a, b in zip(left, right):
+        if a != b:
+            break
+        common += 1
+    threshold = max(3, min(6, len(left) - 1, len(right) - 1))
+    return common >= threshold
+
+
 def _ru_phrase_present(expected: str, target: str) -> bool:
     expected_words = [
-        _ru_stem(word)
+        word.casefold().replace("ё", "е")
         for word in re.findall(r"[А-Яа-яЁё]+", str(expected or ""))
         if len(word) >= 3
     ]
     if not expected_words:
         return True
-    target_stems = {
-        _ru_stem(word)
+    target_words = [
+        word.casefold().replace("ё", "е")
         for word in re.findall(r"[А-Яа-яЁё]+", str(target or ""))
         if len(word) >= 3
-    }
-    return all(stem in target_stems for stem in expected_words if len(stem) >= 3)
+    ]
+    return all(any(_word_family_match(expected_word, actual) for actual in target_words) for expected_word in expected_words)
 
 
 def _source_phrase_present(source: str, phrase: str) -> bool:
@@ -87,6 +105,10 @@ def _source_acronyms(source: str) -> set[str]:
     for match in re.finditer(r"\b([A-Z]{3,})(?:s)?\b", str(source or "")):
         out.add(match.group(1))
     return out
+
+
+def _has_academic_citation(source: str) -> bool:
+    return bool(re.search(r"(?:\(|,\s*)(?:18|19|20)\d{2}[a-z]?\)?", str(source or "")))
 
 
 class FinalBookBibleBuilder(_UniversalBookBibleBuilder):
@@ -122,17 +144,17 @@ Return at most 18 terms and omit anything genuinely ambiguous."""
             print(f"[v10-crossdomain-terms] error={type(exc).__name__}", flush=True)
             return 0
 
+        proposed = [item for item in obj.get("terms") or [] if isinstance(item, dict)]
+        self.stats["domain_terms_proposed"] = len(proposed)
         added = 0
-        for item in obj.get("terms") or []:
-            if not isinstance(item, dict):
-                continue
+        for item in proposed:
             source = str(item.get("source") or "").strip()
             ru = _norm(item.get("ru") or "")
             try:
                 confidence = float(item.get("confidence") or 0)
             except Exception:
                 confidence = 0.0
-            if not source or confidence < 0.82 or not _source_phrase_present(joined, source):
+            if not source or confidence < 0.76 or not _source_phrase_present(joined, source):
                 continue
             if not _has_clean_russian(ru) or len(ru.split()) > 8:
                 continue
@@ -141,6 +163,7 @@ Return at most 18 terms and omit anything genuinely ambiguous."""
                 continue
             memory.glossary[key] = ru
             added += 1
+        print(f"[v10-crossdomain-terms] proposed={len(proposed)} added={added}", flush=True)
         return added
 
     def build(self, segments: list[Segment]) -> tuple[BookMemory, dict[str, Any]]:
@@ -167,6 +190,7 @@ Return at most 18 terms and omit anything genuinely ambiguous."""
                 pass
 
         stats["domain_terms_added"] = added
+        stats["domain_terms_proposed"] = int(self.stats.get("domain_terms_proposed") or 0)
         stats["crossdomain_release_schema"] = _CROSSDOMAIN_CACHE_MARKER
         return memory, stats
 
@@ -175,21 +199,29 @@ class FinalV10QualityQA(_UniversalQualityQA):
     """Cross-domain publication QA: relations, terminology, citations and boundaries."""
 
     @staticmethod
+    def _protected_latin(source: str, memory: BookMemory) -> set[str]:
+        protected = set(_UniversalQualityQA._protected_latin(source, memory))
+        if _technical_style(memory):
+            protected.update(_source_acronyms(source))
+            if _has_academic_citation(source):
+                for token in ("et", "al", "and"):
+                    if re.search(rf"\b{token}\b", str(source or ""), re.I):
+                        protected.add(token)
+        return protected
+
+    @staticmethod
     def _dimension_relation_issues(segment: Segment, target: str) -> list[V10Issue]:
         out = list(_UniversalQualityQA._dimension_relation_issues(segment, target))
         source = str(segment.text or "")
         low = str(target or "").casefold().replace("ё", "е")
 
-        # Generic attributive inch measurement plus a separate explicit feet-long
-        # measurement. The first quantity describes section/width/diameter unless
-        # source explicitly says otherwise; merely preserving both numbers is not enough.
         dual = bool(re.search(
             r"\b[a-z0-9/]+[- ]inch\b[^.!?]{0,120},[^.!?]{0,120}\b(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+feet?\s+long\b",
             source,
             re.I,
         ))
         bad_binding = bool(
-            re.search(r"\b[а-яё]*дюйм\w*\s+в\s+длин\w*\b", low)
+            re.search(r"\b[а-яё]*дюйм\w*\s+(?:в\s+)?длин\w*\b", low)
             or re.search(r"\bдлин\w*\s+(?:в\s+)?(?:\w+\s+){0,2}[а-яё]*дюйм\w*\b", low)
         )
         if dual and bad_binding and not any(row.code == "dimension_relation" for row in out):
