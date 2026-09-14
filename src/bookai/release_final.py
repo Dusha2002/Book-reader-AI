@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-# Compatibility facade. The actual release implementation is intentionally
-# book-agnostic and lives in v10_general_release.
-from .v10_general_release import (
+# Compatibility facade. The production release implementation is intentionally
+# book-agnostic. v10_universal_release layers cross-domain notation/name handling
+# over the general release core without embedding any fixture-book vocabulary.
+from .v10_universal_release import (
     FinalBookBibleBuilder,
     FinalDeepSeekSemanticSpecialist,
     FinalDialogueDiscourseGuard,
