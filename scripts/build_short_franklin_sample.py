@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html as html_lib
 import json
+import os
 import re
 import sys
 import urllib.request
@@ -13,6 +14,7 @@ START_ANCHOR = "Dear son: I have ever had pleasure in obtaining any little anecd
 END_ANCHOR = "The notes one of my uncles"
 TARGET_MIN_CHARS = 2200
 TARGET_MAX_CHARS = 4800
+VARIANT = (os.getenv("BOOKAI_SHORT_VARIANT") or "a").strip().casefold()
 
 
 def _norm(text: str) -> str:
@@ -34,36 +36,39 @@ def _download_text() -> str:
     return text
 
 
-def _paragraphs(text: str) -> list[str]:
-    # Gutenberg plain text uses blank lines as paragraph boundaries and wraps prose
-    # across physical lines. Normalize only inside each paragraph; do not OCR or
-    # heuristically rewrite source wording.
+def _clean_blocks(text: str) -> list[str]:
     blocks = [_norm(block) for block in re.split(r"\n\s*\n", text) if _norm(block)]
     start = next((i for i, block in enumerate(blocks) if START_ANCHOR.casefold() in block.casefold()), None)
     if start is None:
         raise RuntimeError("Franklin benchmark start anchor not found")
-
-    selected: list[str] = []
+    cleaned: list[str] = []
     for block in blocks[start:]:
-        if END_ANCHOR.casefold() in block.casefold():
+        low = block.casefold()
+        if "end of the project gutenberg" in low:
             break
-        # Skip Gutenberg/editorial apparatus interleaved with Franklin's prose.
-        # This is benchmark hygiene only; no corresponding production translation
-        # rule depends on Franklin or on these strings.
         if re.match(r"^\[\d+\]", block):
             continue
         if block.startswith("[Illustration:") or block.startswith("[Transcriber's note:"):
             continue
         if block.startswith("Gibbon and Hume, the great British historians"):
             continue
+        if block.count(" ") < 20:
+            continue
+        if sum(ch.isalpha() for ch in block) / max(1, len(block)) < 0.58:
+            continue
+        cleaned.append(block)
+    return cleaned
+
+
+def _opening_sample(blocks: list[str]) -> tuple[list[str], dict[str, object]]:
+    selected: list[str] = []
+    for block in blocks:
+        if END_ANCHOR.casefold() in block.casefold():
+            break
         selected.append(block)
-
-    if not selected:
-        raise RuntimeError("Franklin benchmark selected no narrative paragraphs")
     joined = "\n\n".join(selected)
-    if not (TARGET_MIN_CHARS <= len(joined) <= TARGET_MAX_CHARS):
+    if not selected or not (TARGET_MIN_CHARS <= len(joined) <= TARGET_MAX_CHARS):
         raise RuntimeError(f"Unexpected Franklin benchmark size: {len(joined)} chars")
-
     required = (
         "poverty and obscurity",
         "second edition",
@@ -74,7 +79,49 @@ def _paragraphs(text: str) -> list[str]:
     missing = [phrase for phrase in required if phrase.casefold() not in joined.casefold()]
     if missing:
         raise RuntimeError(f"Franklin benchmark lost required narrative coverage: {missing}")
-    return selected
+    return selected, {"selection_mode": "opening-regression-a"}
+
+
+def _unseen_window(blocks: list[str]) -> tuple[list[str], dict[str, object]]:
+    # Use a later memoir window rather than another hand-picked idiom. This keeps
+    # the cycle source-driven and exposes different period syntax/lexicon.
+    if len(blocks) < 30:
+        raise RuntimeError(f"Not enough Franklin narrative blocks: {len(blocks)}")
+    center = round(0.38 * (len(blocks) - 1))
+    lo = max(0, center - 3)
+    hi = min(len(blocks), center + 4)
+    candidates = list(range(lo, hi))
+    selected_indices: list[int] = []
+    chars = 0
+    for idx in sorted(candidates, key=lambda i: (abs(i - center), i)):
+        size = len(blocks[idx]) + 2
+        if chars + size > TARGET_MAX_CHARS:
+            continue
+        selected_indices.append(idx)
+        chars += size
+        if chars >= 3000 and len(selected_indices) >= 4:
+            break
+    if chars < TARGET_MIN_CHARS:
+        radius = 4
+        while chars < TARGET_MIN_CHARS and radius < 14:
+            for idx in (center - radius, center + radius):
+                if not (0 <= idx < len(blocks)) or idx in selected_indices:
+                    continue
+                size = len(blocks[idx]) + 2
+                if chars + size <= TARGET_MAX_CHARS:
+                    selected_indices.append(idx)
+                    chars += size
+            radius += 1
+    selected_indices.sort()
+    selected = [blocks[idx] for idx in selected_indices]
+    joined = "\n\n".join(selected)
+    if not (TARGET_MIN_CHARS <= len(joined) <= TARGET_MAX_CHARS):
+        raise RuntimeError(f"Unexpected unseen Franklin benchmark size: {len(joined)} chars")
+    return selected, {
+        "selection_mode": "unseen-mid-memoir-window-b",
+        "center_clean_block": center,
+        "selected_clean_block_indices": selected_indices,
+    }
 
 
 def _fb2(paragraphs: list[str]) -> str:
@@ -103,21 +150,23 @@ def _fb2(paragraphs: list[str]) -> str:
 def main() -> None:
     out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "short-franklin")
     out_dir.mkdir(parents=True, exist_ok=True)
-    selected = _paragraphs(_download_text())
+    blocks = _clean_blocks(_download_text())
+    if VARIANT in {"b", "alt", "unseen"}:
+        selected, selection_meta = _unseen_window(blocks)
+    else:
+        selected, selection_meta = _opening_sample(blocks)
     source_text = "\n\n".join(selected)
 
     (out_dir / "sample.fb2").write_text(_fb2(selected), "utf-8")
     (out_dir / "sample-source.txt").write_text(source_text, "utf-8")
     meta = {
+        "variant": VARIANT,
         "source_url": SOURCE_URL,
         "source_format": "project-gutenberg-plain-text",
         "source_chars": len(source_text),
         "segments": len(selected),
         "reference_text_embedded": False,
-        "selection": (
-            "short opening memoir excerpt covering long periodic syntax, autobiographical voice, "
-            "self-irony, abstract reasoning and period register; no Russian gold used by pipeline"
-        ),
+        **selection_meta,
     }
     (out_dir / "sample-meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
     print(json.dumps(meta, ensure_ascii=False))
