@@ -104,7 +104,7 @@ class SourceSemanticProfileVerifier:
 
     def _save_cache(
         self,
-        key: str,
+        profile_key: str,
         memory: BookMemory,
         hints: dict[str, str],
         raw_rows: list[dict[str, Any]],
@@ -114,7 +114,7 @@ class SourceSemanticProfileVerifier:
         profiles = data.get("semantic_profiles")
         if not isinstance(profiles, dict):
             profiles = {}
-        profiles[key] = {
+        profiles[profile_key] = {
             "schema": _SCHEMA,
             "domain": str(memory.domain or ""),
             "semantic_hints": dict(hints),
@@ -131,10 +131,10 @@ class SourceSemanticProfileVerifier:
 
     def analyze(self, segments: list[Segment], memory: BookMemory) -> dict[str, Any]:
         self.stats["prior_domain"] = str(memory.domain or "")
-        key = _profile_key(segments)
+        profile_key = _profile_key(segments)
         data = self._cache_data()
         profiles = data.get("semantic_profiles") or {}
-        cached = profiles.get(key) if isinstance(profiles, dict) else None
+        cached = profiles.get(profile_key) if isinstance(profiles, dict) else None
         if isinstance(cached, dict) and cached.get("schema") == _SCHEMA:
             domain = str(cached.get("domain") or "").strip()
             if domain in _ALLOWED_DOMAINS:
@@ -246,13 +246,13 @@ Only include risks/terms with confidence >= 0.75. For non-academic text return t
                     continue
                 source = _exact_source_phrase(joined, str(row.get("source") or ""))
                 meaning = _norm(row.get("meaning") or "")
-                key = source.casefold()
-                if not source or key in seen_terms or not _valid_focus_term(source):
+                term_key = source.casefold()
+                if not source or term_key in seen_terms or not _valid_focus_term(source):
                     continue
                 if not meaning or len(meaning) > 180 or any("А" <= ch <= "я" or ch in "Ёё" for ch in meaning):
                     continue
                 technical_terms.append({"source": source, "meaning": meaning, "confidence": confidence})
-                seen_terms.add(key)
+                seen_terms.add(term_key)
                 if len(technical_terms) >= 12:
                     break
 
@@ -261,7 +261,7 @@ Only include risks/terms with confidence >= 0.75. For non-academic text return t
         self.stats["hint_kinds"] = kind_counts
         self.stats["technical_term_count"] = len(technical_terms)
         self.stats["technical_terms"] = technical_terms
-        self._save_cache(key, memory, hints, rows_for_cache, technical_terms)
+        self._save_cache(profile_key, memory, hints, rows_for_cache, technical_terms)
         print("[v10-semantic-profile] " + json.dumps(self.stats, ensure_ascii=False), flush=True)
         return dict(self.stats)
 
