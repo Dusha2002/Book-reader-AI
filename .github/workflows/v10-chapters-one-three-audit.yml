@@ -29,7 +29,7 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
       BOOKAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -50,10 +50,11 @@ jobs:
       BOOKAI_GIGACHAT_TERM_TIMEOUT: '12'
       BOOKAI_V10_NAME_MAX: '48'
       BOOKAI_V10_NAME_BATCH: '20'
-      BOOKAI_V10_TERM_BATCH: '16'
+      BOOKAI_V10_TERM_BATCH: '24'
       BOOKAI_V10_DEEP_MAX: '4'
       BOOKAI_V10_RELEASE_DEEP_MAX: '4'
       BOOKAI_V10_RESIDUAL_DEEP_MAX: '4'
+      BOOKAI_V10_EDITORIAL_MAX: '6'
       BOOKAI_V10_RECOVERY_BATCH: '4'
       BOOKAI_V10_JSON_RECOVERY_BATCH: '3'
       BOOKAI_SHORT_VARIANT: 'c'
@@ -91,25 +92,32 @@ jobs:
           python scripts/build_short_parker_sample.py Devices_and_Desires.fb2 short-parker
           python scripts/build_crossbook_goodfellow_sample.py short-goodfellow
           python scripts/build_short_franklin_sample.py short-franklin
-          test -s short-parker/sample.fb2
-          test -s short-goodfellow/sample.fb2
-          test -s short-franklin/sample.fb2
+          for sample in short-parker short-goodfellow short-franklin; do
+            test -s "$sample/sample.fb2"
+            test -s "$sample/memory-source.fb2"
+          done
+
+      - name: Restore stable whole-book BookMemory cache
+        uses: actions/cache@v4
+        with:
+          path: .v10-book-memory-cache
+          key: v10-clean10-stable-memory-v1-${{ runner.os }}
 
       - name: Translate short Parker, Goodfellow and Franklin samples
         run: |
           set -uo pipefail
           test -n "${GIGACHAT_AUTH_KEY:-}"
           test -n "${DEEPSEEK_API_KEY:-}"
-          overall=0
           for sample in short-parker short-goodfellow short-franklin; do
-            echo "=== $sample ==="
-            mkdir -p "$sample/run" "$sample/.bookai-cache"
+            echo "=== cold/window run: $sample ==="
+            mkdir -p "$sample/run" ".v10-book-memory-cache/$sample"
             set +e
             (
               cd "$sample/run"
               BOOKAI_SOURCE="../sample.fb2" \
+              BOOKAI_MEMORY_SOURCE="../memory-source.fb2" \
               BOOKAI_CHAPTER_NAME="Chapter One" \
-              BOOKAI_V10_BIBLE_CACHE="../.bookai-cache/book-bible.json" \
+              BOOKAI_V10_BIBLE_CACHE="../../.v10-book-memory-cache/$sample/book-bible.json" \
                 /usr/bin/time -f '%e' -o wall_seconds.txt \
                 timeout --signal=TERM --kill-after=30s 5m \
                 python ../../scripts/chapter_translation_v10_release9.py 2>&1 | tee run.log
@@ -122,10 +130,33 @@ jobs:
             cp -f "$sample/run/v10-chapter-one-map.json" "$sample/map.json" 2>/dev/null || true
             cp -f "$sample/run/v10-chapter-one-source.txt" "$sample/pipeline-source.txt" 2>/dev/null || true
             cp -f "$sample/run/v10-chapter-one-translated.txt" "$sample/pipeline-translated.txt" 2>/dev/null || true
-            cp -f "$sample/.bookai-cache/book-bible.json" "$sample/book-bible.json" 2>/dev/null || true
-            if [ "$status" -ne 0 ]; then overall=1; fi
+            cp -f ".v10-book-memory-cache/$sample/book-bible.json" "$sample/book-bible.json" 2>/dev/null || true
           done
-          exit "$overall"
+
+      - name: Warm replay Goodfellow with identical BookMemory
+        if: always()
+        run: |
+          set -uo pipefail
+          sample=short-goodfellow
+          mkdir -p "$sample/warm-run" ".v10-book-memory-cache/$sample"
+          set +e
+          (
+            cd "$sample/warm-run"
+            BOOKAI_SOURCE="../sample.fb2" \
+            BOOKAI_MEMORY_SOURCE="../memory-source.fb2" \
+            BOOKAI_CHAPTER_NAME="Chapter One" \
+            BOOKAI_V10_BIBLE_CACHE="../../.v10-book-memory-cache/$sample/book-bible.json" \
+              /usr/bin/time -f '%e' -o wall_seconds.txt \
+              timeout --signal=TERM --kill-after=30s 4m \
+              python ../../scripts/chapter_translation_v10_release9.py 2>&1 | tee run.log
+            exit ${PIPESTATUS[0]}
+          )
+          status=$?
+          set -e
+          echo "$status" > "$sample/warm_translation_exit_status.txt"
+          cp -f "$sample/warm-run/v10-chapter-one-report.json" "$sample/warm-report.json" 2>/dev/null || true
+          cp -f "$sample/warm-run/v10-chapter-one-map.json" "$sample/warm-map.json" 2>/dev/null || true
+          cp -f "$sample/warm-run/v10-chapter-one-translated.txt" "$sample/warm-pipeline-translated.txt" 2>/dev/null || true
 
       - name: Build short three-book summary
         if: always()
@@ -146,9 +177,12 @@ jobs:
                   'sample_meta': meta,
                   'segments': report.get('segments'),
                   'source_chars': report.get('source_chars'),
+                  'memory_source': report.get('memory_source'),
+                  'whole_book_memory_segments': report.get('whole_book_memory_segments'),
                   'timing': report.get('timing'),
                   'book_bible': report.get('book_bible'),
                   'terminology_verifier': report.get('terminology_verifier'),
+                  'semantic_editorial_review': report.get('semantic_editorial_review'),
                   'primary_transport': report.get('primary_transport'),
                   'usage': report.get('usage'),
                   'qa_initial': report.get('qa_initial'),
@@ -156,9 +190,51 @@ jobs:
                   'final_hard': report.get('final_hard'),
                   'final_integrity': report.get('final_integrity'),
               })
-          payload = {'mode': 'short-three-book-smoke-unseen-c-whole-book-memory', 'samples': rows}
+
+          warm_root = Path('short-goodfellow')
+          warm_report = json.loads((warm_root / 'warm-report.json').read_text('utf-8')) if (warm_root / 'warm-report.json').exists() else {}
+          warm_status = (warm_root / 'warm_translation_exit_status.txt').read_text('utf-8').strip() if (warm_root / 'warm_translation_exit_status.txt').exists() else 'missing'
+          warm = {
+              'exit_status': warm_status,
+              'timing': warm_report.get('timing'),
+              'book_bible': warm_report.get('book_bible'),
+              'terminology_verifier': warm_report.get('terminology_verifier'),
+              'semantic_editorial_review': warm_report.get('semantic_editorial_review'),
+              'qa_final': warm_report.get('qa_final'),
+              'final_hard': warm_report.get('final_hard'),
+              'final_integrity': warm_report.get('final_integrity'),
+          }
+          payload = {
+              'mode': 'short-three-book-smoke-unseen-c-stable-whole-book-memory',
+              'samples': rows,
+              'goodfellow_warm_replay': warm,
+          }
           Path('short-three-book-summary.json').write_text(json.dumps(payload, ensure_ascii=False, indent=2), 'utf-8')
           print(json.dumps(payload, ensure_ascii=False, indent=2))
+          PY
+
+      - name: Evaluate short audit gate
+        if: always()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          def status(path):
+              p = Path(path)
+              return p.read_text('utf-8').strip() if p.exists() else 'missing'
+
+          parker = status('short-parker/translation_exit_status.txt')
+          franklin = status('short-franklin/translation_exit_status.txt')
+          goodfellow_cold = status('short-goodfellow/translation_exit_status.txt')
+          goodfellow_warm = status('short-goodfellow/warm_translation_exit_status.txt')
+          print({
+              'parker': parker,
+              'franklin': franklin,
+              'goodfellow_cold': goodfellow_cold,
+              'goodfellow_warm': goodfellow_warm,
+          })
+          if parker != '0' or franklin != '0' or goodfellow_warm != '0':
+              raise SystemExit(1)
           PY
 
       - name: Upload short three-book audit
