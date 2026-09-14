@@ -8,20 +8,19 @@ from pathlib import Path
 from bookai.parsers.base import load_book
 
 
-# Deliberately target previously difficult, transferable phenomena rather than
-# random prose. The source strings are only selectors; no Russian gold/reference
-# text is embedded or shown to the translation pipeline.
+# Five dense regression paragraphs are enough for the fast inner loop: literary
+# idiom + an uncommon defined term, two material contrasts, coupled dimensions,
+# and recurring/composite names. Broader semantic cases stay for larger audits.
+# The selectors are source-only; no Russian gold/reference text is embedded.
 ANCHORS = (
     "last lesson but one",
     "brass bushing",
     "not brass but bronze",
     "half-inch steel rods",
-    "round wood",
-    "Mezentine",
     "Miel Ducas",
 )
-MAX_SEGMENTS = 7
-MAX_SOURCE_CHARS = 6500
+MAX_SEGMENTS = 5
+MAX_SOURCE_CHARS = 4800
 
 
 def _fb2(paragraphs: list[str]) -> str:
@@ -74,11 +73,9 @@ def main() -> None:
         if len(chosen) >= MAX_SEGMENTS:
             break
 
-    # Require enough independent phenomena that the smoke test cannot silently
-    # degrade into one easy paragraph if the source/parser layout changes.
-    if len(chosen) < 5:
+    if len(chosen) != len(ANCHORS):
         missing = [anchor for anchor in ANCHORS if anchor not in matched]
-        raise RuntimeError(f"Short Parker benchmark resolved only {len(chosen)} anchors; missing={missing}")
+        raise RuntimeError(f"Short Parker benchmark resolved {len(chosen)}/{len(ANCHORS)} anchors; missing={missing}")
 
     paragraphs = [str(s.text or "").strip() for s in chosen]
     source_text = "\n\n".join(paragraphs)
@@ -92,7 +89,7 @@ def main() -> None:
         "source_chapters": [s.chapter for s in chosen],
         "matched_anchors": matched,
         "reference_text_embedded": False,
-        "selection": "targeted short regression excerpt covering idiom, materials, units, entities and technical prose",
+        "selection": "five-paragraph fast regression covering idiom, terminology, materials, dimensions and name consistency",
     }
     (out_dir / "sample-meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
     print(json.dumps(meta, ensure_ascii=False))
