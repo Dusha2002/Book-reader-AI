@@ -23,6 +23,7 @@ from bookai.v10_release import (
     select_numbered_chapter,
 )
 from bookai.v10_speaker import DialogueSpeakerContinuityGuard
+from bookai.v10_term_verifier import DeepSeekPublicationTerminologyVerifier
 
 
 SOURCE = Path(os.getenv("BOOKAI_SOURCE") or "Devices_and_Desires.fb2")
@@ -64,7 +65,7 @@ def main() -> None:
         "source_chars": sum(len(s.text) for s in targets),
         "whole_book_segments": len(all_targets),
         "selection": selection,
-        "architecture": "clean9.1:complete-chapter+safe-dialogue+evidence-aware-qa+focused-release-deepseek+fail-closed-residual-rescue",
+        "architecture": "clean9.2:domain-aware-transport+source-bible+one-shot-semantic-terminology+focused-release-deepseek",
     }, ensure_ascii=False), flush=True)
 
     giga = HardenedRobustTaggedPrimaryTransport()
@@ -75,6 +76,14 @@ def main() -> None:
     memory, bible_stats = FinalBookBibleBuilder(giga, BIBLE).build(all_targets)
     bible_seconds = time.perf_counter() - bible_started
     usage_after_bible = giga.usage.as_dict()
+
+    # One source-only semantic terminology pass runs before translation and is cached
+    # in the book bible. It is intentionally a term verifier, not another translation pass.
+    provider = _provider()
+    terminology_started = time.perf_counter()
+    terminology_verifier = DeepSeekPublicationTerminologyVerifier(provider, BIBLE)
+    terminology_stats = terminology_verifier.verify(all_targets, memory)
+    terminology_seconds = time.perf_counter() - terminology_started
 
     chapter_started = time.perf_counter()
     translated, primary_errors = giga.translate_many(targets, memory, source_segments=all_targets)
@@ -100,7 +109,6 @@ def main() -> None:
     speaker_after_local = speaker_local.apply(targets, translated)
     post_local_issues = qa.scan(targets, translated, memory)
 
-    provider = _provider()
     specialist = FinalDeepSeekSemanticSpecialist(
         provider,
         qa,
@@ -201,7 +209,7 @@ def main() -> None:
     MAP.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), "utf-8")
 
     report = {
-        "version": "v10-clean-9.1-focused-release",
+        "version": "v10-clean-9.2-domain-terms",
         "chapter": chapter_name,
         "chapter_selection": selection,
         "segments": len(targets),
@@ -210,21 +218,25 @@ def main() -> None:
         "missing_ids": missing,
         "timing": {
             "book_bible_one_time_seconds": round(bible_seconds, 2),
+            "terminology_verifier_one_time_seconds": round(terminology_seconds, 2),
+            "book_analysis_total_one_time_seconds": round(bible_seconds + terminology_seconds, 2),
             "chapter_seconds": round(chapter_seconds, 2),
             "chapter_under_180_seconds": chapter_seconds <= 180,
             "total_cold_seconds": round(time.perf_counter() - run_started, 2),
         },
         "architecture": {
             "chapter_selection": "numbered Chapter N boundary; internal FB2 section headings remain inside chapter",
-            "book_bible": "SOURCE-ONLY canon with runtime pruning of false common-word character entries",
-            "primary": "GigaChat tagged batches + bounded recovery",
+            "book_bible": "SOURCE-ONLY whole-book canon + publication acronym/term policy",
+            "terminology_verifier": "one cached DeepSeek source-only semantic audit over compact high-risk terms before primary translation",
+            "primary": "domain-aware GigaChat tagged batches + bounded domain-aware recovery",
             "dialogue": "source-aware dialogue dash normalization preserving genuine nested Russian guillemets",
-            "qa": "evidence-aware quantity/fraction/half-inch/name/mixed-notation filtering; hard semantic contracts retained",
-            "release_tail": "NO second Giga cascade; one bounded DeepSeek batch plus one small fail-closed rescue only if HARD remains",
+            "qa": "evidence-aware quantity/relation/name/terminology/acronym/citation/segment-boundary contracts",
+            "release_tail": "focused DeepSeek semantic repair plus small fail-closed rescue only if HARD remains",
             "final_gate": "zero untranslated + zero structural integrity + zero HARD release QA issues",
             "reference_seed": False,
         },
         "book_bible": bible_stats,
+        "terminology_verifier": terminology_stats,
         "segment_integrity": {**dict(integrity.stats), "changed_ids": integrity_changed},
         "final_integrity_repair": {**dict(final_integrity_guard.stats), "changed_ids": final_integrity_changed},
         "publication_integrity_repair": {**dict(publication_integrity.stats), "changed_ids": publication_integrity_changed},
