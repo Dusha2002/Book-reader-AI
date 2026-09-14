@@ -15,6 +15,11 @@ _RU_STOP = {
     "его", "ее", "её", "их", "ему", "ей", "мне", "тебе", "вам", "нас", "вас", "в", "во", "на",
     "под", "над", "к", "ко", "от", "до", "за", "из", "у", "с", "со", "по", "для", "же", "бы",
 }
+_EN_STOP = {
+    "the", "a", "an", "and", "or", "but", "if", "in", "on", "at", "to", "from", "of", "for",
+    "with", "without", "as", "by", "is", "are", "was", "were", "be", "been", "being", "this", "that",
+    "these", "those", "it", "its", "their", "they", "we", "you", "he", "she", "not", "can", "could",
+}
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,36 @@ def _repeated_ngram(text: str) -> tuple[str, int] | None:
     return None
 
 
+def _source_has_local_substantial_repeat(source_en: str) -> dict[str, Any] | None:
+    """Find a compact repeated EN content phrase inside one source sentence.
+
+    Russian often expands an English two-word term into a three/four-word phrase.
+    The target duplicate detector therefore cannot prove invention merely because its
+    repeated n-gram is longer. We only use this exemption for a repeated English
+    content bigram/trigram *inside the same sentence*; target-only repetition across
+    discourse clauses remains a hard failure.
+    """
+    for sentence in re.split(r"[.!?;]+", str(source_en or "")):
+        words = [w.casefold() for w in re.findall(r"[A-Za-z][A-Za-z'-]*", sentence)]
+        if len(words) < 6:
+            continue
+        for n in (3, 2):
+            seen: dict[tuple[str, ...], int] = {}
+            for i in range(0, len(words) - n + 1):
+                gram = tuple(words[i:i + n])
+                content = [w for w in gram if w not in _EN_STOP and len(w) >= 4]
+                if len(content) < n:
+                    continue
+                phrase = " ".join(gram)
+                if len(phrase) < 10:
+                    continue
+                prev = seen.get(gram)
+                if prev is not None and i - prev >= n:
+                    return {"source_repetition": phrase, "ngram": n}
+                seen.setdefault(gram, i)
+    return None
+
+
 def compare_duplicate_content_fidelity(source_en: str, target_ru: str) -> dict[str, Any]:
     target_repeat = _repeated_ngram(target_ru)
     if not target_repeat:
@@ -56,6 +91,14 @@ def compare_duplicate_content_fidelity(source_en: str, target_ru: str) -> dict[s
     source_repeat = _repeated_ngram(source_en)
     if source_repeat:
         return {"ok": True, "repeated_phrase": target_repeat[0], "source_repetition": source_repeat[0]}
+    local_source_repeat = _source_has_local_substantial_repeat(source_en)
+    if local_source_repeat:
+        return {
+            "ok": True,
+            "repeated_phrase": target_repeat[0],
+            **local_source_repeat,
+            "expanded_translation_repetition": True,
+        }
     return {
         "ok": False,
         "repeated_phrase": target_repeat[0],
