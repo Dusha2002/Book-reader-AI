@@ -30,13 +30,16 @@ class StyleGuide:
 class BookMemory:
     title: str = ""
     author: str = ""
+    # Explicit source-only domain classification. Keeping this separate from free-
+    # form style prose prevents a literary book that happens to mention “technical
+    # precision” from being routed through academic-only terminology policies.
+    domain: str = ""
     style: StyleGuide = field(default_factory=StyleGuide)
     glossary: dict[str, str] = field(default_factory=dict)
-    # Source-derived publication policy for technical abbreviations. Values are
-    # the canonical form expected in Russian text: e.g. preserve a Latin acronym
-    # or use an established localized abbreviation. Empty for ordinary fiction.
-    acronyms: dict[str, str] = field(default_factory=dict)
     characters: dict[str, str] = field(default_factory=dict)
+    # Source-derived publication policy for abbreviations. Keys are source acronyms,
+    # values are the canonical printed forms for the target Russian edition.
+    acronyms: dict[str, str] = field(default_factory=dict)
     rolling_summary: str = ""
     last_chapter: str = ""
 
