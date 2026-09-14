@@ -11,6 +11,7 @@ from .v10 import _norm
 
 _RU_RE = re.compile(r"(?:^|;)ru=([^;]+)", re.I)
 _KIND_RE = re.compile(r"(?:^|;)kind=(person|place|institution|other)(?:;|$)", re.I)
+_RU_TOKEN_RE = re.compile(r"[А-Яа-яЁё][А-Яа-яЁё'’.-]*")
 
 
 def _canonical(memory: BookMemory, source: str) -> str:
@@ -38,17 +39,24 @@ def _replace_ru(desc: str, ru: str) -> str:
     return f"ru={ru};" + value.lstrip(";")
 
 
+def _ru_tokens(value: str) -> list[str]:
+    return _RU_TOKEN_RE.findall(_norm(value))
+
+
 def harmonize_composite_entities(memory: BookMemory, cache_path: Path | None = None) -> dict[str, Any]:
     """Compose multi-token entity canonicals from independently accepted components.
 
-    The graph is deliberately conservative: it never invents a spelling. A composite
-    entity is rewritten only when every whitespace-separated component is itself an
-    accepted proper entity with a Russian canon. This prevents full names from drifting
-    away from stable first/surname canonicals while leaving genuinely indivisible names
-    untouched.
+    The graph never invents a spelling. Fully confirmed composites are assembled from
+    all independently accepted components. When only some components are independently
+    confirmed, a conservative partial harmonization is allowed *only* when the current
+    composite canon has the same token count as the source: confirmed positions are
+    replaced, while unconfirmed positions keep their already accepted composite form.
+    This lets a recurring full name and a separately observed first/surname converge
+    without requiring every component to occur alone in the source.
     """
     changed: dict[str, str] = {}
     skipped_partial: list[str] = []
+    partially_harmonized: list[str] = []
 
     for source in sorted(memory.characters, key=lambda value: (value.count(" "), len(value))):
         parts = [part for part in str(source).split() if part]
@@ -57,26 +65,34 @@ def harmonize_composite_entities(memory: BookMemory, cache_path: Path | None = N
         if _kind(memory, source) not in {"person", "place", "institution"}:
             continue
 
-        component_ru: list[str] = []
-        complete = True
-        for part in parts:
+        current = _canonical(memory, source)
+        current_tokens = _ru_tokens(current)
+        independent: dict[int, str] = {}
+        for index, part in enumerate(parts):
             if part not in memory.characters:
-                complete = False
-                break
+                continue
             if _kind(memory, part) not in {"person", "place", "institution"}:
-                complete = False
-                break
+                continue
             canon = _canonical(memory, part)
-            if not canon:
-                complete = False
-                break
-            component_ru.append(canon)
-        if not complete:
+            if canon and len(_ru_tokens(canon)) == 1:
+                independent[index] = canon
+
+        if not independent:
             skipped_partial.append(source)
             continue
 
-        composed = " ".join(component_ru)
-        current = _canonical(memory, source)
+        if len(independent) == len(parts):
+            composed_tokens = [independent[index] for index in range(len(parts))]
+        elif len(current_tokens) == len(parts):
+            composed_tokens = list(current_tokens)
+            for index, canon in independent.items():
+                composed_tokens[index] = canon
+            partially_harmonized.append(source)
+        else:
+            skipped_partial.append(source)
+            continue
+
+        composed = " ".join(composed_tokens)
         if not composed or current.casefold().replace("ё", "е") == composed.casefold().replace("ё", "е"):
             continue
 
@@ -108,6 +124,8 @@ def harmonize_composite_entities(memory: BookMemory, cache_path: Path | None = N
         "composite_candidates": sum(1 for source in memory.characters if 2 <= len(str(source).split()) <= 4),
         "changed": len(changed),
         "changed_entities": changed,
+        "partial_harmonized": len(partially_harmonized),
+        "partial_entities": partially_harmonized,
         "skipped_partial": len(skipped_partial),
     }
     if changed:
