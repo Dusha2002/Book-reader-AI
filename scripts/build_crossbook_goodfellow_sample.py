@@ -3,6 +3,7 @@ from __future__ import annotations
 import html as html_lib
 import io
 import json
+import os
 import re
 import sys
 import unicodedata
@@ -13,15 +14,11 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 
 
-# A public EPUB generated from the authors' freely available online edition.
-# Unlike the typeset PDF/TeX HTML, its XHTML stores prose as real text nodes,
-# making it suitable for a translation benchmark without OCR/layout corruption.
 SOURCE_URL = "https://raw.githubusercontent.com/lbyshe/DeepLearningBook/master/Deep%20Learning%20-%20Goodfellow%2C%20Bengio.epub"
 TARGET_MIN_CHARS = 1800
 TARGET_MAX_CHARS = 3800
-# Keep all anchors inside the historical-trends part of Chapter 1. This avoids
-# accidentally sampling a table-of-contents heading just because it says Deep Learning.
 ANCHORS = ("second wave of neural networks", "CPU", "GPU", "LSTM")
+VARIANT = (os.getenv("BOOKAI_SHORT_VARIANT") or "a").strip().casefold()
 
 _LIGATURES = str.maketrans({
     "ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl",
@@ -93,12 +90,6 @@ def _find_anchor_indices(blocks: list[str]) -> dict[str, int]:
 
 
 def _merge_syntactic_continuations(rows: list[str]) -> list[str]:
-    """Undo XHTML-only node breaks that split one source sentence.
-
-    We merge conservatively only when the previous node is syntactically open and
-    the next begins with a lowercase word. Real paragraph boundaries that end a
-    sentence remain untouched.
-    """
     merged: list[str] = []
     for row in rows:
         current = _norm(row)
@@ -115,11 +106,8 @@ def _merge_syntactic_continuations(rows: list[str]) -> list[str]:
     return merged
 
 
-def _short_blocks(blocks: list[str]) -> tuple[list[str], dict[str, int]]:
+def _short_blocks(blocks: list[str]) -> tuple[list[str], dict[str, object]]:
     anchors = _find_anchor_indices(blocks)
-
-    # The four anchors must be from one local Chapter-1 region, not distant TOC/body
-    # matches. A large span signals that the EPUB structure/source changed.
     span = max(anchors.values()) - min(anchors.values())
     if span > 40:
         raise RuntimeError(f"Goodfellow smoke anchors are unexpectedly far apart: {anchors}")
@@ -127,11 +115,9 @@ def _short_blocks(blocks: list[str]) -> tuple[list[str], dict[str, int]]:
     selected: set[int] = set()
     for index in anchors.values():
         selected.update(pos for pos in (index - 1, index, index + 1) if 0 <= pos < len(blocks))
-
     ordered = sorted(selected)
     chosen = [blocks[i] for i in ordered]
     chars = sum(len(row) + 2 for row in chosen)
-
     radius = 2
     while chars < TARGET_MIN_CHARS and radius <= 4:
         candidate = set(selected)
@@ -146,7 +132,6 @@ def _short_blocks(blocks: list[str]) -> tuple[list[str], dict[str, int]]:
             chosen = candidate_rows
             chars = candidate_chars
         radius += 1
-
     anchor_set = set(anchors.values())
     ordered = sorted(selected)
     while sum(len(blocks[i]) + 2 for i in ordered) > TARGET_MAX_CHARS:
@@ -155,15 +140,61 @@ def _short_blocks(blocks: list[str]) -> tuple[list[str], dict[str, int]]:
             break
         drop = max(removable, key=lambda i: len(blocks[i]))
         ordered.remove(drop)
-
     chosen = _merge_syntactic_continuations([blocks[i] for i in ordered])
+    return chosen, {"selection_mode": "targeted-regression-a", "anchor_block_indices": anchors}
+
+
+def _unseen_local_window(blocks: list[str]) -> tuple[list[str], dict[str, object]]:
+    # Select a later technical body window without naming a concept we already fixed.
+    # Long prose-only nodes avoid TOC/index/formula noise while keeping the excerpt short.
+    eligible = []
+    for i, block in enumerate(blocks):
+        if not (180 <= len(block) <= 1200):
+            continue
+        if sum(ch.isalpha() for ch in block) / max(1, len(block)) < 0.60:
+            continue
+        if block.count(" ") < 28 or not re.search(r"[.!?]", block):
+            continue
+        low = block.casefold()
+        if any(anchor.casefold() in low for anchor in ANCHORS):
+            continue
+        eligible.append(i)
+    if len(eligible) < 40:
+        raise RuntimeError(f"Not enough clean Goodfellow prose blocks for unseen sample: {len(eligible)}")
+
+    pivot = eligible[round(0.64 * (len(eligible) - 1))]
+    nearby = sorted(eligible, key=lambda idx: (abs(idx - pivot), idx))
+    selected: list[int] = []
+    chars = 0
+    for idx in nearby:
+        if abs(idx - pivot) > 18 and chars >= TARGET_MIN_CHARS:
+            break
+        size = len(blocks[idx]) + 2
+        if chars + size > TARGET_MAX_CHARS:
+            continue
+        selected.append(idx)
+        chars += size
+        if chars >= 2600 and len(selected) >= 5:
+            break
+    selected.sort()
+    chosen = _merge_syntactic_continuations([blocks[i] for i in selected])
+    return chosen, {
+        "selection_mode": "unseen-local-window-b",
+        "eligible_blocks": len(eligible),
+        "pivot_block": pivot,
+        "selected_block_indices": selected,
+        "excluded_known_anchors": True,
+    }
+
+
+def _validate_selected(chosen: list[str]) -> str:
     text = "\n\n".join(chosen)
     corrupt, evidence = _looks_corrupt(text)
     if corrupt:
         raise RuntimeError(f"Selected Goodfellow EPUB prose contains spacing corruption: {evidence}")
     if not (1200 <= len(text) <= TARGET_MAX_CHARS + 300):
         raise RuntimeError(f"Unexpected short Goodfellow benchmark size: {len(text)} chars")
-    return chosen, anchors
+    return text
 
 
 def _fb2(paragraphs: list[str]) -> str:
@@ -194,26 +225,29 @@ def _fb2(paragraphs: list[str]) -> str:
 def main() -> None:
     out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "crossbook-goodfellow")
     out_dir.mkdir(parents=True, exist_ok=True)
-
     blocks = _epub_blocks(_download_epub())
-    selected, anchors = _short_blocks(blocks)
-    source_text = "\n\n".join(selected)
+    if VARIANT in {"b", "alt", "unseen"}:
+        selected, selection_meta = _unseen_local_window(blocks)
+    else:
+        selected, selection_meta = _short_blocks(blocks)
+    source_text = _validate_selected(selected)
 
-    required = ("deep learning", "LSTM", "CPU", "GPU")
-    missing = [term for term in required if term.casefold() not in source_text.casefold()]
-    if missing:
-        raise RuntimeError(f"Short benchmark lost required technical coverage; missing={missing}")
+    if VARIANT not in {"b", "alt", "unseen"}:
+        required = ("deep learning", "LSTM", "CPU", "GPU")
+        missing = [term for term in required if term.casefold() not in source_text.casefold()]
+        if missing:
+            raise RuntimeError(f"Short benchmark lost required technical coverage; missing={missing}")
 
     (out_dir / "sample.fb2").write_text(_fb2(selected), "utf-8")
     (out_dir / "sample-source.txt").write_text(source_text, "utf-8")
     meta = {
+        "variant": VARIANT,
         "source_url": SOURCE_URL,
         "source_format": "epub-xhtml",
         "source_chars": len(source_text),
         "segments": len(selected),
-        "anchor_block_indices": anchors,
         "reference_text_embedded": False,
-        "selection": "short clean Chapter-1 technical smoke excerpt from public EPUB of the authors' online edition; no Russian gold used by pipeline",
+        **selection_meta,
     }
     (out_dir / "sample-meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
     print(json.dumps(meta, ensure_ascii=False))
