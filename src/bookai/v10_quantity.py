@@ -124,11 +124,7 @@ def _number_label_present(value: int, target_ru: str) -> bool:
 
 
 def _numbered_choice_present(value: int, source_en: str, target_ru: str) -> bool:
-    """Require both the label and its high-confidence governing proposition.
-
-    A bare «шестой» inserted somewhere in a paragraph must not satisfy
-    `marry number six`; otherwise a malformed editor note can fool QA.
-    """
+    """Require both the label and its high-confidence governing proposition."""
     if not _number_label_present(value, target_ru):
         return False
     source = str(source_en or "").casefold()
@@ -148,6 +144,51 @@ def _approximate_values(source_en: str) -> set[int]:
     if re.search(r"\ba\s+week\s+or\s+ten\s+days\b", text):
         values.add(10)
     return values
+
+
+def _symbolic_digit_counts(source_en: str) -> Counter[int]:
+    """Count source digits that are acting as notation, not quantities.
+
+    EPUB/PDF extraction can degrade Greek/math glyphs into ordinary digits. We only
+    suppress quantity obligations for strongly symbolic shapes: a one-digit function
+    token/argument such as `7(4)`, a digit adjacent to an operator, or the same kind of
+    digit explicitly used as a variable (`where 4 denotes ...`). Real prose quantities
+    like `9 models`, years, section numbers and decimal values remain untouched.
+    """
+    text = str(source_en or "")
+    symbolic: Counter[int] = Counter()
+    seen_spans: set[tuple[int, int]] = set()
+
+    def mark(match: re.Match[str], group: int | str = 0) -> None:
+        start, end = match.span(group)
+        token = match.group(group)
+        if (start, end) in seen_spans or not str(token).isdigit() or len(str(token)) != 1:
+            return
+        seen_spans.add((start, end))
+        symbolic[int(token)] += 1
+
+    # A numeral used as a function/operator token is an extraction smell, not normal
+    # quantitative prose. Mark both sides of the compact call independently.
+    for match in re.finditer(r"(?<![\d.])(?P<fn>\d)\s*\(\s*(?P<arg>\d)\s*\)(?![\d.])", text):
+        mark(match, "fn")
+        mark(match, "arg")
+
+    # Variable-style re-use after a discourse cue: `where 4 denotes/contains ...`.
+    for match in re.finditer(
+        r"\b(?:where|variable|parameter|symbol|index)\s+(?P<n>\d)\s+"
+        r"(?:contains?|denotes?|represents?|indexes?|is|are|stands?\s+for)\b",
+        text,
+        re.I,
+    ):
+        mark(match, "n")
+
+    # Compact mathematical operator adjacency. Decimal points are excluded above.
+    for match in re.finditer(r"(?<![\d.])(?P<n>\d)(?=\s*(?:=|\+|\*|/|\^|≤|≥|<|>))", text):
+        mark(match, "n")
+    for match in re.finditer(r"(?<=(?:=|\+|\*|/|\^|≤|≥|<|>))\s*(?P<n>\d)(?![\d.])", text):
+        mark(match, "n")
+
+    return symbolic
 
 
 def compare_quantity_fidelity_v2(source_en: str, target_ru: str) -> dict[str, Any]:
@@ -178,7 +219,21 @@ def compare_quantity_fidelity_v2(source_en: str, target_ru: str) -> dict[str, An
         source_counts.pop(value, None)
         base_missing = [row for row in base_missing if row != value]
 
-    base_missing = [value for value in base_missing if target_counts.get(value, 0) <= 0]
+    symbolic_counts = _symbolic_digit_counts(source_en)
+    for value, count in symbolic_counts.items():
+        if source_counts.get(value, 0) > 0:
+            source_counts[value] -= min(count, source_counts[value])
+            if source_counts[value] <= 0:
+                source_counts.pop(value, None)
+        for _ in range(count):
+            if value in base_missing:
+                base_missing.remove(value)
+
+    base_missing = [
+        value
+        for value in base_missing
+        if source_counts.get(value, 0) > target_counts.get(value, 0)
+    ]
 
     for obligation in obligations:
         if obligation.kind != "numbered_choice":
@@ -203,6 +258,7 @@ def compare_quantity_fidelity_v2(source_en: str, target_ru: str) -> dict[str, An
         "base_missing": base_missing,
         "obligations": [o.__dict__ for o in obligations],
         "target_values": target_values,
+        "symbolic_digit_counts": dict(symbolic_counts),
         "missing_mentions": missing_mentions,
         "numbered_choice_missing": numbered_missing,
     }
