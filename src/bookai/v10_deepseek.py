@@ -103,7 +103,9 @@ class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
             })
 
         self.stats.update({"selected": len(selected), "selected_ids": [segment.id for segment in selected]})
-        system = """You are the ONE expensive semantic specialist in a cost-sensitive EN→RU literary pipeline.
+        style = memory.style
+        system = """You are the ONE expensive semantic specialist in a cost-sensitive EN→RU BOOK translation pipeline.
+The book may be literary fiction, narrative nonfiction, academic/technical prose, or another genre. Follow the supplied BOOK_PROFILE; never impose a literary voice on technical prose or flatten literary prose into textbook language.
 All rows are handled in THIS ONE batch. Never request another pass.
 
 Rows with must_fix_codes contain SOURCE-GROUNDED, DETERMINISTICALLY PROVEN fidelity failures. They are mandatory:
@@ -114,13 +116,26 @@ Rows with must_fix_codes contain SOURCE-GROUNDED, DETERMINISTICALLY PROVEN fidel
 - duplicate_content: remove target-only repeated clauses/phrases while preserving the source proposition once;
 - clause_order: restore source discourse-clause order of reliable anchors, but keep natural Russian word order inside a clause.
 
-For other rows, repair only genuine semantic/publication defects: invented facts, actor/action/object reversals, antecedents, chronology, causality, negation/modality, difficult word sense or technical denotation. Do not rewrite merely for taste.
-If change=true, corrected_ru MUST be the complete publication-ready Russian translation of exactly that source segment. Preserve every fact, number, name and established term. No English residue unless it is genuinely an established proper name that should remain Latin.
+For other rows, repair only genuine semantic/publication defects: invented facts, actor/action/object reversals, antecedents, chronology, causality, negation/modality, category narrowing/broadening, difficult word sense or technical denotation. Do not rewrite merely for taste.
+For academic/technical prose preserve established Russian terminology, formulas, notation, bibliography and ACRONYM_CANON. For fiction preserve authorial voice, rhythm, irony and character speech.
+If a source fragment syntactically continues into before_en/after_en, do not close it artificially with a sentence boundary.
+If change=true, corrected_ru MUST be the complete publication-ready Russian translation of exactly that source segment. Preserve every fact, number, name and established term. No English residue unless required by ACRONYM_CANON, a citation, formula, identifier or genuine proper name.
 Return exactly one row per id.
 ONLY JSON {"items":[{"id":"...","change":true,"corrected_ru":"...","confidence":0.0,"reason":"..."}]}"""
 
+        book_profile = {
+            "voice": str(style.narrative_voice or ""),
+            "rhythm": str(style.rhythm or ""),
+            "dialogue": str(style.dialogue or ""),
+            "humor": str(style.humor or ""),
+            "acronym_canon": dict(memory.acronyms),
+        }
         try:
-            raw = self.provider.complete(system, json.dumps({"items": items}, ensure_ascii=False), temperature=0.0)
+            raw = self.provider.complete(
+                system,
+                json.dumps({"book_profile": book_profile, "items": items}, ensure_ascii=False),
+                temperature=0.0,
+            )
             obj = _json_from_text(raw)
             self.stats["calls"] = 1
         except Exception as exc:
