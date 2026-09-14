@@ -17,6 +17,7 @@ on:
       - tests/test_v10_clause_fidelity.py
       - tests/test_v10_entity_graph.py
       - tests/test_v10_semantic_profile.py
+      - tests/test_v10_technical_notation.py
   workflow_dispatch:
 
 concurrency:
@@ -87,7 +88,8 @@ jobs:
             tests/test_release_final.py \
             tests/test_general_release_architecture.py \
             tests/test_v10_entity_graph.py \
-            tests/test_v10_semantic_profile.py
+            tests/test_v10_semantic_profile.py \
+            tests/test_v10_technical_notation.py
           rm -rf short-parker short-goodfellow short-franklin
           python scripts/build_short_parker_sample.py Devices_and_Desires.fb2 short-parker
           python scripts/build_crossbook_goodfellow_sample.py short-goodfellow
@@ -98,10 +100,11 @@ jobs:
           done
 
       - name: Restore stable whole-book BookMemory cache
-        uses: actions/cache@v4
+        id: memory-cache
+        uses: actions/cache/restore@v4
         with:
           path: .v10-book-memory-cache
-          key: v10-clean10-stable-memory-v1-${{ runner.os }}
+          key: v10-clean10-stable-memory-v2-${{ runner.os }}
 
       - name: Translate short Parker, Goodfellow and Franklin samples
         run: |
@@ -157,6 +160,13 @@ jobs:
           cp -f "$sample/warm-run/v10-chapter-one-report.json" "$sample/warm-report.json" 2>/dev/null || true
           cp -f "$sample/warm-run/v10-chapter-one-map.json" "$sample/warm-map.json" 2>/dev/null || true
           cp -f "$sample/warm-run/v10-chapter-one-translated.txt" "$sample/warm-pipeline-translated.txt" 2>/dev/null || true
+
+      - name: Save stable whole-book BookMemory cache
+        if: always() && steps.memory-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .v10-book-memory-cache
+          key: v10-clean10-stable-memory-v2-${{ runner.os }}
 
       - name: Build short three-book summary
         if: always()
