@@ -5,13 +5,29 @@ import re
 # Compatibility facade. Production release logic remains source-only and
 # book-agnostic; publication policy is inferred per book at runtime.
 from .v10_crossdomain_release import _ru_phrase_present
+from .v10_entity_graph import harmonize_composite_entities
 from .v10_publication_release import (
-    FinalBookBibleBuilder,
+    FinalBookBibleBuilder as _PublicationBookBibleBuilder,
     FinalDeepSeekSemanticSpecialist,
     FinalDialogueDiscourseGuard,
     FinalV10QualityQA as _PublicationQualityQA,
     ResidualHardDeepSeekRepair,
 )
+
+
+class FinalBookBibleBuilder(_PublicationBookBibleBuilder):
+    """Publication memory plus a conservative compositional entity graph.
+
+    Full names are not allowed to invent a spelling that conflicts with independently
+    accepted component entities. No title-specific names or target spellings live here.
+    """
+
+    def build(self, segments):
+        memory, stats = super().build(segments)
+        entity_graph = harmonize_composite_entities(memory, getattr(self, "cache_path", None))
+        stats = dict(stats)
+        stats["entity_graph"] = entity_graph
+        return memory, stats
 
 
 class MorphologyAwarePublicationQA(_PublicationQualityQA):
