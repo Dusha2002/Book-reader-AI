@@ -5,14 +5,15 @@ import random
 import threading
 import time
 
+from .gigachat_runtime_guard import is_rate_limit_error
+
 
 class GigaChatUltraProvider:
     """LLMProvider-compatible GigaChat 3 Ultra client for sparse specialist work.
 
-    The production v9ah baseline remains unchanged. This provider is used only by
-    the Ultra A/B wrapper, where it replaces the DeepSeek gate/specialist role.
-    Prompts already demand JSON, so we intentionally avoid relying on structured
-    response_format support in Freemium and parse the returned text upstream.
+    Ultra is the existing sparse semantic specialist. Transient 429 responses are
+    retried in place with bounded exponential backoff so throttling never creates a
+    new translation branch/layer or silently downgrades semantic verification.
     """
 
     def __init__(self, *, role: str = "gate") -> None:
@@ -23,7 +24,15 @@ class GigaChatUltraProvider:
         self.role = role
         self.timeout_seconds = max(20, min(120, int(os.getenv("BOOKAI_GIGACHAT_ULTRA_TIMEOUT") or "70")))
         self.max_tokens = max(1200, int(os.getenv("BOOKAI_GIGACHAT_ULTRA_MAX_TOKENS") or "7000"))
-        self.max_attempts = max(1, min(3, int(os.getenv("BOOKAI_GIGACHAT_ULTRA_ATTEMPTS") or "2")))
+        self.max_attempts = max(1, min(10, int(os.getenv("BOOKAI_GIGACHAT_ULTRA_ATTEMPTS") or "5")))
+        self.rate_limit_backoff = max(
+            0.5,
+            min(10.0, float(os.getenv("BOOKAI_GIGACHAT_RATE_LIMIT_BACKOFF") or "2.0")),
+        )
+        self.rate_limit_max_sleep = max(
+            self.rate_limit_backoff,
+            min(30.0, float(os.getenv("BOOKAI_GIGACHAT_RATE_LIMIT_MAX_SLEEP") or "15.0")),
+        )
         self._client = None
         self._lock = threading.Lock()
         self.usage = {
@@ -81,8 +90,8 @@ class GigaChatUltraProvider:
         for attempt in range(self.max_attempts):
             started = time.perf_counter()
             try:
-                # Physical-person GigaChat API has one stream. Serialize Ultra
-                # specialist calls explicitly instead of creating accidental 429s.
+                # Physical-person GigaChat API effectively has one request stream.
+                # Serialize specialist calls instead of producing our own 429 burst.
                 with self._lock:
                     response = client.chat(payload)
                 content = str(response.choices[0].message.content or "").strip()
@@ -97,19 +106,30 @@ class GigaChatUltraProvider:
                     f"elapsed={time.perf_counter()-started:.2f}s tokens={usage['total_tokens']} chars={len(content)}",
                     flush=True,
                 )
-                # Treat the same pathological near-empty answer class that hurt
-                # Lightning batching as retryable before upstream JSON parsing.
                 if len(content) <= 2:
                     raise ValueError("GigaChat Ultra returned near-empty content")
                 return content
             except Exception as exc:
                 last_error = exc
+                limited = is_rate_limit_error(exc)
                 print(
                     f"[gigachat-ultra] role={self.role} attempt={attempt + 1}/{self.max_attempts} "
-                    f"error={type(exc).__name__}: {str(exc)[:220]}",
+                    f"rate_limited={str(limited).lower()} error={type(exc).__name__}: {str(exc)[:220]}",
                     flush=True,
                 )
-                if attempt + 1 < self.max_attempts:
-                    time.sleep(min(4.0, 0.8 * (2**attempt)) + random.uniform(0.05, 0.25))
+                if attempt + 1 >= self.max_attempts:
+                    break
+                if limited:
+                    delay = min(
+                        self.rate_limit_max_sleep,
+                        self.rate_limit_backoff * (2 ** attempt),
+                    ) + random.uniform(0.05, 0.35)
+                else:
+                    delay = min(4.0, 0.8 * (2**attempt)) + random.uniform(0.05, 0.25)
+                print(
+                    f"[gigachat-ultra] role={self.role} retry_same_request sleep={delay:.2f}s",
+                    flush=True,
+                )
+                time.sleep(delay)
         assert last_error is not None
         raise last_error
