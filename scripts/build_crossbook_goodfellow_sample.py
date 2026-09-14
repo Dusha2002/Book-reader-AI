@@ -10,12 +10,50 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 
 SOURCE_URL = "https://www.deeplearningbook.org/contents/intro.html"
-START_MARKER = "Geoffrey Hinton showed that a kind of neural network called a deep belief"
-END_MARKER = "This trend is generally expected to continue well into the future."
+
+# Five prose windows cover the late third-wave discussion and sections 1.2.2–1.2.3
+# around the user's requested pp. 35–40 while deliberately skipping figure bodies.
+WINDOWS = (
+    (
+        "The third wave of neural networks research began with a breakthrough in 2006.",
+        "the ability of deep models to leverage large labeled datasets.",
+    ),
+    (
+        "One may wonder why deep learning has only recently become recognized as a crucial technology",
+        "with unsupervised or semi-supervised learning.",
+    ),
+    (
+        "Another key reason that neural networks are wildly successful today",
+        "An individual neuron or small collection of neurons is not particularly useful.",
+    ),
+    (
+        "Biological neurons are not especially densely connected.",
+        "biological neural networks may be even larger than this plot portrays.",
+    ),
+    (
+        "In retrospect, it is not particularly surprising that neural networks with fewer neurons than a leech",
+        "This trend is generally expected to continue well into the future.",
+    ),
+)
+
+_LIGATURES = str.maketrans({
+    "ﬁ": "fi",
+    "ﬂ": "fl",
+    "ﬀ": "ff",
+    "ﬃ": "ffi",
+    "ﬄ": "ffl",
+    "–": "-",
+    "—": "-",
+    "’": "'",
+    "“": '"',
+    "”": '"',
+})
 
 
 def _norm(text: str) -> str:
-    return re.sub(r"\s+", " ", str(text or "")).strip()
+    value = str(text or "").translate(_LIGATURES).replace("\u00ad", "")
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
 
 
 def _download() -> str:
@@ -27,29 +65,38 @@ def _download() -> str:
         return response.read().decode("utf-8", errors="replace")
 
 
-def _paragraphs(raw_html: str) -> list[str]:
+def _clean_page_text(raw_html: str) -> str:
     soup = BeautifulSoup(raw_html, "html.parser")
-    rows: list[str] = []
-    for p in soup.find_all("p"):
-        text = _norm(p.get_text(" ", strip=True))
-        if len(text) < 80:
-            continue
-        if re.match(r"^Figure\s+\d", text, re.I):
-            continue
-        rows.append(text)
-    return rows
+    text = _norm(soup.get_text(" ", strip=True))
+    # The official HTML is page-derived and repeats printed page headers/numbers.
+    # Remove only those structural artifacts; benchmark prose itself is untouched.
+    text = re.sub(r"\b\d{1,3}\s+CHAPTER 1\. INTRODUCTION\b", " ", text, flags=re.I)
+    text = re.sub(r"\bCHAPTER 1\. INTRODUCTION\b", " ", text, flags=re.I)
+    return _norm(text)
 
 
-def _select(rows: list[str]) -> list[str]:
-    start = next((i for i, row in enumerate(rows) if START_MARKER in row), None)
-    end = next((i for i, row in enumerate(rows) if END_MARKER in row), None)
-    if start is None or end is None or end < start:
-        raise RuntimeError(
-            f"Could not resolve benchmark markers: start={start}, end={end}, paragraphs={len(rows)}"
-        )
-    selected = rows[start : end + 1]
-    if not (5 <= len(selected) <= 40):
-        raise RuntimeError(f"Unexpected benchmark paragraph count: {len(selected)}")
+def _extract_window(text: str, start_marker: str, end_marker: str) -> str:
+    start_marker = _norm(start_marker)
+    end_marker = _norm(end_marker)
+    start = text.find(start_marker)
+    if start < 0:
+        raise RuntimeError(f"Could not resolve benchmark start marker: {start_marker!r}")
+    end = text.find(end_marker, start)
+    if end < 0:
+        raise RuntimeError(f"Could not resolve benchmark end marker: {end_marker!r}")
+    end += len(end_marker)
+    value = _norm(text[start:end])
+    if len(value) < 100:
+        raise RuntimeError(f"Benchmark window unexpectedly short: {len(value)} chars")
+    return value
+
+
+def _select(raw_html: str) -> list[str]:
+    text = _clean_page_text(raw_html)
+    selected = [_extract_window(text, start, end) for start, end in WINDOWS]
+    source_chars = sum(len(row) for row in selected)
+    if not (3000 <= source_chars <= 18000):
+        raise RuntimeError(f"Unexpected benchmark size: {source_chars} chars")
     return selected
 
 
@@ -81,18 +128,14 @@ def _fb2(paragraphs: list[str]) -> str:
 def main() -> None:
     out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "crossbook-goodfellow")
     out_dir.mkdir(parents=True, exist_ok=True)
-    raw = _download()
-    rows = _paragraphs(raw)
-    selected = _select(rows)
+    selected = _select(_download())
     source_text = "\n\n".join(selected)
     (out_dir / "sample.fb2").write_text(_fb2(selected), "utf-8")
     (out_dir / "sample-source.txt").write_text(source_text, "utf-8")
     meta = {
         "source_url": SOURCE_URL,
-        "selection": "continuous prose spanning the late neural-network-history discussion plus sections 1.2.2–1.2.3; representative of the user-requested PDF pp. 35–40 region",
-        "start_marker": START_MARKER,
-        "end_marker": END_MARKER,
-        "paragraphs": len(selected),
+        "selection": "five continuous prose windows spanning the late third-wave discussion and sections 1.2.2–1.2.3; figures omitted",
+        "windows": len(selected),
         "source_chars": len(source_text),
         "reference_text_embedded": False,
     }
