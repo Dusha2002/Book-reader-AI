@@ -49,6 +49,44 @@ def _canon_stem(value: str) -> str:
     return word[: max(3, min(6, len(word) - 1 if len(word) > 4 else len(word)))]
 
 
+def _hard_entity_kind(desc: str) -> bool:
+    kind_match = re.search(r"kind=(person|place|institution|other)", str(desc or ""), re.I)
+    kind = kind_match.group(1).casefold() if kind_match else "person" if re.search(r"gender=(male|female)", str(desc or ""), re.I) else "other"
+    return kind in {"person", "place", "institution"}
+
+
+def _occurs_only_inside_longer_entity(source: str, entity: str, memory: BookMemory) -> bool:
+    """Suppress component canon checks when this segment only uses a longer entity.
+
+    A component remains independently enforceable in segments where it occurs on its
+    own. This is longest-span matching, not a global deletion of component canons.
+    """
+    text = str(source or "")
+    name = str(entity or "").strip()
+    if not text or not name:
+        return False
+    occurrences = list(re.finditer(rf"(?<![A-Za-z]){re.escape(name)}(?![A-Za-z])", text, re.I))
+    if not occurrences:
+        return False
+    covering_spans: list[tuple[int, int]] = []
+    for longer, desc in memory.characters.items():
+        longer_name = str(longer or "").strip()
+        if len(longer_name) <= len(name) or not _hard_entity_kind(str(desc or "")):
+            continue
+        if not re.search(rf"(?<![A-Za-z]){re.escape(name)}(?![A-Za-z])", longer_name, re.I):
+            continue
+        covering_spans.extend(
+            (match.start(), match.end())
+            for match in re.finditer(rf"(?<![A-Za-z]){re.escape(longer_name)}(?![A-Za-z])", text, re.I)
+        )
+    if not covering_spans:
+        return False
+    return all(
+        any(left <= occurrence.start() and occurrence.end() <= right for left, right in covering_spans)
+        for occurrence in occurrences
+    )
+
+
 class FinalBookBibleBuilder(SourceOnlyBookBibleBuilder):
     """Book-adaptive source-only memory with no title-specific vocabulary in code.
 
@@ -98,17 +136,8 @@ class FinalBookBibleBuilder(SourceOnlyBookBibleBuilder):
                     remember(phrase, segment)
 
         ranked = sorted(
-            (
-                (phrase, count)
-                for phrase, count in counts.items()
-                if 2 <= count <= 40 and phrase not in existing
-            ),
-            key=lambda item: (
-                item[0].count(" ") >= 1,
-                item[0].count(" "),
-                min(item[1], 12),
-                len(item[0]),
-            ),
+            ((phrase, count) for phrase, count in counts.items() if 2 <= count <= 40 and phrase not in existing),
+            key=lambda item: (item[0].count(" ") >= 1, item[0].count(" "), min(item[1], 12), len(item[0])),
             reverse=True,
         )
         added = 0
@@ -146,8 +175,6 @@ class FinalBookBibleBuilder(SourceOnlyBookBibleBuilder):
             elif kind in {"place", "institution"}:
                 memory.characters[name] = f"ru={_norm(ru)};gender=unknown;kind={kind};role=entity_canon"
             else:
-                # Keep low-confidence/other proper tokens available to the translator
-                # through glossary, but do not make them a hard release invariant.
                 memory.characters[name] = f"ru={_norm(ru)};gender=unknown;kind=other;role=proper_name"
         return memory
 
@@ -257,8 +284,6 @@ class FinalV10QualityQA(HardenedV10QualityQA):
             if any(re.search(pattern, low) for pattern in patterns):
                 suppress.add(value)
 
-        # Generic English fractional constructions can be misread as sums by the
-        # legacy numeric parser. Suppress only when Russian visibly preserves the fraction.
         fractions = {
             "half": (2, r"половин|втор"),
             "third": (3, r"трет"),
@@ -278,7 +303,6 @@ class FinalV10QualityQA(HardenedV10QualityQA):
                 if re.search(rf"\bодн\w*\s+{ru_stem}\w*\b", low) or re.search(rf"\b1\s*/\s*{denominator}\b", low):
                     suppress.add(1 + denominator)
 
-        # Generic approximate range N, M hundred -> N00-M00.
         small = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9}
         match = re.search(r"\b(" + "|".join(small) + r")\s*,\s*(" + "|".join(small) + r")\s+hundred\b", source, re.I)
         if match:
@@ -289,9 +313,7 @@ class FinalV10QualityQA(HardenedV10QualityQA):
                     suppress.update({small[match.group(1).casefold()], small[match.group(2).casefold()], left, right})
 
         quantity["base_missing"] = [value for value in quantity.get("base_missing") or [] if value not in suppress]
-        quantity["missing_mentions"] = [
-            row for row in quantity.get("missing_mentions") or [] if row.get("value") not in suppress
-        ]
+        quantity["missing_mentions"] = [row for row in quantity.get("missing_mentions") or [] if row.get("value") not in suppress]
         quantity["ok"] = not quantity["base_missing"] and not quantity["missing_mentions"] and not quantity.get("numbered_choice_missing")
         return quantity
 
@@ -303,13 +325,15 @@ class FinalV10QualityQA(HardenedV10QualityQA):
         for name, desc in memory.characters.items():
             if not re.search(rf"\b{re.escape(str(name))}\b", source, re.I):
                 continue
-            kind_match = re.search(r"kind=(person|place|institution|other)", str(desc or ""), re.I)
-            kind = kind_match.group(1).casefold() if kind_match else "person" if re.search(r"gender=(male|female)", str(desc), re.I) else "other"
-            if kind not in {"person", "place", "institution"}:
+            if not _hard_entity_kind(str(desc or "")):
+                continue
+            if _occurs_only_inside_longer_entity(source, str(name), memory):
                 continue
             ru_match = re.search(r"(?:^|;)ru=([^;]+)", str(desc or ""), re.I)
             canon = _norm(ru_match.group(1) if ru_match else memory.glossary.get(name, ""))
-            stem = _canon_stem(canon)
+            # _strip_marks decomposes Cyrillic й into и + breve. Normalize both sides
+            # identically so a valid canonical cannot fail only because target was NFD-normalized.
+            stem = _canon_stem(cls._strip_marks(canon))
             if stem and stem not in low_target:
                 out.append(V10Issue(
                     segment.id,
@@ -362,9 +386,6 @@ class FinalV10QualityQA(HardenedV10QualityQA):
 
     def scan_segment(self, segment: Segment, target: str, memory: BookMemory) -> list[V10Issue]:
         issues = list(super().scan_segment(segment, target, memory))
-
-        # Remove legacy title-specific lexical patches from the old hardened layer.
-        # General invariants are reintroduced below from dynamic book memory.
         filtered: list[V10Issue] = []
         for issue in issues:
             if issue.code in {"ethnonym_canon", "hunting_collocation", "technical_denotation"}:
