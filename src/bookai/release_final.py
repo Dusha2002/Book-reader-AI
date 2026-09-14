@@ -71,12 +71,39 @@ def _explicit_term_ok(row: dict) -> bool:
     words = [token.casefold() for token in _TOKEN_RE.findall(candidate)]
     if not words or all(word in _STOPWORDS for word in words):
         return False
-    # Local-definition heuristics are deliberately conservative. Capitalized single
-    # words are much more likely to be people/places than terminology; proper-name
-    # analysis owns them. Explicit acronym definitions may legitimately be capitalized.
     if row.get("evidence") == "local_definition" and len(words) == 1 and candidate[:1].isupper():
         return False
     return True
+
+
+def _technical_source_identifiers(source: str) -> set[str]:
+    """Source-grounded Latin notation/identifiers that are legitimate in RU tech prose.
+
+    This deliberately does not whitelist arbitrary capitalized words. Single uppercase
+    letters exclude A/I (English article/pronoun), and named multi-letter identifiers
+    need a nearby software/library/framework cue. The rule is book-agnostic and relies
+    only on the current English source segment.
+    """
+    text = str(source or "")
+    out = {
+        match.group(1)
+        for match in re.finditer(r"(?<![A-Za-z0-9])([B-HJ-Z])(?![A-Za-z0-9])", text)
+    }
+    cue_re = re.compile(
+        r"\b(?:libraries?|frameworks?|packages?|software|toolkits?|platforms?|APIs?|SDKs?)\b",
+        re.I,
+    )
+    for match in re.finditer(r"\b([A-Z][A-Za-z0-9.+_-]{2,})\b", text):
+        token = match.group(1)
+        before = text[max(0, match.start() - 110):match.start()]
+        after = text[match.end():min(len(text), match.end() + 100)]
+        if cue_re.search(before) and (
+            re.match(r"\s*(?:\([^)]*\b(?:18|19|20)\d{2}[a-z]?\b[^)]*\))", after)
+            or re.search(r"\b(?:such\s+as|including|like|using|via)\s+$", before, re.I)
+            or re.search(r"(?:,|\band\b)\s*$", before, re.I)
+        ):
+            out.add(token)
+    return out
 
 
 class FinalBookBibleBuilder(_PublicationBookBibleBuilder):
@@ -101,9 +128,6 @@ class FinalBookBibleBuilder(_PublicationBookBibleBuilder):
             and row.get("evidence") in {"local_definition", "acronym_definition"}
             and _explicit_term_ok(row)
         ]
-        # Explicit evidence is stronger than frequency, but an entire book can contain
-        # hundreds of loose grammatical 'definitions'. Keep only the most informative
-        # bounded set and let the focused terminology verifier handle local rare risks.
         explicit_rows.sort(
             key=lambda row: (
                 row.get("evidence") == "acronym_definition",
@@ -117,14 +141,8 @@ class FinalBookBibleBuilder(_PublicationBookBibleBuilder):
 
         records = proper_rows + explicit_rows
         existing = {str(row.get("candidate") or "").casefold() for row in records}
-        proper_lower = {
-            str(row.get("candidate") or "").casefold()
-            for row in proper_rows
-        }
+        proper_lower = {str(row.get("candidate") or "").casefold() for row in proper_rows}
 
-        # If a recurring composite proper name also exposes one component on its own,
-        # give that component a chance to establish an independent canon even when its
-        # standalone frequency is only one. The model still decides whether it is a name.
         joined = "\n".join(str(segment.text or "") for segment in segments)
         component_rows = []
         for row in list(proper_rows):
@@ -180,9 +198,6 @@ class FinalBookBibleBuilder(_PublicationBookBibleBuilder):
                     window = tokens[i:i + n]
                     if n == 1:
                         token = window[0]
-                        # Single ordinary words generate huge, low-value candidate sets.
-                        # Keep only visibly compound/long recurring tokens; local source
-                        # definitions remain handled separately above.
                         if token in _STOPWORDS or ("-" not in token and len(token) < 10):
                             continue
                     else:
@@ -223,8 +238,6 @@ class FinalBookBibleBuilder(_PublicationBookBibleBuilder):
         return records
 
     def _term_batches(self, rows, aggregate):
-        # Override the legacy literary-novel wording. This is a generic book-memory
-        # classifier; domain-specific precision is added later by the consensus verifier.
         batch_size = max(16, min(32, int(os.getenv("BOOKAI_V10_TERM_BATCH") or "24")))
         system = """Build a SOURCE-ONLY HIGH-PRECISION EN→RU terminology glossary for a book of any genre.
 Candidates come only from the current English source. Keep an item ONLY when its denotation is stable across the supplied
@@ -341,7 +354,14 @@ summary. ONLY JSON {"style":{"narrative_voice":"...","rhythm":"...","dialogue":"
 
 
 class MorphologyAwarePublicationQA(_PublicationQualityQA):
-    """Final publication QA with morphology and citation-aware entity policy."""
+    """Final publication QA with morphology, citations and technical notation policy."""
+
+    @staticmethod
+    def _protected_latin(source, memory):
+        protected = set(_PublicationQualityQA._protected_latin(source, memory))
+        if _technical_style(memory):
+            protected.update(_technical_source_identifiers(str(source or "")))
+        return protected
 
     def scan_segment(self, segment, target, memory):
         issues = list(super().scan_segment(segment, target, memory))
