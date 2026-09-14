@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from bookai.models import BookMemory, Segment
-from bookai.release_final import FinalDeepSeekSemanticSpecialist, FinalV10QualityQA
+from bookai.release_final import FinalDeepSeekSemanticSpecialist, FinalDialogueDiscourseGuard, FinalV10QualityQA
 from bookai.v10 import V10Issue
 
 
@@ -33,11 +33,12 @@ def test_natural_russian_quantity_forms_do_not_block_release():
         ("one tenth of the population", "одной десятой населения"),
         ("another two, three hundred just getting home", "ещё двести-триста по дороге домой"),
         ("a hundred per cent increase in productivity", "стопроцентный рост производительности"),
+        ("in increments of one sixty-fourth of an inch", "с шагом в одну шестьдесятчетвертую дюйма"),
     ]
     for source, target in cases:
         codes = _codes(qa.scan_segment(_seg(source), target, memory))
-        assert "numeric" not in codes
-        assert "quantity_obligation" not in codes
+        assert "numeric" not in codes, (source, codes)
+        assert "quantity_obligation" not in codes, (source, codes)
 
 
 def test_half_inch_compact_russian_form_is_valid_but_one_inch_is_not():
@@ -48,10 +49,33 @@ def test_half_inch_compact_russian_form_is_valid_but_one_inch_is_not():
     assert "half_inch" in _codes(qa.scan_segment(_seg(source), "стальные болты длиной три фута и толщиной один дюйм", memory))
 
 
+def test_standard_v_shaped_notation_is_not_a_latin_leak():
+    qa = FinalV10QualityQA()
+    issues = qa.scan_segment(_seg("vee-blocks"), "V-образные блоки", BookMemory())
+    assert "latin_leak" not in _codes(issues)
+
+
+def test_dialogue_guard_preserves_nested_guillemets():
+    guard = FinalDialogueDiscourseGuard()
+    source = "'What do you mean, it is the law? I never heard of anything like that.'"
+    target = "— Что ты имеешь в виду, говоря «это закон?» Я никогда такого не слышал."
+    assert guard._normalize(_seg(source), target) == target
+
+
+def test_dialogue_guard_drops_only_obsolete_outer_closing_quote():
+    guard = FinalDialogueDiscourseGuard()
+    source = "'He said: law.'"
+    target = "«Он сказал: «закон».»"
+    fixed = guard._normalize(_seg(source), target)
+    assert fixed.startswith("— ")
+    assert "«закон»" in fixed
+    assert fixed.endswith(".")
+    assert fixed.count("«") == fixed.count("»")
+
+
 def test_clause_order_can_be_nonblocking_only_in_final_release_scan():
     issue = V10Issue("s1", "clause_order", "semantic", "hard", "order heuristic")
     qa = FinalV10QualityQA(demote_clause_order=True)
-    # Exercise the release policy directly without depending on clause-detector wording.
     demoted = []
     for row in [issue]:
         if row.code == "clause_order" and row.severity == "hard":
