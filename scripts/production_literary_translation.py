@@ -10,6 +10,11 @@ from bookai.gigachat_runtime_guard import install_gigachat_runtime_guard
 from bookai.gigachat_ultra_provider import GigaChatUltraProvider
 from bookai.release_guards import source_fingerprint, specialist_guard_routes
 
+# IMPORTANT: freeze the direct DeepSeek adapter before production monkey-patches
+# v9y's lookup point. This mirrors the last proven v9ah_ultra wrapper and avoids
+# recursively resolving LiteraryTranslationStrategy.adapt_harness from itself.
+_BASE_DIRECT_ADAPT = legacy_transport.adapt_harness
+
 
 @dataclass
 class LiteraryTranslationStrategy:
@@ -69,9 +74,15 @@ class LiteraryTranslationStrategy:
         return selected_out, ranked_out
 
     def adapt_harness(self, harness):
-        harness = legacy_transport.adapt_harness(harness)
+        """Apply direct fallback transport, then promote ONLY the sparse gate to Ultra."""
+        harness = _BASE_DIRECT_ADAPT(harness)
         previous = getattr(harness.gate, "model", "unknown")
         harness.gate = GigaChatUltraProvider(role="sparse_semantic_specialist")
+        if getattr(harness.gate, "model", "") != self.specialist:
+            raise RuntimeError(
+                f"production specialist invariant failed: expected={self.specialist!r} "
+                f"actual={getattr(harness.gate, 'model', None)!r}"
+            )
         print(
             f"[production-strategy] specialist_swap from={previous} to={harness.gate.model} "
             "scope=mandatory-risk-repair+final-verification",
