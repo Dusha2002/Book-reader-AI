@@ -10,6 +10,7 @@ on:
       - src/bookai/semantic_fidelity.py
       - scripts/chapter_translation_v10_release.py
       - scripts/chapter_translation_v10_release9.py
+      - scripts/build_crossbook_goodfellow_sample.py
   workflow_dispatch:
 
 # Expensive model-backed translation must never fan out across stale commits.
@@ -59,6 +60,7 @@ jobs:
           python-version: '3.12'
 
       - name: Install and validate general v10 release
+        id: validate
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
@@ -170,7 +172,7 @@ jobs:
           PY
 
       - name: Cross-book diagnostic on Deep Learning excerpt
-        if: always()
+        if: ${{ always() && !cancelled() && steps.validate.outcome == 'success' }}
         run: |
           set -uo pipefail
           rm -rf crossbook-goodfellow
