@@ -11,7 +11,7 @@ from .models import BookMemory, Segment
 from .v10 import _giga_json, _norm
 
 
-_CACHE_VERSION = "v10-source-only-3"
+_CACHE_VERSION = "v10-source-only-4"
 _LATIN = re.compile(r"[A-Za-z]")
 _CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 _EN_VOWELS = set("aeiouy")
@@ -52,11 +52,11 @@ def _has_clean_russian(value: str) -> bool:
 
 
 def _spelling_preserving(source: str, ru: str) -> bool:
-    """Reject obvious source-letter collapse without pretending to know pronunciation.
+    """Reject obvious source-letter collapse for source-invented names.
 
-    v9ad empirically worked best when fictional names preserved visible spelling.
-    This is deliberately a weak guard: it catches Miel->Мель / Valens->Вальс style
-    losses while leaving the actual transliteration decision to GigaChat.
+    This is intentionally only a weak guard. Established real-world entities may use
+    conventional Russian exonyms/transliterations and are allowed to bypass it when the
+    entity classifier explicitly marks them as real-world with high confidence.
     """
     src_letters = [c.casefold() for c in str(source or "") if c.isalpha() and c.isascii()]
     ru_letters = [c.casefold() for c in str(ru or "") if "а" <= c.casefold() <= "я" or c.casefold() == "ё"]
@@ -66,7 +66,6 @@ def _spelling_preserving(source: str, ru: str) -> bool:
     ru_vowels = sum(c in _RU_VOWELS for c in ru_letters)
     if len(src_letters) >= 4 and src_vowels >= 2 and ru_vowels < src_vowels - 1:
         return False
-    # A large overall collapse is suspicious for invented literary names.
     if len(src_letters) >= 6 and len(ru_letters) < len(src_letters) - 3:
         return False
     return True
@@ -148,7 +147,6 @@ class SourceOnlyBookBibleBuilder:
         for value, count in ranked_names:
             if count < 2:
                 continue
-            # Sentence-start-only English words are the dominant false positive.
             if mid_counts[value] == 0 and title_evidence[value] == 0 and count < 5:
                 continue
             records.append({
@@ -189,7 +187,6 @@ class SourceOnlyBookBibleBuilder:
             clean = _norm(desc)
             ru = canon.get(str(name), "")
             memory.characters[str(name)] = (f"ru={ru};" if ru else "") + clean
-        # Every accepted name gets a canon memory even when its role is unknown.
         for name, ru in canon.items():
             memory.characters.setdefault(name, f"ru={ru};gender=unknown;role=proper_name")
         memory.rolling_summary = _norm(data.get("summary") or "")[:7000]
@@ -203,7 +200,9 @@ class SourceOnlyBookBibleBuilder:
             confidence = float(item.get("confidence") or 0)
         except Exception:
             confidence = 0.0
-        if source not in allowed or confidence < threshold or not _has_clean_russian(ru) or not _spelling_preserving(source, ru):
+        real_world = item.get("real_world") is True
+        spelling_ok = _spelling_preserving(source, ru) or (real_world and confidence >= max(0.84, threshold))
+        if source not in allowed or confidence < threshold or not _has_clean_russian(ru) or not spelling_ok:
             return None
         kind = str(item.get("kind") or "other").casefold()
         if kind not in {"person", "place", "institution", "other"}:
@@ -223,14 +222,17 @@ class SourceOnlyBookBibleBuilder:
 
     def _name_batches(self, rows: list[dict[str, Any]], aggregate: dict[str, Any]) -> None:
         batch_size = max(12, min(28, int(os.getenv("BOOKAI_V10_NAME_BATCH") or "20")))
-        system = """Create a SOURCE-ONLY book-wide Russian spelling canon for fictional proper names.
-You receive English candidate names, frequency, and English contexts. No Russian reference exists.
-Return EVERY candidate that is genuinely a person/place/institution proper name; omit ordinary English words/titles.
-For invented names prefer SPELLING-PRESERVING transliteration over guessed pronunciation. Preserve visible source information:
-do not collapse a written final -ea to one vowel; preserve internal/final written vowel sequences; preserve written consonant
-clusters rather than silently deleting letters; do not add й/я unless source spelling supports it. Use normal Russian orthography,
-but never simplify away visible source letters just because a pronunciation is plausible. Keep ONE stable dictionary form.
-ONLY JSON {"names":[{"source":"...","ru":"...","kind":"person|place|institution|other","gender":"male|female|unknown","role":"...","voice":"...","confidence":0.0}]}.
+        system = """Create a SOURCE-ONLY book-wide Russian naming canon for proper entities in a book of ANY genre.
+You receive English candidate names, frequency, and English contexts. No Russian reference translation exists.
+Return EVERY candidate that is genuinely a person/place/institution proper name; omit ordinary English words and titles.
+First decide whether the entity is an established REAL-WORLD entity or SOURCE-INVENTED/uncertain. For an established real-world
+person, place or institution, use the conventional Russian form used in professional Russian publishing/reference works;
+do not mechanically translate common words inside a proper name and do not force letter-by-letter spelling when a standard
+Russian exonym/transliteration exists. Set real_world=true only when that status and conventional Russian form are highly
+confident. For invented or uncertain names set real_world=false and prefer SPELLING-PRESERVING transliteration over guessed
+pronunciation: preserve visible vowel sequences and consonant clusters rather than silently deleting source letters.
+Keep ONE stable dictionary form. ONLY JSON
+{"names":[{"source":"...","ru":"...","kind":"person|place|institution|other","real_world":false,"gender":"male|female|unknown","role":"...","voice":"...","confidence":0.0}]}.
 """
         for start in range(0, len(rows), batch_size):
             batch = rows[start:start + batch_size]
@@ -250,16 +252,13 @@ ONLY JSON {"names":[{"source":"...","ru":"...","kind":"person|place|institution|
                 else:
                     self.stats["rejected_names"] += 1
 
-        # v9ad's key strength was coverage: important recurring names must not be
-        # left free for the chapter translator to improvise. Recover only frequent
-        # candidates missed/rejected above, still using Giga rather than DeepSeek.
         residual = [row for row in rows if row["candidate"] not in aggregate["canonicals"] and int(row.get("frequency") or 0) >= 4]
-        recovery_system = """STRICT SOURCE-SPELLING Russian transliteration recovery for recurring fictional names.
-For each supplied candidate decide is_name. If true, return a stable Russian spelling that preserves visible source letters
-and vowel sequences; do not guess a pronunciation that deletes written material. Examples of the RULE, not target answers:
-a two-vowel written sequence must not collapse to a one-vowel Russian form; a multi-letter consonant cluster must not silently
-lose a consonant. Use only English source/context. Return every row. ONLY JSON
-{"items":[{"source":"...","is_name":true,"ru":"...","kind":"person|place|institution|other","gender":"male|female|unknown","confidence":0.0}]}.
+        recovery_system = """SOURCE-ONLY Russian naming-canon recovery for recurring proper-entity candidates from a book of any genre.
+For every row decide is_name. If it is an established real-world entity and you know the conventional Russian published form
+with high confidence, return that form and real_world=true. Otherwise use a stable spelling-preserving transliteration and
+real_world=false; do not guess a pronunciation that deletes visible written material. Use only the supplied English source
+contexts plus general linguistic/geographic naming knowledge, never a Russian reference translation. Return every row. ONLY JSON
+{"items":[{"source":"...","is_name":true,"ru":"...","kind":"person|place|institution|other","real_world":false,"gender":"male|female|unknown","confidence":0.0}]}.
 """
         for start in range(0, len(residual), 16):
             batch = residual[start:start + 16]
