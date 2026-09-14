@@ -27,6 +27,9 @@ _RU_ENDINGS = (
 
 
 def _technical_style(memory: BookMemory) -> bool:
+    domain = str(getattr(memory, "domain", "") or "").strip().casefold()
+    if domain == "academic_technical":
+        return True
     style = memory.style
     blob = " ".join(
         str(value or "")
@@ -100,6 +103,21 @@ def _source_acronyms(source: str) -> set[str]:
     return {
         match.group(1)
         for match in re.finditer(r"\b([A-Z]{2,})(?:s)?\b", str(source or ""))
+    }
+
+
+def _technical_single_letter_symbols(source: str) -> set[str]:
+    """Return source-backed lowercase notation symbols that may stay Latin in RU.
+
+    We deliberately exclude `a`, the only common one-letter English word. Uppercase
+    `I` is likewise excluded, so ordinary untranslated prose cannot hide behind the
+    notation exemption. Other lowercase one-letter tokens in an academic/technical
+    source are overwhelmingly mathematical/index/function symbols (i, j, x, t, ...).
+    """
+    return {
+        match.group(1)
+        for match in re.finditer(r"(?<![A-Za-z0-9])([a-z])(?![A-Za-z0-9])", str(source or ""))
+        if match.group(1) != "a"
     }
 
 
@@ -212,6 +230,7 @@ class FinalV10QualityQA(_UniversalQualityQA):
         protected = set(_UniversalQualityQA._protected_latin(source, memory))
         if _technical_style(memory):
             protected.update(_source_acronyms(source))
+            protected.update(_technical_single_letter_symbols(source))
             if _has_academic_citation(source):
                 for token in ("et", "al", "and"):
                     if re.search(rf"\b{token}\b", str(source or ""), re.I):
@@ -225,6 +244,7 @@ class FinalV10QualityQA(_UniversalQualityQA):
             return issues
         source = str(segment.text or "")
         allowed = {token.casefold() for token in _source_acronyms(source)}
+        allowed.update(token.casefold() for token in _technical_single_letter_symbols(source))
         if _has_academic_citation(source):
             allowed.update({"et", "al", "and"})
         cleaned: list[V10Issue] = []
