@@ -12,10 +12,14 @@ from pathlib import Path
 from pypdf import PdfReader
 
 # Public mirror of the same MIT Press edition used for the cross-book diagnostic.
-# We extract physical PDF pages 35–40, matching the user-provided original range.
+# We still resolve physical PDF pages 35–40, but the smoke test keeps only a small
+# representative subset so model-backed iteration stays fast.
 SOURCE_URL = "https://raw.githubusercontent.com/janishar/mit-deep-learning-book-pdf/master/complete-book-bookmarked-pdf/deeplearningbook.pdf"
 PAGE_FIRST = 35
 PAGE_LAST = 40
+TARGET_MIN_CHARS = 2200
+TARGET_MAX_CHARS = 4800
+ANCHORS = ("deep learning", "neural", "LSTM", "CIFAR")
 
 _LIGATURES = str.maketrans({
     "ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl",
@@ -26,7 +30,6 @@ _LIGATURES = str.maketrans({
 
 def _norm(text: str) -> str:
     value = unicodedata.normalize("NFKC", str(text or "")).translate(_LIGATURES).replace("\u00ad", "")
-    # Join only typesetting hyphenation at a newline before a lowercase continuation.
     value = re.sub(r"(?<=[A-Za-z])-\s*\n\s*(?=[a-z])", "", value)
     value = re.sub(r"[ \t]+", " ", value)
     value = re.sub(r"\n{3,}", "\n\n", value)
@@ -50,8 +53,6 @@ def _page_text(pdf_bytes: bytes) -> list[str]:
     for physical_page in range(PAGE_FIRST, PAGE_LAST + 1):
         raw = reader.pages[physical_page - 1].extract_text() or ""
         text = _norm(raw)
-        # Strip repeated running header and a standalone printed page number, while
-        # preserving section numbers, citations, quantities and figure references.
         text = re.sub(r"(?im)^\s*CHAPTER\s+1\.\s+INTRODUCTION\s*$", "", text)
         text = re.sub(r"(?im)^\s*\d{1,2}\s*$", "", text)
         text = _norm(text)
@@ -61,11 +62,57 @@ def _page_text(pdf_bytes: bytes) -> list[str]:
     return pages
 
 
-def _prose_blocks(pages: list[str]) -> list[str]:
-    # Keep page boundaries as segment boundaries. Figure/axis fragments are useful to
-    # the diagnostic too: a general translator must not hallucinate around numbers,
-    # labels, acronyms or cross-references. No gold/reference text is used here.
-    return [f"[Physical page {PAGE_FIRST + i}]\n{text}" for i, text in enumerate(pages)]
+def _sentences(pages: list[str]) -> list[str]:
+    text = " ".join(re.sub(r"\s+", " ", page).strip() for page in pages)
+    rows = [row.strip() for row in re.split(r"(?<=[.!?])\s+(?=(?:[A-Z0-9]|\())", text) if row.strip()]
+    return [row for row in rows if len(row) >= 35]
+
+
+def _short_blocks(pages: list[str]) -> tuple[list[str], dict[str, int]]:
+    rows = _sentences(pages)
+    anchor_index: dict[str, int] = {}
+    for anchor in ANCHORS:
+        index = next((i for i, row in enumerate(rows) if anchor.casefold() in row.casefold()), None)
+        if index is None:
+            raise RuntimeError(f"Goodfellow short benchmark missing anchor {anchor!r}")
+        anchor_index[anchor] = index
+
+    selected: set[int] = set(anchor_index.values())
+    # Grow context symmetrically around the anchor sentences until the sample is
+    # substantial enough for style/terminology checks but still far below six pages.
+    radius = 1
+    while True:
+        candidate = set(selected)
+        for index in anchor_index.values():
+            for pos in (index - radius, index + radius):
+                if 0 <= pos < len(rows):
+                    candidate.add(pos)
+        chars = sum(len(rows[i]) + 2 for i in sorted(candidate))
+        if chars <= TARGET_MAX_CHARS:
+            selected = candidate
+        if chars >= TARGET_MIN_CHARS or radius >= 4 or chars > TARGET_MAX_CHARS:
+            break
+        radius += 1
+
+    ordered = sorted(selected)
+    # Keep contiguous sentence runs as independent FB2 paragraphs. This preserves
+    # local context without merging unrelated page regions into one mega-segment.
+    blocks: list[str] = []
+    group: list[str] = []
+    prev: int | None = None
+    for index in ordered:
+        if prev is not None and index != prev + 1 and group:
+            blocks.append(" ".join(group))
+            group = []
+        group.append(rows[index])
+        prev = index
+    if group:
+        blocks.append(" ".join(group))
+
+    source_chars = sum(len(block) for block in blocks) + max(0, len(blocks) - 1) * 2
+    if source_chars < 1200 or source_chars > TARGET_MAX_CHARS + 600:
+        raise RuntimeError(f"Unexpected short Goodfellow benchmark size: {source_chars} chars")
+    return blocks, anchor_index
 
 
 def _fb2(paragraphs: list[str]) -> str:
@@ -78,10 +125,10 @@ def _fb2(paragraphs: list[str]) -> str:
       <author><first-name>Ian</first-name><last-name>Goodfellow</last-name></author>
       <author><first-name>Yoshua</first-name><last-name>Bengio</last-name></author>
       <author><first-name>Aaron</first-name><last-name>Courville</last-name></author>
-      <book-title>Deep Learning — cross-book benchmark excerpt</book-title>
+      <book-title>Deep Learning — short cross-book benchmark excerpt</book-title>
       <lang>en</lang>
     </title-info>
-    <document-info><id>bookai-crossbook-goodfellow</id><version>1.0</version></document-info>
+    <document-info><id>bookai-crossbook-goodfellow-short</id><version>1.0</version></document-info>
   </description>
   <body>
     <section>
@@ -97,25 +144,24 @@ def main() -> None:
     out_dir = Path(sys.argv[1] if len(sys.argv) > 1 else "crossbook-goodfellow")
     out_dir.mkdir(parents=True, exist_ok=True)
     pages = _page_text(_download_pdf())
-    selected = _prose_blocks(pages)
+    selected, anchors = _short_blocks(pages)
     source_text = "\n\n".join(selected)
-    if not (7000 <= len(source_text) <= 30000):
-        raise RuntimeError(f"Unexpected pages 35–40 benchmark size: {len(source_text)} chars")
-    # Sanity checks describe the domain rather than exact prose and catch wrong-edition downloads.
+
     required = ("deep learning", "neural", "LSTM", "CIFAR")
     missing = [term for term in required if term.casefold() not in source_text.casefold()]
     if missing:
-        raise RuntimeError(f"Benchmark pages do not match expected chapter/domain; missing={missing}")
+        raise RuntimeError(f"Short benchmark lost required technical coverage; missing={missing}")
 
     (out_dir / "sample.fb2").write_text(_fb2(selected), "utf-8")
     (out_dir / "sample-source.txt").write_text(source_text, "utf-8")
     meta = {
         "source_url": SOURCE_URL,
-        "physical_pages": [PAGE_FIRST, PAGE_LAST],
-        "page_count": len(pages),
+        "physical_pages_scanned": [PAGE_FIRST, PAGE_LAST],
         "source_chars": len(source_text),
+        "segments": len(selected),
+        "anchor_sentence_indices": anchors,
         "reference_text_embedded": False,
-        "selection": "physical PDF pages 35–40; no gold translation used by the pipeline",
+        "selection": "short technical smoke excerpt selected from physical PDF pages 35–40; no gold translation used by pipeline",
     }
     (out_dir / "sample-meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
     print(json.dumps(meta, ensure_ascii=False))
