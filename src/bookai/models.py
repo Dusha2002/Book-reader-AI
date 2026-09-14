@@ -32,6 +32,10 @@ class BookMemory:
     author: str = ""
     style: StyleGuide = field(default_factory=StyleGuide)
     glossary: dict[str, str] = field(default_factory=dict)
+    # Source-derived publication policy for technical abbreviations. Values are
+    # the canonical form expected in Russian text: e.g. preserve a Latin acronym
+    # or use an established localized abbreviation. Empty for ordinary fiction.
+    acronyms: dict[str, str] = field(default_factory=dict)
     characters: dict[str, str] = field(default_factory=dict)
     rolling_summary: str = ""
     last_chapter: str = ""
