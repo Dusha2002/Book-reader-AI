@@ -47,11 +47,14 @@ def _paragraphs(text: str) -> list[str]:
     for block in blocks[start:]:
         if END_ANCHOR.casefold() in block.casefold():
             break
-        # Skip editor footnotes interleaved with Franklin's prose. They are not part
-        # of the author's narrative and would distort voice/domain evaluation.
+        # Skip Gutenberg/editorial apparatus interleaved with Franklin's prose.
+        # This is benchmark hygiene only; no corresponding production translation
+        # rule depends on Franklin or on these strings.
         if re.match(r"^\[\d+\]", block):
             continue
         if block.startswith("[Illustration:") or block.startswith("[Transcriber's note:"):
+            continue
+        if block.startswith("Gibbon and Hume, the great British historians"):
             continue
         selected.append(block)
 
