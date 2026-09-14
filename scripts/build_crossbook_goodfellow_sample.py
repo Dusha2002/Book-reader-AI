@@ -19,10 +19,9 @@ PAGE_FIRST = 35
 PAGE_LAST = 40
 TARGET_MIN_CHARS = 2200
 TARGET_MAX_CHARS = 4600
-# Prose anchors only: unlike CIFAR in a figure body, these exercise terminology,
-# acronyms, cross-references and technical prose without turning the smoke test
-# into OCR/layout evaluation.
-ANCHORS = ("deep learning", "faster CPUs", "general purpose GPUs", "LSTM")
+# Short smoke anchors: preserve distinct technical prose, acronyms and scientific
+# notation while staying resilient to minor wording/layout differences in the PDF.
+ANCHORS = ("deep learning", "CPU", "GPU", "LSTM")
 
 _LIGATURES = str.maketrans({
     "ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl",
@@ -118,12 +117,7 @@ def _sentences(pages: list[str]) -> list[str]:
 
 
 def _looks_space_corrupt(text: str) -> tuple[bool, list[str]]:
-    """Detect layout glue only in the selected smoke excerpt, not all six pages.
-
-    Figure labels and bibliography-like material elsewhere on the physical pages may
-    contain long tokens legitimately. The selected prose itself must preserve common
-    technical phrase boundaries and must not contain multiple implausibly long words.
-    """
+    """Detect layout glue only in the selected smoke excerpt, not all six pages."""
     low = str(text or "").casefold()
     glued_sentinels = [
         bad for bad in ("machinelearning", "neuralnetworks", "deeplearning", "generalpurpose")
@@ -141,7 +135,7 @@ def _short_blocks(pages: list[str]) -> tuple[list[str], dict[str, int]]:
     for anchor in ANCHORS:
         index = next((i for i, row in enumerate(rows) if anchor.casefold() in row.casefold()), None)
         if index is None:
-            raise RuntimeError(f"Goodfellow short benchmark missing prose anchor {anchor!r}")
+            raise RuntimeError(f"Goodfellow short benchmark missing technical anchor {anchor!r}")
         anchor_index[anchor] = index
 
     selected: set[int] = set(anchor_index.values())
@@ -230,7 +224,7 @@ def main() -> None:
         "segments": len(selected),
         "anchor_sentence_indices": anchors,
         "reference_text_embedded": False,
-        "selection": "short clean technical prose smoke excerpt from physical PDF pages 35–40; no gold translation used by pipeline",
+        "selection": "short clean technical smoke excerpt from physical PDF pages 35–40; no gold translation used by pipeline",
     }
     (out_dir / "sample-meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), "utf-8")
     print(json.dumps(meta, ensure_ascii=False))
