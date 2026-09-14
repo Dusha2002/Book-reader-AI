@@ -104,7 +104,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .v10-book-memory-cache
-          key: v10-clean10-stable-memory-v2-${{ runner.os }}
+          key: v10-clean10-stable-memory-v3-${{ runner.os }}
 
       - name: Translate short Parker, Goodfellow and Franklin samples
         run: |
@@ -137,7 +137,7 @@ jobs:
           done
 
       - name: Warm replay Goodfellow with identical BookMemory
-        if: always()
+        if: steps.validate.outcome == 'success'
         run: |
           set -uo pipefail
           sample=short-goodfellow
@@ -162,11 +162,11 @@ jobs:
           cp -f "$sample/warm-run/v10-chapter-one-translated.txt" "$sample/warm-pipeline-translated.txt" 2>/dev/null || true
 
       - name: Save stable whole-book BookMemory cache
-        if: always() && steps.memory-cache.outputs.cache-hit != 'true'
+        if: always() && steps.validate.outcome == 'success' && steps.memory-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: .v10-book-memory-cache
-          key: v10-clean10-stable-memory-v2-${{ runner.os }}
+          key: v10-clean10-stable-memory-v3-${{ runner.os }}
 
       - name: Build short three-book summary
         if: always()
