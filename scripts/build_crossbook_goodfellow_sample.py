@@ -117,18 +117,25 @@ def _sentences(pages: list[str]) -> list[str]:
     return [row for row in rows if len(row) >= 35]
 
 
-def _looks_space_corrupt(text: str) -> bool:
-    # Fail fast if extraction again produces long runs of glued English words.
-    glued = re.findall(r"\b[a-z]{22,}\b", text)
-    compact_ratio = sum(len(x) for x in glued) / max(1, len(text))
-    return len(glued) >= 3 or compact_ratio > 0.025
+def _looks_space_corrupt(text: str) -> tuple[bool, list[str]]:
+    """Detect layout glue only in the selected smoke excerpt, not all six pages.
+
+    Figure labels and bibliography-like material elsewhere on the physical pages may
+    contain long tokens legitimately. The selected prose itself must preserve common
+    technical phrase boundaries and must not contain multiple implausibly long words.
+    """
+    low = str(text or "").casefold()
+    glued_sentinels = [
+        bad for bad in ("machinelearning", "neuralnetworks", "deeplearning", "generalpurpose")
+        if bad in low
+    ]
+    long_tokens = re.findall(r"\b[a-z]{28,}\b", low)
+    bad = glued_sentinels + long_tokens[:6]
+    return bool(glued_sentinels or len(long_tokens) >= 2), bad
 
 
 def _short_blocks(pages: list[str]) -> tuple[list[str], dict[str, int]]:
     rows = _sentences(pages)
-    joined = "\n".join(rows)
-    if _looks_space_corrupt(joined):
-        raise RuntimeError("Goodfellow source extraction contains glued-word corruption")
 
     anchor_index: dict[str, int] = {}
     for anchor in ANCHORS:
@@ -165,7 +172,12 @@ def _short_blocks(pages: list[str]) -> tuple[list[str], dict[str, int]]:
     if group:
         blocks.append(" ".join(group))
 
-    source_chars = sum(len(block) for block in blocks) + max(0, len(blocks) - 1) * 2
+    selected_text = "\n\n".join(blocks)
+    corrupt, evidence = _looks_space_corrupt(selected_text)
+    if corrupt:
+        raise RuntimeError(f"Selected Goodfellow prose still contains glued-word corruption: {evidence}")
+
+    source_chars = len(selected_text)
     if source_chars < 1200 or source_chars > TARGET_MAX_CHARS + 600:
         raise RuntimeError(f"Unexpected short Goodfellow benchmark size: {source_chars} chars")
     return blocks, anchor_index
