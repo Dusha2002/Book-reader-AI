@@ -10,10 +10,11 @@ from .gigachat_v3 import GigaChatLightningV3Backend
 from .models import BookMemory, Segment
 from .v10 import _giga_json, _json_from_text, _norm
 from .v10_publication_release import _priority_term_candidates, _technical_style
+from .v10_semantic_profile import SourceSemanticProfileVerifier
 from .v10_source_bible import _has_clean_russian
 
 
-_VERIFIER_CACHE_MARKER = "v10-deepseek-terminology-4"
+_VERIFIER_CACHE_MARKER = "v10-deepseek-terminology-5"
 _LOCAL_DEFINITION_RE = re.compile(
     r"\b([a-z][a-z'-]{2,16})\b\s+(?:had|has|have|is|was|were)\s+"
     r"(?:no|not|only)\b",
@@ -84,11 +85,13 @@ def _valid_ru_term(value: str) -> bool:
 
 
 class DeepSeekPublicationTerminologyVerifier:
-    """Two tiny source-only semantic passes over a compact set of high-risk terms.
+    """Source-only semantic preflight plus compact terminology verification.
 
-    DeepSeek creates a draft canon. GigaChat 3 Ultra is used only as the adversarial
-    critic when the connected PERS account supports it; otherwise critique falls back
-    to DeepSeek. The result and explicit source domain are cached per book.
+    A first DeepSeek pass independently verifies book domain and records English-only
+    contextual meaning hints for idioms/polysemy. Then DeepSeek creates a terminology
+    draft canon. GigaChat 3 Ultra is an optional, fail-fast adversarial critic; if it is
+    unavailable or slow, critique immediately falls back to DeepSeek. Everything is
+    cached in the per-book bible and no Russian reference translation is ever used.
     """
 
     def __init__(self, provider: Any, cache_path: Path, *, critic_backend: Any | None = None):
@@ -98,6 +101,7 @@ class DeepSeekPublicationTerminologyVerifier:
         self.stats: dict[str, Any] = {
             "cache_hit": False,
             "domain": "",
+            "semantic_profile": {},
             "calls": 0,
             "candidates": 0,
             "returned": 0,
@@ -185,6 +189,7 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|ch
                 "dialogue": str(style.dialogue or ""),
                 "humor": str(style.humor or ""),
             },
+            "semantic_hints": dict(memory.semantic_hints),
             "candidates": candidates,
         }
         raw = self.provider.complete(system, json.dumps(payload, ensure_ascii=False), temperature=0.0)
@@ -255,6 +260,12 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|re
             return None
         backend.model = (os.getenv("BOOKAI_GIGACHAT_TERM_MODEL") or "GigaChat-3-Ultra").strip()
         backend.max_tokens = max(1800, min(4200, int(os.getenv("BOOKAI_GIGACHAT_TERM_MAX_TOKENS") or "3200")))
+        # Ultra is an optional critic, never a critical path. A slow/unavailable
+        # OAuth endpoint must fall back quickly instead of adding ~2 minutes/book.
+        backend.timeout_seconds = max(8, min(20, int(os.getenv("BOOKAI_GIGACHAT_TERM_TIMEOUT") or "12")))
+        backend.max_retries = 0
+        backend.retry_backoff = 0.2
+        backend.oauth_attempts = 1
         self.critic_backend = backend
         return backend
 
@@ -292,6 +303,14 @@ Return ONLY JSON {"items":[{"source":"exact supplied source","decision":"keep|re
 
     def verify(self, segments: list[Segment], memory: BookMemory) -> dict[str, Any]:
         self._hydrate_domain(memory)
+
+        # Independently verify domain and map phrase-level semantic risks BEFORE
+        # terminology routing, so both candidate selection and transport see the
+        # corrected source profile. This is source-only and cached separately.
+        semantic_profile = SourceSemanticProfileVerifier(self.provider, self.cache_path)
+        self.stats["semantic_profile"] = semantic_profile.analyze(segments, memory)
+        self.stats["domain"] = str(memory.domain or "")
+
         if self._load_cache(memory):
             return dict(self.stats)
 
