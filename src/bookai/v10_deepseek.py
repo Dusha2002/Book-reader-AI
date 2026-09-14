@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from .models import BookMemory, Segment
@@ -22,8 +23,22 @@ PROVEN_DEEPSEEK_CODES = frozenset({
 _QUANTITY_CODES = {"numeric", "quantity_obligation", "numbered_choice", "quarter_inch"}
 
 
+def _semantic_hints_for_segment(segment: Segment, memory: BookMemory) -> dict[str, str]:
+    """Return only source-profile hints whose exact English phrase occurs here."""
+    source = str(segment.text or "")
+    out: dict[str, str] = {}
+    for phrase, meaning in dict(getattr(memory, "semantic_hints", {}) or {}).items():
+        key = str(phrase or "").strip()
+        value = str(meaning or "").strip()
+        if not key or not value:
+            continue
+        if re.search(rf"(?<![A-Za-z]){re.escape(key)}(?![A-Za-z])", source, re.I):
+            out[key] = value
+    return out
+
+
 class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
-    """One-batch DeepSeek tail with proof-first routing."""
+    """One-batch DeepSeek tail with proof-first and source-hint-aware routing."""
 
     def __init__(self, provider: Any, qa: Any, max_segments: int = 8):
         super().__init__(provider, qa, max_segments=max_segments)
@@ -33,6 +48,8 @@ class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
             "forced_proven_accepted": 0,
             "forced_proven_rejected": 0,
             "forced_rejection_details": [],
+            "semantic_hint_selected": 0,
+            "semantic_hint_ids": [],
         })
 
     @staticmethod
@@ -46,11 +63,14 @@ class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
     def _select(self, targets: list[Segment], translated: dict[str, str], memory: BookMemory, issues: list[V10Issue]) -> list[Segment]:
         proven = self._proven_codes_by_id(issues)
         semantic_hard = {issue.id for issue in issues if issue.severity == "hard" and issue.mode == "semantic"}
+        hint_counts = {segment.id: len(_semantic_hints_for_segment(segment, memory)) for segment in targets}
         ranked = sorted(
             targets,
             key=lambda segment: (
                 segment.id in proven,
                 segment.id in semantic_hard,
+                hint_counts.get(segment.id, 0) > 0,
+                hint_counts.get(segment.id, 0),
                 self.qa.semantic_risk(segment, memory),
                 len(segment.text),
             ),
@@ -59,7 +79,8 @@ class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
         selected: list[Segment] = []
         for segment in ranked:
             risk = self.qa.semantic_risk(segment, memory)
-            if segment.id not in proven and segment.id not in semantic_hard and risk < 4:
+            has_hints = bool(hint_counts.get(segment.id, 0))
+            if segment.id not in proven and segment.id not in semantic_hard and not has_hints and risk < 4:
                 continue
             selected.append(segment)
             if len(selected) >= self.max_segments:
@@ -75,6 +96,9 @@ class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
         selected_proven_ids = [segment.id for segment in selected if segment.id in proven]
         self.stats["forced_proven_selected"] = len(selected_proven_ids)
         self.stats["forced_proven_ids"] = selected_proven_ids
+        hinted_ids = [segment.id for segment in selected if _semantic_hints_for_segment(segment, memory)]
+        self.stats["semantic_hint_selected"] = len(hinted_ids)
+        self.stats["semantic_hint_ids"] = hinted_ids
 
         index = {segment.id: i for i, segment in enumerate(targets)}
         issue_map: dict[str, list[str]] = {}
@@ -97,6 +121,7 @@ class DeepSeekSemanticSpecialist(_BaseDeepSeekSemanticSpecialist):
                 "current_ru": translated.get(segment.id, ""),
                 "known_defects": issue_map.get(segment.id, []),
                 "must_fix_codes": must_fix,
+                "source_semantic_hints": _semantic_hints_for_segment(segment, memory),
                 "exact_quantity_obligations": obligations,
                 "before_en": [row.text for row in targets[max(0, i - 2):i]],
                 "after_en": [row.text for row in targets[i + 1:i + 3]],
@@ -116,6 +141,8 @@ Rows with must_fix_codes contain SOURCE-GROUNDED, DETERMINISTICALLY PROVEN fidel
 - duplicate_content: remove target-only repeated clauses/phrases while preserving the source proposition once;
 - clause_order: restore source discourse-clause order of reliable anchors, but keep natural Russian word order inside a clause.
 
+`source_semantic_hints` are SOURCE-ONLY sense disambiguations produced before translation. Treat them as a compact semantic contract for the exact English phrases shown: verify that current_ru expresses that contextual meaning and repair a calque, category error, archaic misreading or idiom if it does not. Do not copy the English explanation into Russian and do not change already-natural wording merely to paraphrase it.
+
 For other rows, repair only genuine semantic/publication defects: invented facts, actor/action/object reversals, antecedents, chronology, causality, negation/modality, category narrowing/broadening, difficult word sense or technical denotation. Do not rewrite merely for taste.
 For academic/technical prose preserve established Russian terminology, formulas, notation, bibliography and ACRONYM_CANON. For fiction preserve authorial voice, rhythm, irony and character speech.
 If a source fragment syntactically continues into before_en/after_en, do not close it artificially with a sentence boundary.
@@ -124,6 +151,7 @@ Return exactly one row per id.
 ONLY JSON {"items":[{"id":"...","change":true,"corrected_ru":"...","confidence":0.0,"reason":"..."}]}"""
 
         book_profile = {
+            "domain": str(getattr(memory, "domain", "") or ""),
             "voice": str(style.narrative_voice or ""),
             "rhythm": str(style.rhythm or ""),
             "dialogue": str(style.dialogue or ""),
