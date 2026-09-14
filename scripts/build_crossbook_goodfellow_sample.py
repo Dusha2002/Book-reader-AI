@@ -10,7 +10,7 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 
 SOURCE_URL = "https://www.deeplearningbook.org/contents/intro.html"
-START_MARKER = "One may wonder why deep learning has only recently become recognized"
+START_MARKER = "Geoffrey Hinton showed that a kind of neural network called a deep belief"
 END_MARKER = "This trend is generally expected to continue well into the future."
 
 
@@ -89,7 +89,7 @@ def main() -> None:
     (out_dir / "sample-source.txt").write_text(source_text, "utf-8")
     meta = {
         "source_url": SOURCE_URL,
-        "selection": "continuous prose from sections 1.2.2–1.2.3; representative of the user-requested pp. 35–40 region",
+        "selection": "continuous prose spanning the late neural-network-history discussion plus sections 1.2.2–1.2.3; representative of the user-requested PDF pp. 35–40 region",
         "start_marker": START_MARKER,
         "end_marker": END_MARKER,
         "paragraphs": len(selected),
