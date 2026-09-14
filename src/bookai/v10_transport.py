@@ -14,7 +14,7 @@ _ANY_S_TAG_RE = re.compile(r"</?s(?:\s|>)", re.I)
 _PROMPT_LABELS = (
     "CONTEXT_ONLY:", "CHARACTERS:", "GLOSSARY:", "SOURCE:", "TARGETS:",
     "VOICE:", "RHYTHM:", "DIALOGUE:", "HUMOR:", "ACRONYM_CANON:",
-    "Глоссарий:", "Источник:",
+    "SEMANTIC_HINTS:", "DOMAIN:", "Глоссарий:", "Источник:",
 )
 
 
@@ -45,6 +45,24 @@ def _acronym_canon(memory: BookMemory) -> str:
     return "; ".join(rows) if rows else "нет"
 
 
+def _relevant_semantic_hints(batch: list[Segment], memory: BookMemory) -> dict[str, str]:
+    source = "\n".join(str(segment.text or "") for segment in batch).casefold()
+    out: dict[str, str] = {}
+    for phrase, meaning in memory.semantic_hints.items():
+        key = str(phrase or "").strip()
+        note = str(meaning or "").strip()
+        if key and note and key.casefold() in source:
+            out[key] = note
+    return out
+
+
+def _semantic_hint_text(batch: list[Segment], memory: BookMemory) -> str:
+    hints = _relevant_semantic_hints(batch, memory)
+    if not hints:
+        return "нет"
+    return "; ".join(f"{source} → contextual sense: {meaning}" for source, meaning in hints.items())
+
+
 class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
     """Complete tagged transport with bounded, domain-aware Giga-only recovery.
 
@@ -69,6 +87,7 @@ class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
             "final_missing": 0,
             "boundary_salvage": True,
             "domain_aware_prompts": True,
+            "semantic_hint_prompts": True,
         }
 
     @staticmethod
@@ -117,17 +136,22 @@ class RobustTaggedPrimaryTransport(GigaPrimaryTransport):
         characters = self._relevant_characters(batch, memory) or "нет"
         context = self._context_for_batch(batch, source_segments) or "нет"
         acronyms = _acronym_canon(memory)
+        semantic_hints = _semantic_hint_text(batch, memory)
+        domain = str(memory.domain or "other")
         targets = "\n".join(f'<src id="{s.id}">{s.text}</src>' for s in batch)
         retry_note = "Это повтор только пропущенных ID; верни КАЖДЫЙ указанный ID." if retry else ""
         return f"""Профессиональный перевод книги EN→RU. Переведи только SRC-блоки.
-Не предполагай, что книга художественная, учебная или научная: регистр и жанр определяй по STYLE и CONTEXT_ONLY.
+Не предполагай, что книга художественная, учебная или научная: регистр и жанр определяй по DOMAIN, STYLE и CONTEXT_ONLY.
 Не сокращай, не пересказывай и не добавляй факты. Сохраняй субъект/объект действия, числа, отрицания, причинность,
 хронологию, терминологическую широту, технический смысл, имена, формулы, обозначения и библиографические ссылки.
 Для художественного текста сохраняй голос, ритм, иронию и естественный диалог; для академического/технического —
 принятую русскую терминологию, точность категорий, нотацию и структуру аргумента.
+SEMANTIC_HINTS — source-only заметки на английском о контекстном смысле рискованных фраз. Они НЕ являются готовым
+переводом: передай указанный смысл естественным русским, избегая буквальной кальки ложного значения.
 Если английское предложение продолжается в соседнем сегменте, не закрывай его точкой и не превращай фрагмент
 в отдельное предложение: сохрани открытый синтаксис и естественную пунктуационную связь.
 
+DOMAIN: {domain}
 VOICE: {style.narrative_voice}
 RHYTHM: {style.rhythm}
 DIALOGUE: {style.dialogue}
@@ -135,6 +159,7 @@ HUMOR: {style.humor}
 CHARACTERS: {characters}
 GLOSSARY: {glossary}
 ACRONYM_CANON: {acronyms}
+SEMANTIC_HINTS: {semantic_hints}
 CONTEXT_ONLY: {context}
 {retry_note}
 
@@ -160,7 +185,8 @@ TARGETS:
                     "role": "system",
                     "content": (
                         "Ты точный профессиональный переводчик книг EN→RU для любых жанров и предметных областей. "
-                        "Следуй переданному профилю текста; не навязывай художественный стиль техническому тексту и наоборот. "
+                        "Следуй переданному профилю текста и source-only semantic hints; не навязывай художественный стиль "
+                        "техническому тексту и не переводи исторические/идиоматические выражения механически. "
                         "Не выводи ничего кроме требуемых <s id=...>...</s> блоков."
                     ),
                 },
@@ -187,16 +213,20 @@ TARGETS:
         characters = self._relevant_characters(batch, memory) or "нет"
         system = """Recover ONLY the missing EN→RU book-translation rows below.
 The source may be literary fiction, narrative nonfiction, academic/technical prose or another book genre.
-Infer and preserve its register from the supplied style/context; do not force a literary voice onto technical prose.
+Infer and preserve its register from the supplied domain/style/context; do not force a literary voice onto technical prose.
+`semantic_hints` contains source-only English meaning notes for phrases at high risk of literal mistranslation; preserve that
+contextual sense naturally in Russian without copying the English note into the output.
 Return a complete faithful Russian translation for every id. Preserve every proposition, actor/action/object relation,
 number, negation, chronology, category breadth, technical denotation, acronym policy, citation and name.
 If a source sentence continues across a segment boundary, preserve that open syntax instead of closing it early.
 No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly one row per supplied id."""
         payload = {
+            "domain": str(memory.domain or "other"),
             "style": _style_payload(memory),
             "context_only": context,
             "glossary": glossary,
             "acronym_canon": dict(memory.acronyms),
+            "semantic_hints": _relevant_semantic_hints(batch, memory),
             "characters": characters,
             "items": [{"id": s.id, "source": s.text} for s in batch],
         }
@@ -223,6 +253,7 @@ No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly on
         characters = self._relevant_characters([segment], memory) or "нет"
         style = _style_payload(memory)
         acronyms = _acronym_canon(memory)
+        semantic_hints = _semantic_hint_text([segment], memory)
         client = self._ensure_client()
         request = {
             "model": self.model,
@@ -232,8 +263,9 @@ No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly on
                     "content": (
                         "Переведи один английский фрагмент книги на русский в регистре и предметной области исходника. "
                         "Не считай текст художественным по умолчанию. Для технического/академического текста используй "
-                        "принятую русскую терминологию и сохраняй нотацию; для художественного — авторский голос. "
-                        "Если предложение продолжается в соседнем сегменте, не закрывай его искусственно. "
+                        "принятую русскую терминологию и сохраняй нотацию; для художественного/мемуарного — авторский голос. "
+                        "Source-only SEMANTIC_HINTS задают контекстный смысл рискованных фраз и должны предотвращать буквальную "
+                        "кальку ложного значения. Если предложение продолжается в соседнем сегменте, не закрывай его искусственно. "
                         "Верни ТОЛЬКО полный готовый русский перевод без JSON, тегов, комментариев, "
                         "пометок 'перевод:' и альтернатив. Ничего не сокращай и не добавляй."
                     ),
@@ -241,8 +273,8 @@ No commentary. ONLY JSON {"items":[{"id":"s000001","ru":"..."}]} with exactly on
                 {
                     "role": "user",
                     "content": (
-                        f"STYLE: {style}\nCONTEXT_ONLY: {context}\nCHARACTERS: {characters}\n"
-                        f"GLOSSARY: {glossary}\nACRONYM_CANON: {acronyms}\n\nSOURCE:\n{segment.text}"
+                        f"DOMAIN: {memory.domain}\nSTYLE: {style}\nCONTEXT_ONLY: {context}\nCHARACTERS: {characters}\n"
+                        f"GLOSSARY: {glossary}\nACRONYM_CANON: {acronyms}\nSEMANTIC_HINTS: {semantic_hints}\n\nSOURCE:\n{segment.text}"
                     ),
                 },
             ],
