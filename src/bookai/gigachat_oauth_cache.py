@@ -76,6 +76,10 @@ def ensure_cached_client(backend: Any) -> Any:
     The SDK accepts both an access_token and OAuth credentials. A cached token skips
     the initial OAuth round-trip; if the token has expired, the SDK can still refresh
     through credentials on a 401. No token value is ever printed.
+
+    Optional/non-critical backends may set ``oauth_attempts`` on themselves. This is
+    intentionally per backend so a fail-fast critic can use one OAuth attempt without
+    weakening retry behavior for the primary translation transport.
     """
     existing = getattr(backend, "_client", None)
     if existing is not None:
@@ -125,7 +129,9 @@ def ensure_cached_client(backend: Any) -> Any:
             client = GigaChat(**client_kwargs)
             print(f"[gigachat-client] token_cache_hit model={model}", flush=True)
         else:
-            attempts = max(1, min(3, int(os.getenv("BOOKAI_GIGACHAT_OAUTH_ATTEMPTS") or "2")))
+            backend_attempts = int(getattr(backend, "oauth_attempts", 0) or 0)
+            configured_attempts = int(os.getenv("BOOKAI_GIGACHAT_OAUTH_ATTEMPTS") or "2")
+            attempts = max(1, min(3, backend_attempts or configured_attempts))
             last_error: Exception | None = None
             client = None
             for attempt in range(1, attempts + 1):
