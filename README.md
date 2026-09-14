@@ -1,103 +1,121 @@
 # Book Reader AI
 
-A selective multi-model **EN → RU literary translation harness** for **FB2, EPUB, DOCX and TXT**. Instead of sending the whole book through several expensive LLM passes, the engine routes work by difficulty.
+A selective **EN → RU literary book translation system** for FB2, EPUB, DOCX and TXT. The production goal is not to run every paragraph through more models; it is to keep the fast primary translator and spend specialist work only where source-grounded risk signals justify it.
 
-## Default cascade
+## Production architecture
+
+The supported production entrypoint is:
+
+```bash
+python scripts/production_literary_translation.py
+```
+
+Current production strategy: `literary-production-v1`.
 
 ```text
-Book
-  ↓
-Style / terminology analysis        DeepSeek V4 Flash
-  ↓
-Base translation                    DeepSeek V4 Flash (or local MADLAD-400-3B)
-  ↓
-Quality Gate                        DeepSeek V4 Flash
-  ├─ clean ───────────────────────→ keep translation
-  ├─ medium issue → selective edit  Qwen3.8 Flash
-  └─ hard issue   → selective edit  Qwen3.8 Flash
-                       ↓ (Literary mode only)
-                    senior pass     DeepSeek V4 Pro
-  ↓
-Continuity memory                    DeepSeek V4 Flash
-  ↓
-Rebuilt FB2 / EPUB / DOCX / TXT
+Book / parsed source segments
+        ↓
+Source-only book intelligence / terminology / continuity context
+        ↓
+GigaChat-3-Lightning
+primary progressive literary translation
+        ↓
+Deterministic + source-grounded risk routing
+  • terminology / names / numbers / chronology / register
+  • polarity-scope risks
+  • possible cross-segment contamination
+        ↓ only for selected risky segments
+GigaChat-3-Ultra
+sparse semantic specialist / repair / final verification
+        ↓
+DeepSeek direct API
+legacy emergency fallback only where the proven kernel still requires it
+        ↓
+Formatting + release guards + regression gate
+        ↓
+Russian book + evaluation artifacts
 ```
 
-The important optimization is that **Qwen3.8 Flash and V4 Pro do not read/rewrite the whole book**. They only receive passages flagged by the gate. The quality gate itself returns tiny JSON issue lists instead of another full translation.
+There is intentionally **no additional independent judge model** after Ultra. New deterministic risk signals route suspicious passages into the existing specialist instead of creating another translation layer.
 
-## Why these models
+## Production-path policy
 
-Default OpenRouter role slugs:
+The historical `scripts/chapter_reference_translation_v9*.py` files remain in the repository so experiments are reproducible. They are **legacy kernel/history, not new production entrypoints**.
 
-- `deepseek/deepseek-v4-flash-0731` — high-volume translation, style analysis, gate and memory.
-- `qwen/qwen3.8-flash` — selective literary editor for awkward/ambiguous passages.
-- `deepseek/deepseek-v4-pro-0813` — rare hard cases in `literary` mode only.
+Production changes must go through `LiteraryTranslationStrategy` in `scripts/production_literary_translation.py` rather than creating `v9ai`, `v9aj`, `v9ak`, and so on. `chapter_reference_translation_v9ah_ultra.py` is now only a compatibility shim that delegates to the stable production entrypoint.
 
-You can replace any role with another OpenAI-compatible model through environment variables without changing the pipeline.
+The current facade still reuses the proven v9ah kernel internally while that kernel is gradually migrated into normal modules. This keeps translation behavior stable while stopping further version-chain growth.
 
-## Modes
+## Quality and release state
 
-- **fast** — base translation only. Maximum speed/minimum API use.
-- **optimal** — base translation → gate → selective Qwen3.8 editing → continuity memory. Recommended.
-- **literary** — Optimal plus a senior model pass for passages the gate marks `hard`.
+A fully translated chapter can have one of two materially different states:
 
-Legacy `standard` and `high` names are accepted as aliases for `optimal` and `literary`.
+- `qa_passed` — final checks actually passed;
+- `needs_review` — usable translated text exists, but a late polish/QA failure was waived only so a long resumable book run can continue.
 
-## OpenRouter setup
+A `needs_review` chapter is **never** promoted into `qa_passed_chapters`. A whole-book artifact containing such a chapter is labelled `needs_review`, and `hard_issues` is not falsely reported as zero.
+
+## Source provenance and cache safety
+
+Accepted draft translations now keep source provenance:
+
+- source segment id;
+- stable source hash;
+- context segment ids;
+- producing stage.
+
+If the source text changes underneath the same segment id, the stale cached translation is invalidated on resume rather than silently reused.
+
+## Contamination and polarity guards
+
+`src/bookai/release_guards.py` contains conservative routing signals. They do not translate or judge text themselves; they only force suspicious passages into the existing Ultra specialist.
+
+Current guards include:
+
+- polarity constructions such as `I don't see why not`, which are easy to invert in Russian;
+- suspicious target/source expansion;
+- unusually high overlap with neighboring Russian paragraphs, which can indicate cross-segment carry-over.
+
+The specialist prompt then verifies the candidate strictly against the current source segment. Neighboring passages may resolve context but are not allowed to contribute new events or propositions.
+
+## Regression release gate
+
+The production CI uses:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e .
+python scripts/evaluate_translation_regression.py \
+  --dataset eval/literary_regression_v2.json \
+  --fail-on-hard \
+  --fail-on-objective \
+  chapter-v9-*-translation-map.json
 ```
 
-Set:
+`literary_regression_v2.json` targets **150 real high-risk source cases** through curated failures plus risk-based sampling. Known historical failures are retained as permanent regressions, including:
 
-```bash
-export OPENROUTER_API_KEY='sk-or-v1-...'
-export BOOKAI_BASE_URL='https://openrouter.ai/api/v1'
-export BOOKAI_TRANSLATOR_MODEL='deepseek/deepseek-v4-flash-0731'
-export BOOKAI_GATE_MODEL='deepseek/deepseek-v4-flash-0731'
-export BOOKAI_EDITOR_MODEL='qwen/qwen3.8-flash'
-export BOOKAI_HARD_MODEL='deepseek/deepseek-v4-pro-0813'
-export BOOKAI_REASONING='none'
-```
+- inverted `I don't see why not` polarity;
+- cross-segment text contamination in Chapter Nine;
+- prosecuting-role terminology;
+- chronology/time markers;
+- number relations, referents and formal register.
 
-`OPENROUTER_API_KEY` is enough for every model role.
+The release workflow now fails on curated hard regressions and conservative objective invariant failures instead of producing a report that CI ignores.
 
-## Optional local MADLAD base translator
+## Resilience
 
-The API cascade remains the default because it is simple and already extremely cheap. If you have a suitable GPU and want to remove API cost from the bulk translation pass:
+Long book runs are checkpointed and resumable. GigaChat PERS throttling is handled by retrying the **same request** with bounded exponential backoff instead of recursively splitting a throttled batch into more requests. Ultra specialist calls are serialized and use the same bounded 429 retry policy.
 
-```bash
-pip install -e '.[local]'
-export BOOKAI_TRANSLATOR_BACKEND='madlad'
-export BOOKAI_MADLAD_MODEL='google/madlad400-3b-mt'
-```
+## Supported formats
 
-MADLAD only performs the first draft. The quality gate and selective literary editor still protect quality. The weights are loaded lazily, so normal API installs do not pull PyTorch/Transformers.
+- FB2
+- EPUB
+- DOCX
+- TXT
 
-## Context and book memory
+PDF/OCR remains a separate pipeline because scanned/layout-heavy documents require different extraction and reconstruction logic.
 
-Every API translation batch receives:
+## General CLI / API
 
-- stable style bible;
-- glossary and character speech notes;
-- rolling plot summary;
-- previous 2 and next 2 passages as **context-only** text;
-- chapter-aware batching.
-
-After each batch, continuity memory is refreshed in `optimal` / `literary` modes. Progress and translations are checkpointed in `.bookai-cache`, including gate findings.
-
-## Web UI
-
-```bash
-uvicorn bookai.api:app --reload
-```
-
-Open `http://127.0.0.1:8000`, drag in a book, choose Fast / Optimal / Literary, watch progress and download the rebuilt Russian file.
-
-## CLI
+The reusable package pipeline is still available through the normal CLI and API:
 
 ```bash
 bookai translate novel.fb2
@@ -106,6 +124,12 @@ bookai translate manuscript.docx --mode optimal
 bookai translate story.txt --mode fast
 ```
 
+```bash
+uvicorn bookai.api:app --reload
+```
+
+The dedicated production literary benchmark path is `scripts/production_literary_translation.py`.
+
 ## Tests
 
 ```bash
@@ -113,12 +137,7 @@ pip install -e '.[dev]'
 pytest
 ```
 
-## Current limitations
-
-- PDF/OCR remains a separate future pipeline because layout and scanned pages require different handling.
-- DOCX preserves paragraph styles but translated paragraphs can flatten multiple inline runs.
-- The in-process job registry is for local MVP use; production should use a persistent queue/store.
-- Automatic literary translation can still miss exceptional poetry, experimental typography or very dense wordplay. The cascade is designed to make those cases rare and visible, not pretend they do not exist.
+GitHub Actions also compiles `src`/`scripts`, runs the complete unit suite, executes the production chapter sample, then enforces the literary regression gate.
 
 ## Copyright
 
