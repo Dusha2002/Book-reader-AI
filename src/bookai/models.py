@@ -40,6 +40,10 @@ class BookMemory:
     # Source-derived publication policy for abbreviations. Keys are source acronyms,
     # values are the canonical printed forms for the target Russian edition.
     acronyms: dict[str, str] = field(default_factory=dict)
+    # Exact source phrases whose contextual sense is easy to mistranslate literally.
+    # Values are concise ENGLISH meaning notes produced source-only before translation;
+    # they are translation guidance, never reference/gold Russian text.
+    semantic_hints: dict[str, str] = field(default_factory=dict)
     rolling_summary: str = ""
     last_chapter: str = ""
 
