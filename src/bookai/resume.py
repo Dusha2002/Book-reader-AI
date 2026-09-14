@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .models import Segment
+from .release_guards import source_fingerprint
 
 
 def _usable_translations(state: dict, source_ids: set[str] | None = None) -> dict[str, str]:
@@ -14,14 +15,39 @@ def _usable_translations(state: dict, source_ids: set[str] | None = None) -> dic
     }
 
 
+def _review_required(state: dict) -> dict[str, dict]:
+    raw = state.get("review_required_chapters") or {}
+    if isinstance(raw, dict):
+        return {str(name): dict(value or {}) for name, value in raw.items()}
+    if isinstance(raw, list):
+        return {str(name): {"reason": "legacy review-required marker"} for name in raw}
+    return {}
+
+
 def sanitize_resume_state(
     state: dict,
     chapters: list[tuple[str, list[Segment]]],
 ) -> tuple[dict, dict]:
-    """Keep every usable cached translation, including unfinished chapters."""
+    """Keep usable cached work without ever promoting waived chapters to QA-passed."""
     original = dict(state.get("translations") or {})
-    source_ids = {segment.id for _, chapter in chapters for segment in chapter}
+    source_segments = {segment.id: segment for _, chapter in chapters for segment in chapter}
+    source_ids = set(source_segments)
     translations = _usable_translations(state, source_ids)
+
+    provenance = {
+        str(sid): dict(row)
+        for sid, row in dict(state.get("translation_provenance") or {}).items()
+        if str(sid) in source_ids and isinstance(row, dict)
+    }
+    stale_by_hash = {
+        sid
+        for sid, row in provenance.items()
+        if row.get("source_hash")
+        and row.get("source_hash") != source_fingerprint(source_segments[sid].text)
+    }
+    for sid in stale_by_hash:
+        translations.pop(sid, None)
+        provenance.pop(sid, None)
 
     chapter_ids = {name: {segment.id for segment in chapter} for name, chapter in chapters}
     known_names = set(chapter_ids)
@@ -38,14 +64,26 @@ def sanitize_resume_state(
     polished = valid_claims("polished_chapters")
     qa_passed = valid_claims("qa_passed_chapters")
 
+    review_required = {
+        name: payload
+        for name, payload in _review_required(state).items()
+        if name in known_names
+        and chapter_ids[name]
+        and chapter_ids[name].issubset(translations)
+    }
+    # A chapter cannot simultaneously be certified and explicitly require review.
+    qa_passed.difference_update(review_required)
+
     cleaned = dict(state)
     cleaned["translations"] = translations
+    cleaned["translation_provenance"] = provenance
     cleaned["completed_chapters"] = sorted(completed)
     cleaned["polished_chapters"] = sorted(polished)
     cleaned["qa_passed_chapters"] = sorted(qa_passed)
+    cleaned["review_required_chapters"] = review_required
 
     all_ids = set(translations)
-    if all_ids != source_ids or qa_passed != known_names:
+    if all_ids != source_ids or qa_passed != known_names or review_required:
         cleaned.pop("final_quality", None)
 
     partial_chapters = [
@@ -56,8 +94,11 @@ def sanitize_resume_state(
     report = {
         "preserved_translations": len(translations),
         "removed_invalid_or_stale": len(original) - len(translations),
+        "stale_source_hashes": len(stale_by_hash),
         "partial_chapters": partial_chapters,
         "qa_passed_chapters": len(qa_passed),
+        "review_required_chapters": sorted(review_required),
+        "provenance_coverage": len(provenance),
     }
     return cleaned, report
 
@@ -66,16 +107,12 @@ def first_complete_unchecked_chapter(
     state: dict,
     chapters: list[tuple[str, list[Segment]]],
 ) -> str | None:
-    """Find the earliest chapter safe to waive after an unexpected late-stage error.
-
-    A chapter is safe to waive only when every one of its source ids already has a
-    non-empty cached translation and it has not already been marked QA-passed.
-    Partial chapters are never returned, so real translation gaps remain blockers.
-    """
+    """Find a fully translated chapter that is neither QA-passed nor already waived."""
     translations = _usable_translations(state)
     qa_passed = set(state.get("qa_passed_chapters") or [])
+    review_required = set(_review_required(state))
     for name, chapter in chapters:
         ids = {segment.id for segment in chapter}
-        if name not in qa_passed and ids and ids.issubset(translations):
+        if name not in qa_passed and name not in review_required and ids and ids.issubset(translations):
             return name
     return None
