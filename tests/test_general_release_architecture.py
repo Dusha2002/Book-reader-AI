@@ -13,15 +13,16 @@ def _segment(text: str) -> Segment:
     return Segment(id="s1", text=text, locator="test", chapter="Chapter One")
 
 
-def test_release_facade_delegates_to_general_layer():
+def test_release_facade_delegates_to_universal_layer():
     text = (ROOT / "src/bookai/release_final.py").read_text("utf-8")
-    assert "v10_general_release" in text
+    assert "v10_universal_release" in text
     assert "class FinalV10QualityQA" not in text
 
 
 def test_general_release_has_no_fixture_book_vocabulary():
     paths = [
         ROOT / "src/bookai/v10_general_release.py",
+        ROOT / "src/bookai/v10_universal_release.py",
         ROOT / "src/bookai/release_final.py",
     ]
     text = "\n".join(path.read_text("utf-8").casefold() for path in paths)
@@ -44,7 +45,7 @@ def test_name_consistency_is_driven_by_runtime_book_memory():
     qa = FinalV10QualityQA()
     memory = BookMemory(
         glossary={"Xarion": "Ксарион"},
-        characters={"Xarion": "ru=Ксарион;gender=male;role=protagonist;voice=reserved"},
+        characters={"Xarion": "ru=Ксарион;gender=male;kind=person;role=protagonist;voice=reserved"},
     )
     issues = qa.scan_segment(_segment("Xarion answered."), "Зарион ответил.", memory)
     assert any(issue.code == "name_canon" and issue.severity == "hard" for issue in issues)
@@ -54,3 +55,29 @@ def test_unknown_book_name_is_not_forced_without_runtime_memory():
     qa = FinalV10QualityQA()
     issues = qa.scan_segment(_segment("Xarion answered."), "Зарион ответил.", BookMemory())
     assert not any(issue.code == "name_canon" for issue in issues)
+
+
+def test_source_acronyms_are_allowed_in_technical_translation():
+    qa = FinalV10QualityQA()
+    issues = qa.scan_segment(
+        _segment("An LSTM can run on a GPU."),
+        "LSTM может выполняться на GPU.",
+        BookMemory(),
+    )
+    assert not any(issue.code == "latin_leak" for issue in issues)
+
+
+def test_ordinary_untranslated_english_remains_a_hard_leak():
+    qa = FinalV10QualityQA()
+    issues = qa.scan_segment(_segment("He answered anyway."), "Он ответил anyway.", BookMemory())
+    assert any(issue.code == "latin_leak" and issue.severity == "hard" for issue in issues)
+
+
+def test_mixed_turing_hybrid_is_not_exempted_as_notation():
+    qa = FinalV10QualityQA()
+    issues = qa.scan_segment(
+        _segment("Neural Turing machines can access memory."),
+        "Нейронные Turing-машины могут обращаться к памяти.",
+        BookMemory(),
+    )
+    assert any(issue.code == "latin_leak" and issue.severity == "hard" for issue in issues)
