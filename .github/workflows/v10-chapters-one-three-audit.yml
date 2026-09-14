@@ -13,8 +13,6 @@ on:
       - scripts/build_crossbook_goodfellow_sample.py
   workflow_dispatch:
 
-# Expensive model-backed translation must never fan out across stale commits.
-# Any newer translation audit on this branch cancels the older one.
 concurrency:
   group: v10-translation-audit-${{ github.ref }}
   cancel-in-progress: true
@@ -63,7 +61,7 @@ jobs:
         id: validate
         run: |
           set -euo pipefail
-          pip install -e '.[dev]' gigachat
+          pip install -e '.[dev]' gigachat pypdf
           python -m compileall -q src/bookai/v10*.py src/bookai/release_final.py scripts/chapter_translation_v10.py scripts/chapter_translation_v10_release.py scripts/chapter_translation_v10_release9.py scripts/build_crossbook_goodfellow_sample.py
           pytest -q \
             tests/test_v10_architecture.py \
@@ -75,8 +73,7 @@ jobs:
             tests/test_v10_release_hardening.py \
             tests/test_release_final.py \
             tests/test_general_release_architecture.py
-          # Resolve the public cross-book source before spending any model calls.
-          # A layout/anchor drift must fail fast here, not after translating 3 chapters.
+          # Resolve and parse the public cross-book PDF before spending any model calls.
           rm -rf crossbook-goodfellow
           python scripts/build_crossbook_goodfellow_sample.py crossbook-goodfellow
           test -s crossbook-goodfellow/sample.fb2
@@ -181,7 +178,6 @@ jobs:
         if: ${{ always() && !cancelled() && steps.validate.outcome == 'success' }}
         run: |
           set -uo pipefail
-          # sample.fb2 was already resolved in the fail-fast validation step.
           mkdir -p crossbook-goodfellow/run crossbook-goodfellow/.bookai-cache
           set +e
           (
@@ -203,7 +199,6 @@ jobs:
           cp -f crossbook-goodfellow/run/v10-chapter-one-translated.txt crossbook-goodfellow/pipeline-translated.txt 2>/dev/null || true
           cp -f crossbook-goodfellow/.bookai-cache/book-bible.json crossbook-goodfellow/book-bible.json 2>/dev/null || true
           echo "cross-book diagnostic exit status=$status"
-          # Diagnostic only: retain output even when the publication gate finds transferable defects.
           exit 0
 
       - name: Upload translation audit and cross-book diagnostic
