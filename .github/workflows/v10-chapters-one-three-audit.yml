@@ -15,6 +15,7 @@ on:
       - scripts/build_short_franklin_sample.py
       - tests/test_general_release_architecture.py
       - tests/test_v10_clause_fidelity.py
+      - tests/test_v10_entity_graph.py
   workflow_dispatch:
 
 concurrency:
@@ -80,7 +81,8 @@ jobs:
             tests/test_v10_deepseek_routing.py \
             tests/test_v10_release_hardening.py \
             tests/test_release_final.py \
-            tests/test_general_release_architecture.py
+            tests/test_general_release_architecture.py \
+            tests/test_v10_entity_graph.py
           rm -rf short-parker short-goodfellow short-franklin
           python scripts/build_short_parker_sample.py Devices_and_Desires.fb2 short-parker
           python scripts/build_crossbook_goodfellow_sample.py short-goodfellow
