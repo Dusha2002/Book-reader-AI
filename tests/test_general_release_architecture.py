@@ -67,6 +67,38 @@ def test_source_acronyms_are_allowed_in_technical_translation():
     assert not any(issue.code == "latin_leak" for issue in issues)
 
 
+def test_quoted_single_letter_symbol_is_allowed_when_source_defines_it():
+    qa = FinalV10QualityQA()
+    issues = qa.scan_segment(
+        _segment('The “M” stands for “modified.”'),
+        'Буква «M» означает «модифицированный».',
+        BookMemory(),
+    )
+    assert not any(issue.code == "latin_leak" for issue in issues)
+
+
+def test_technical_brand_can_remain_latin_when_source_and_domain_support_it():
+    qa = FinalV10QualityQA()
+    memory = BookMemory()
+    memory.style.narrative_voice = "Technical academic expository prose."
+    issues = qa.scan_segment(
+        _segment("The model is used at Google."),
+        "Эта модель используется в Google.",
+        memory,
+    )
+    assert not any(issue.code == "latin_leak" for issue in issues)
+
+
+def test_fictional_latin_name_is_not_exempted_just_for_capitalization():
+    qa = FinalV10QualityQA()
+    issues = qa.scan_segment(
+        _segment("Xarion answered."),
+        "Xarion ответил.",
+        BookMemory(),
+    )
+    assert any(issue.code == "latin_leak" and issue.severity == "hard" for issue in issues)
+
+
 def test_ordinary_untranslated_english_remains_a_hard_leak():
     qa = FinalV10QualityQA()
     issues = qa.scan_segment(_segment("He answered anyway."), "Он ответил anyway.", BookMemory())
@@ -81,3 +113,19 @@ def test_mixed_turing_hybrid_is_not_exempted_as_notation():
         BookMemory(),
     )
     assert any(issue.code == "latin_leak" and issue.severity == "hard" for issue in issues)
+
+
+def test_half_inch_modifier_cannot_become_length_when_source_has_separate_length():
+    qa = FinalV10QualityQA()
+    source = "The cloud contained half-inch steel rods, three feet long and sharpened at one end."
+    bad = "Облако содержало стальные прутки длиной в полдюйма, длиной в три фута, заострённые с одного конца."
+    issues = qa.scan_segment(_segment(source), bad, BookMemory())
+    assert any(issue.code == "half_inch" and issue.severity == "hard" for issue in issues)
+
+
+def test_half_inch_modifier_allows_distinct_thickness_and_length():
+    qa = FinalV10QualityQA()
+    source = "The cloud contained half-inch steel rods, three feet long and sharpened at one end."
+    good = "Облако содержало стальные прутки толщиной в полдюйма и длиной в три фута, заострённые с одного конца."
+    issues = qa.scan_segment(_segment(source), good, BookMemory())
+    assert not any(issue.code == "half_inch" for issue in issues)
