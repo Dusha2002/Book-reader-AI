@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 
 # Compatibility facade. Production release logic remains source-only and
 # book-agnostic; publication policy is inferred per book at runtime.
 from .v10 import _norm
-from .v10_crossdomain_release import _ru_phrase_present
+from .v10_crossdomain_release import _ru_phrase_present, _source_acronyms, _technical_style
 from .v10_entity_graph import harmonize_composite_entities
 from .v10_general_release import _STOPWORDS, _TOKEN_RE
 from .v10_publication_release import (
@@ -167,9 +168,36 @@ class FinalBookBibleBuilder(_PublicationBookBibleBuilder):
 
     def build(self, segments):
         memory, stats = super().build(segments)
+
+        # Fail closed on notation in academic/technical sources. When source-only
+        # evidence cannot prove that an acronym has a conventional Cyrillic form,
+        # preserving the exact source token is safer than inventing a transliteration
+        # (PCA -> «ПКА», GPU -> «ГПУ», etc.). A future external terminology authority
+        # may override this deliberately; the generic source-only release must not.
+        source_acronyms: set[str] = set()
+        if _technical_style(memory):
+            source_acronyms = {
+                token
+                for segment in segments
+                for token in _source_acronyms(str(segment.text or ""))
+            }
+            for token in source_acronyms:
+                memory.acronyms[token] = token
+            try:
+                cache_path = getattr(self, "cache_path", None)
+                data = json.loads(cache_path.read_text("utf-8")) if cache_path and cache_path.exists() else {}
+                if isinstance(data, dict):
+                    data["acronyms"] = dict(memory.acronyms)
+                    data["source_acronym_fail_closed"] = True
+                    cache_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
+            except Exception:
+                pass
+
         entity_graph = harmonize_composite_entities(memory, getattr(self, "cache_path", None))
         stats = dict(stats)
         stats["entity_graph"] = entity_graph
+        stats["source_acronym_fail_closed"] = bool(source_acronyms)
+        stats["source_acronyms_preserved"] = len(source_acronyms)
         stats["legacy_term_seeds_used"] = False
         return memory, stats
 
