@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -32,6 +33,7 @@ class LiteraryTranslationStrategy:
     _base_route: Callable[..., Any] | None = field(default=None, init=False, repr=False)
     _base_deep_repair: Callable[..., Any] | None = field(default=None, init=False, repr=False)
     _base_deep_verify: Callable[..., Any] | None = field(default=None, init=False, repr=False)
+    _base_quality: Callable[..., Any] | None = field(default=None, init=False, repr=False)
     _specialist_provider: GigaChatUltraProvider | None = field(default=None, init=False, repr=False)
     _guard_stats: dict[str, int] = field(default_factory=dict, init=False, repr=False)
 
@@ -165,6 +167,179 @@ class LiteraryTranslationStrategy:
             harness.gate = previous
 
     @staticmethod
+    def _objective_issues(targets, translated):
+        return legacy_kernel.v9ag._objective_issues(targets, translated)
+
+    @classmethod
+    def _candidate_clears_objective_issues(cls, targets, translated, sid: str, candidate: str) -> bool:
+        """Never accept a sanitizer candidate that still violates an objective release invariant."""
+        if not candidate:
+            return False
+        probe = dict(translated)
+        probe[sid] = candidate
+        return not any(str(row.get("id") or "") == sid for row in cls._objective_issues(targets, probe))
+
+    def _release_residual_fallback(self, harness, targets, translated, issues) -> tuple[list[str], int]:
+        """Last-resort repair for objective defects only.
+
+        GigaChat sanitizer gets all normal attempts first. If an objectively broken
+        candidate still survives (for example an English word embedded in Russian),
+        reuse the already configured DeepSeek emergency provider. This is not a new
+        judge or translation layer: it only repairs rows that deterministic release
+        checks have already proven invalid, and the replacement is accepted only if
+        the same checks become clean.
+        """
+        if not issues:
+            return [], 0
+        v9ag = legacy_kernel.v9ag
+        v9ab = v9ag.v9ab
+        v8 = v9ab.v8
+        v9 = v9ag.v9
+        provider = harness.hard_editor
+        system = """EMERGENCY final EN→RU repair for objectively invalid translated segments.
+Every row already failed deterministic release validation. Return a COMPLETE natural Russian translation of SOURCE,
+changing only what is needed to clear the listed failed_checks. No reference translation exists.
+
+Hard requirements:
+- latin_leak: ZERO Latin-script prose words may remain. Translate ordinary English; render source proper/place names in Cyrillic.
+- time_marker:*: preserve the exact source time relation.
+- legal_function: preserve the source-proven participant function; an accusing/prosecuting role must not become a defender.
+- address_register: preserve established formal Вы-register from context.
+- Preserve all propositions, participants, numbers, polarity, causality and dialogue intent.
+
+ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]}; exactly one item per input id.
+"""
+
+        def payload_for(rows):
+            payload = []
+            for row in rows:
+                i = int(row["index"])
+                seg = targets[i]
+                payload.append({
+                    "id": seg.id,
+                    "failed_checks": list(row.get("codes") or []),
+                    "source": str(seg.text or ""),
+                    "current_ru": str(translated.get(seg.id) or ""),
+                    "before_en": [x.text for x in targets[max(0, i - 1):i]],
+                    "after_en": [x.text for x in targets[i + 1:i + 2]],
+                })
+            return payload
+
+        changed: list[str] = []
+        calls = 0
+        batch_size = 6
+        for start in range(0, len(issues), batch_size):
+            batch = issues[start:start + batch_size]
+            payload = payload_for(batch)
+            parsed: dict[str, dict] = {}
+            try:
+                obj = v8._complete_json(provider, system, {"items": payload})
+                calls += 1
+                parsed = {
+                    str(item.get("id") or ""): item
+                    for item in (obj.get("items") or [])
+                    if isinstance(item, dict)
+                }
+            except Exception as exc:
+                print(
+                    f"[production-release-fallback] batch={start // batch_size + 1} "
+                    f"error={type(exc).__name__}: {str(exc)[:180]}",
+                    flush=True,
+                )
+
+            unresolved = []
+            for row in batch:
+                sid = str(row["id"])
+                candidate = v9._norm_text((parsed.get(sid) or {}).get("corrected_ru") or "")
+                if candidate and self._candidate_clears_objective_issues(targets, translated, sid, candidate):
+                    translated[sid] = candidate
+                    changed.append(sid)
+                else:
+                    unresolved.append(row)
+
+            # Batch JSON may be malformed or one row may remain invalid. Retry only
+            # those rows individually so one bad response cannot poison the release.
+            for row in unresolved:
+                sid = str(row["id"])
+                try:
+                    obj = v8._complete_json(provider, system, {"items": payload_for([row])})
+                    calls += 1
+                    items = [item for item in (obj.get("items") or []) if isinstance(item, dict)]
+                    item = next((item for item in items if str(item.get("id") or "") == sid), None)
+                    candidate = v9._norm_text((item or {}).get("corrected_ru") or "")
+                except Exception as exc:
+                    print(
+                        f"[production-release-fallback] id={sid} error={type(exc).__name__}: {str(exc)[:180]}",
+                        flush=True,
+                    )
+                    candidate = ""
+                if candidate and self._candidate_clears_objective_issues(targets, translated, sid, candidate):
+                    translated[sid] = candidate
+                    changed.append(sid)
+
+        return sorted(set(changed)), calls
+
+    def production_quality(self, harness, targets, translated, memory):
+        """Keep legacy quality behavior, then enforce zero objective release residuals."""
+        if self._base_quality is None:
+            raise RuntimeError("production quality used before installation")
+        stats = dict(self._base_quality(harness, targets, translated, memory) or {})
+        residual_before = self._objective_issues(targets, translated)
+        changed, calls = self._release_residual_fallback(
+            harness, targets, translated, residual_before
+        )
+
+        v9ag = legacy_kernel.v9ag
+        v9ab = v9ag.v9ab
+        v9s, v9t = v9ag.v9s, v9ag.v9t
+        if changed:
+            v9ab._apply_name_canon(targets, translated, memory)
+            for segment in targets:
+                translated[segment.id] = v9s._format_dialogue_v9s(
+                    segment, translated.get(segment.id, "")
+                )[0]
+
+        residual_after = self._objective_issues(targets, translated)
+        semantic: dict[str, list[dict[str, Any]]] = {}
+        final_map, final_scores, det_final = v9t._rebuild_full_map(
+            targets, translated, memory, semantic
+        )
+        critical, major = v9s._publish_final_state(targets, final_map, final_scores)
+        counts = Counter(
+            row.get("severity") for rows in final_map.values() for row in rows
+        )
+        residual_codes = Counter(
+            code for row in residual_after for code in row.get("codes", [])
+        )
+        stats.update({
+            "production_release_fallback": True,
+            "production_release_fallback_provider": getattr(harness.hard_editor, "model", "unknown"),
+            "production_release_residual_before": [row["id"] for row in residual_before],
+            "production_release_fallback_changed": changed,
+            "production_release_fallback_calls": calls,
+            "production_release_residual_after": [row["id"] for row in residual_after],
+            "production_release_residual_by_code": dict(residual_codes),
+            "final_deterministic": det_final,
+            "remaining_critical": len(critical),
+            "remaining_major_high_confidence": len(major),
+            "mean_quality_score": round(sum(final_scores.values()) / max(1, len(final_scores)), 2),
+            "severity_counts": dict(counts),
+        })
+        v9ab._V9AB_STATS = dict(stats)
+        print(
+            "[production-release-sanitizer] "
+            + json.dumps({
+                "before": len(residual_before),
+                "changed": len(changed),
+                "after": len(residual_after),
+                "after_by_code": dict(residual_codes),
+                "fallback_calls": calls,
+            }, ensure_ascii=False),
+            flush=True,
+        )
+        return stats
+
+    @staticmethod
     def _write_provenance(v3) -> str | None:
         """Persist source id/hash/context ids next to every production translation map."""
         map_path = getattr(v3, "MAP_JSON", None)
@@ -223,6 +398,7 @@ class LiteraryTranslationStrategy:
                 "specialist_installation": "frozen v9ah repair+verify callsites only",
                 "specialist_usage": specialist_usage,
                 "legacy_emergency_fallback": self.fallback,
+                "objective_release_fallback": "DeepSeek only after deterministic failure of all Giga sanitizer attempts",
                 "guard_routing": ["polarity_scope", "source_contamination"],
                 "guard_stats": dict(self._guard_stats),
                 "provenance_artifact": provenance_file,
@@ -240,19 +416,23 @@ class LiteraryTranslationStrategy:
         original_route = legacy_kernel._BASE_AB_ROUTE
         original_deep_repair = legacy_kernel._BASE_DEEP_REPAIR
         original_deep_verify = legacy_kernel._BASE_DEEP_VERIFY
+        original_quality = legacy_kernel._BASE_QUALITY
         self._base_route = original_route
         self._base_deep_repair = original_deep_repair
         self._base_deep_verify = original_deep_verify
+        self._base_quality = original_quality
 
         # Keep old fallback transports intact, but install production policy exactly
-        # where v9ah dereferences its already-frozen specialist functions.
+        # where v9ah dereferences its already-frozen specialist/quality functions.
         legacy_transport.adapt_harness = self.adapt_harness
         legacy_kernel._BASE_AB_ROUTE = self.guarded_route
         legacy_kernel._BASE_DEEP_REPAIR = self.specialist_repair
         legacy_kernel._BASE_DEEP_VERIFY = self.specialist_verify
+        legacy_kernel._BASE_QUALITY = self.production_quality
         try:
             legacy_kernel.main()
         finally:
+            legacy_kernel._BASE_QUALITY = original_quality
             legacy_kernel._BASE_DEEP_VERIFY = original_deep_verify
             legacy_kernel._BASE_DEEP_REPAIR = original_deep_repair
             legacy_kernel._BASE_AB_ROUTE = original_route
