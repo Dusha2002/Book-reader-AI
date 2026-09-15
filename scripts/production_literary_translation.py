@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -11,8 +12,7 @@ from bookai.gigachat_ultra_provider import GigaChatUltraProvider
 from bookai.release_guards import source_fingerprint, specialist_guard_routes
 
 # IMPORTANT: freeze the direct DeepSeek adapter before production monkey-patches
-# v9y's lookup point. This mirrors the last proven v9ah_ultra wrapper and avoids
-# recursively resolving LiteraryTranslationStrategy.adapt_harness from itself.
+# v9y's lookup point. This keeps legacy emergency providers on direct transport.
 _BASE_DIRECT_ADAPT = legacy_transport.adapt_harness
 
 
@@ -30,6 +30,9 @@ class LiteraryTranslationStrategy:
     specialist: str = "GigaChat-3-Ultra"
     fallback: str = "DeepSeek legacy emergency fallback"
     _base_route: Callable[..., Any] | None = field(default=None, init=False, repr=False)
+    _base_deep_repair: Callable[..., Any] | None = field(default=None, init=False, repr=False)
+    _base_deep_verify: Callable[..., Any] | None = field(default=None, init=False, repr=False)
+    _specialist_provider: GigaChatUltraProvider | None = field(default=None, init=False, repr=False)
     _guard_stats: dict[str, int] = field(default_factory=dict, init=False, repr=False)
 
     def guarded_route(self, targets, translated, memory):
@@ -74,21 +77,92 @@ class LiteraryTranslationStrategy:
         return selected_out, ranked_out
 
     def adapt_harness(self, harness):
-        """Apply direct fallback transport, then promote ONLY the sparse gate to Ultra."""
+        """Keep legacy emergency providers on direct transport.
+
+        Ultra is intentionally NOT installed here. v9ah freezes its repair/verify
+        callables during import, so builder-level gate replacement is both unreliable
+        and broader than necessary. Production installs Ultra only at the two frozen
+        sparse-specialist callsites below.
+        """
         harness = _BASE_DIRECT_ADAPT(harness)
-        previous = getattr(harness.gate, "model", "unknown")
-        harness.gate = GigaChatUltraProvider(role="sparse_semantic_specialist")
-        if getattr(harness.gate, "model", "") != self.specialist:
-            raise RuntimeError(
-                f"production specialist invariant failed: expected={self.specialist!r} "
-                f"actual={getattr(harness.gate, 'model', None)!r}"
-            )
         print(
-            f"[production-strategy] specialist_swap from={previous} to={harness.gate.model} "
-            "scope=mandatory-risk-repair+final-verification",
+            f"[production-strategy] base_harness gate={getattr(harness.gate, 'model', 'unknown')} "
+            "specialist_scope=frozen-repair+verify-callsites",
             flush=True,
         )
         return harness
+
+    def _specialist(self) -> GigaChatUltraProvider:
+        if self._specialist_provider is None:
+            provider = GigaChatUltraProvider(role="sparse_semantic_specialist")
+            if provider.model != self.specialist:
+                raise RuntimeError(
+                    f"production specialist invariant failed: expected={self.specialist!r} actual={provider.model!r}"
+                )
+            self._specialist_provider = provider
+        return self._specialist_provider
+
+    def specialist_repair(self, harness, targets, translated, memory, routes):
+        """Run the frozen v9ah repair implementation with Ultra as its gate."""
+        if self._base_deep_repair is None:
+            raise RuntimeError("production specialist repair used before installation")
+        provider = self._specialist()
+        previous = harness.gate
+        started = time.perf_counter()
+        print(
+            f"[production-specialist] phase=repair start routes={len(routes)} model={provider.model}",
+            flush=True,
+        )
+        harness.gate = provider
+        try:
+            result = self._base_deep_repair(harness, targets, translated, memory, routes)
+            changed, calls = result
+            print(
+                f"[production-specialist] phase=repair done routes={len(routes)} changed={len(changed)} "
+                f"batches={calls} elapsed={time.perf_counter()-started:.2f}s",
+                flush=True,
+            )
+            return result
+        except BaseException as exc:
+            print(
+                f"[production-specialist] phase=repair failed routes={len(routes)} "
+                f"elapsed={time.perf_counter()-started:.2f}s error={type(exc).__name__}: {str(exc)[:220]}",
+                flush=True,
+            )
+            raise
+        finally:
+            harness.gate = previous
+
+    def specialist_verify(self, harness, targets, translated, memory, routes):
+        """Run the frozen v9ah final verifier with the same serialized Ultra client."""
+        if self._base_deep_verify is None:
+            raise RuntimeError("production specialist verify used before installation")
+        provider = self._specialist()
+        previous = harness.gate
+        started = time.perf_counter()
+        print(
+            f"[production-specialist] phase=verify start routes={len(routes)} model={provider.model}",
+            flush=True,
+        )
+        harness.gate = provider
+        try:
+            result = self._base_deep_verify(harness, targets, translated, memory, routes)
+            changed, confirmed, calls = result
+            print(
+                f"[production-specialist] phase=verify done routes={len(routes)} changed={len(changed)} "
+                f"confirmed={confirmed} batches={calls} elapsed={time.perf_counter()-started:.2f}s",
+                flush=True,
+            )
+            return result
+        except BaseException as exc:
+            print(
+                f"[production-specialist] phase=verify failed routes={len(routes)} "
+                f"elapsed={time.perf_counter()-started:.2f}s error={type(exc).__name__}: {str(exc)[:220]}",
+                flush=True,
+            )
+            raise
+        finally:
+            harness.gate = previous
 
     @staticmethod
     def _write_provenance(v3) -> str | None:
@@ -139,12 +213,15 @@ class LiteraryTranslationStrategy:
         except Exception:
             return
         architecture = dict(data.get("architecture") or {})
+        specialist_usage = dict(getattr(self._specialist_provider, "usage", {}) or {})
         architecture.update(
             {
                 "production_strategy": self.name,
                 "entrypoint": "scripts/production_literary_translation.py",
                 "primary_translation": self.primary,
                 "sparse_semantic_specialist": self.specialist,
+                "specialist_installation": "frozen v9ah repair+verify callsites only",
+                "specialist_usage": specialist_usage,
                 "legacy_emergency_fallback": self.fallback,
                 "guard_routing": ["polarity_scope", "source_contamination"],
                 "guard_stats": dict(self._guard_stats),
@@ -161,12 +238,23 @@ class LiteraryTranslationStrategy:
         install_gigachat_runtime_guard()
         original_adapt = legacy_transport.adapt_harness
         original_route = legacy_kernel._BASE_AB_ROUTE
+        original_deep_repair = legacy_kernel._BASE_DEEP_REPAIR
+        original_deep_verify = legacy_kernel._BASE_DEEP_VERIFY
         self._base_route = original_route
+        self._base_deep_repair = original_deep_repair
+        self._base_deep_verify = original_deep_verify
+
+        # Keep old fallback transports intact, but install production policy exactly
+        # where v9ah dereferences its already-frozen specialist functions.
         legacy_transport.adapt_harness = self.adapt_harness
         legacy_kernel._BASE_AB_ROUTE = self.guarded_route
+        legacy_kernel._BASE_DEEP_REPAIR = self.specialist_repair
+        legacy_kernel._BASE_DEEP_VERIFY = self.specialist_verify
         try:
             legacy_kernel.main()
         finally:
+            legacy_kernel._BASE_DEEP_VERIFY = original_deep_verify
+            legacy_kernel._BASE_DEEP_REPAIR = original_deep_repair
             legacy_kernel._BASE_AB_ROUTE = original_route
             legacy_transport.adapt_harness = original_adapt
             self.annotate()
