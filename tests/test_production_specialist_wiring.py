@@ -62,6 +62,49 @@ def test_specialist_verify_reuses_same_ultra_and_restores_gate():
     assert calls == 1
 
 
+def test_objective_sanitizer_rejects_candidate_with_same_residual(monkeypatch):
+    strategy = production.LiteraryTranslationStrategy()
+
+    def issues(_targets, translated):
+        if "anyway" in str(translated.get("s1") or ""):
+            return [{"id": "s1", "index": 0, "codes": ["latin_leak"], "reason": "latin"}]
+        return []
+
+    monkeypatch.setattr(production.legacy_kernel.v9ag, "_objective_issues", issues)
+
+    assert not strategy._candidate_clears_objective_issues([], {"s1": "было anyway"}, "s1", "всё ещё anyway")
+    assert strategy._candidate_clears_objective_issues([], {"s1": "было anyway"}, "s1", "всё равно")
+
+
+def test_release_fallback_accepts_only_validated_clean_candidate(monkeypatch):
+    strategy = production.LiteraryTranslationStrategy()
+    targets = [SimpleNamespace(id="s1", text="He had never wanted it anyway.")]
+    translated = {"s1": "Он никогда этого не хотел anyway."}
+    issue = {"id": "s1", "index": 0, "codes": ["latin_leak"], "reason": "latin"}
+
+    def issues(_targets, values):
+        if "anyway" in str(values.get("s1") or ""):
+            return [issue]
+        return []
+
+    calls = {"n": 0}
+
+    def complete_json(_provider, _system, _payload):
+        calls["n"] += 1
+        return {"items": [{"id": "s1", "corrected_ru": "Он всё равно никогда этого не хотел."}]}
+
+    monkeypatch.setattr(production.legacy_kernel.v9ag, "_objective_issues", issues)
+    monkeypatch.setattr(production.legacy_kernel.v9ag.v9ab.v8, "_complete_json", complete_json)
+    harness = SimpleNamespace(hard_editor=SimpleNamespace(model="deepseek-flash"))
+
+    changed, api_calls = strategy._release_residual_fallback(harness, targets, translated, [issue])
+
+    assert changed == ["s1"]
+    assert translated["s1"] == "Он всё равно никогда этого не хотел."
+    assert api_calls == 1
+    assert calls["n"] == 1
+
+
 def test_run_patches_frozen_v9ah_specialist_callsites(monkeypatch):
     strategy = production.LiteraryTranslationStrategy()
     dummy = DummyUltra()
