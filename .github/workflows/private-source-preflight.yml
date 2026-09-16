@@ -1,0 +1,15 @@
+name: private-source-preflight
+
+on:
+  push:
+    branches: [full-literary-reference-v9]
+
+permissions:
+  contents: read
+
+jobs:
+  private-source-access:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Load private BookAI source action
+        uses: Dusha2002/SKNewLevel/.github/actions/bookai-source@bookai-private-source
