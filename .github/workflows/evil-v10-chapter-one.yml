@@ -1,16 +1,6 @@
 name: evil-v10-chapter-one
 
 on:
-  push:
-    branches: [v10-production-candidate]
-    paths:
-      - .github/workflows/evil-v10-chapter-one.yml
-      - scripts/evil_v10_production_chapter.py
-      - scripts/chapter_translation_v10_release9.py
-      - src/bookai/v10*.py
-      - src/bookai/release_final.py
-      - tests/test_v10*.py
-      - Evil for evil.fb2
   workflow_dispatch:
 
 permissions:
