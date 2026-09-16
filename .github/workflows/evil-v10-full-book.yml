@@ -4,12 +4,7 @@ on:
   push:
     branches: [v10-production-candidate]
     paths:
-      - .github/workflows/evil-v10-full-book.yml
-      - scripts/evil_v10_full_book.py
-      - scripts/evil_v10_full_book_resilient.py
-      - scripts/evil_v10_production_chapter_full.py
-      - src/bookai/v10_production_release_guard.py
-      - tests/test_v10_production_release_guard.py
+      - .github/full-book-trigger-v10
   workflow_dispatch:
 
 concurrency:
