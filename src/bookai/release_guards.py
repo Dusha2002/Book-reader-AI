@@ -65,6 +65,34 @@ def _neighbor_overlap(translations: dict[str, str], targets: list[Segment], inde
     return best
 
 
+def source_grounded_objective_issues(
+    targets: list[Segment],
+    translated: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Deterministic release failures proven directly by an unambiguous SOURCE pattern.
+
+    This deliberately covers only narrow invariants that can be validated without a
+    reference translation. It gives the existing emergency fallback a deterministic
+    acceptance test when the sparse specialist is unavailable or leaves a defect.
+    """
+    rows: list[dict[str, Any]] = []
+    for index, segment in enumerate(targets):
+        source = str(segment.text or "")
+        current = str(translated.get(segment.id) or "")
+        if not source or not current:
+            continue
+        codes: list[str] = []
+        if _BRIGANDINE_RE.search(source) and not _BRIGANDINE_RU_RE.search(current):
+            codes.append("armor_terminology")
+        if _DARNING_NEEDLE_EYE_RE.search(source) and not _NEEDLE_EYE_RU_RE.search(current):
+            codes.append("needle_eye_idiom")
+        if _LAST_LESSON_BUT_ONE_RE.search(source) and not _PENULTIMATE_RU_RE.search(current):
+            codes.append("penultimate_idiom")
+        if codes:
+            rows.append({"id": segment.id, "index": index, "codes": codes})
+    return rows
+
+
 def specialist_guard_routes(
     targets: list[Segment],
     translated: dict[str, str],
