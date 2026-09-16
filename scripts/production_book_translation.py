@@ -21,13 +21,12 @@ def _source_fingerprint(source: Path) -> str:
 
 
 def _stratified_source_sample(segments, limit: int = 32000) -> str:
-    """Use the same token budget, but sample the whole novel instead of only its start.
+    """Sample the whole novel under the same fixed character budget.
 
-    Book intelligence is intentionally one cheap source-only model call. For large
-    novels, feeding only the first ~32k characters gives it excellent opening context
-    but poor awareness of late characters, factions and specialist vocabulary. This
-    sampler keeps the character budget unchanged while reserving 25% for the opening
-    and spreading the rest across ordered windows through the entire source.
+    One source-only book-intelligence call is retained. The opening receives 25% of
+    the budget; the rest is split across ordered windows through the book, including
+    a guaranteed final window. Separator bytes are budgeted explicitly, so the tail
+    can never disappear because of a final hard slice.
     """
     texts = [str(getattr(segment, "text", "") or "").strip() for segment in segments]
     texts = [text for text in texts if text]
@@ -38,57 +37,77 @@ def _stratified_source_sample(segments, limit: int = 32000) -> str:
     if len(complete) <= limit:
         return complete
 
+    separator = "\n\n--- SOURCE WINDOW ---\n\n"
     window_count = max(4, min(12, int(os.getenv("BOOKAI_SOURCE_SAMPLE_WINDOWS") or "8")))
-    head_budget = max(3000, limit // 4)
-    head_parts: list[str] = []
-    head_chars = 0
-    head_end = 0
-    for index, text in enumerate(texts):
-        if head_parts and head_chars + len(text) + 1 > head_budget:
-            break
-        remaining = head_budget - head_chars
-        if len(text) > remaining and not head_parts:
-            head_parts.append(text[:remaining])
-            head_chars += remaining
-            head_end = index + 1
-            break
-        head_parts.append(text)
-        head_chars += len(text) + 1
-        head_end = index + 1
-        if head_chars >= head_budget:
-            break
-
-    pieces = ["\n".join(head_parts)] if head_parts else []
-    used_indexes = set(range(head_end))
-    remaining_budget = max(0, limit - sum(len(piece) for piece in pieces))
     spread_windows = max(1, window_count - 1)
-    per_window = max(1200, remaining_budget // spread_windows)
+
+    # Reserve separator bytes and every spread window before spending on the head.
+    separator_budget = len(separator) * spread_windows
+    usable = max(0, limit - separator_budget)
+    head_budget = max(1600, usable // 4)
+    head_budget = min(head_budget, usable)
+    spread_budget = max(0, usable - head_budget)
+    per_window = spread_budget // spread_windows if spread_windows else 0
+
+    def take_from(start: int, budget: int, used: set[int]) -> tuple[str, set[int]]:
+        if budget <= 0:
+            return "", used
+        parts: list[str] = []
+        chars = 0
+        index = max(0, min(len(texts) - 1, start))
+        while index < len(texts) and chars < budget:
+            if index in used:
+                index += 1
+                continue
+            text = texts[index]
+            prefix = 1 if parts else 0
+            remaining = budget - chars - prefix
+            if remaining <= 0:
+                break
+            if len(text) <= remaining:
+                if parts:
+                    chars += 1
+                parts.append(text)
+                chars += len(text)
+                used.add(index)
+            elif remaining >= 160:
+                if parts:
+                    chars += 1
+                parts.append(text[:remaining])
+                chars += remaining
+                used.add(index)
+                break
+            else:
+                break
+            index += 1
+        return "\n".join(parts), used
+
+    used: set[int] = set()
+    head, used = take_from(0, head_budget, used)
+    pieces = [head] if head else []
     n = len(texts)
 
+    # Anchors are monotonic and the last one is always the final source paragraph.
     for window in range(spread_windows):
-        fraction = (window + 1) / spread_windows
-        anchor = min(n - 1, max(head_end, round((n - 1) * fraction)))
-        start = max(head_end, anchor - 2)
-        chunk: list[str] = []
-        chars = 0
-        index = start
-        while index < n and chars < per_window:
-            if index not in used_indexes:
-                text = texts[index]
-                remaining = per_window - chars
-                if len(text) <= remaining:
-                    chunk.append(text)
-                    chars += len(text) + 1
-                elif remaining > 160:
-                    chunk.append(text[:remaining])
-                    chars += remaining
-                used_indexes.add(index)
-            index += 1
-        if chunk:
-            pieces.append("\n".join(chunk))
+        if spread_windows == 1:
+            anchor = n - 1
+        else:
+            fraction = (window + 1) / spread_windows
+            anchor = min(n - 1, max(0, round((n - 1) * fraction)))
+        start = max(0, anchor - 2)
+        chunk, used = take_from(start, per_window, used)
+        if not chunk and anchor not in used:
+            # Very long neighboring paragraphs may consume a prior window. Starting
+            # exactly at the anchor preserves coverage without increasing the budget.
+            chunk, used = take_from(anchor, per_window, used)
+        pieces.append(chunk)
 
-    sample = "\n\n--- SOURCE WINDOW ---\n\n".join(pieces)
-    return sample[:limit]
+    # A window may be empty only because its anchor was already consumed. Preserve
+    # separator positions so the pre-budgeted length invariant remains conservative.
+    sample = separator.join(pieces)
+    if len(sample) > limit:
+        raise RuntimeError(f"stratified source sample exceeded budget: {len(sample)} > {limit}")
+    return sample
 
 
 def configure_production_source():
@@ -120,8 +139,8 @@ def configure_production_source():
     )
     v3._configure_modules()
 
-    # Replace only v9ab's sampling policy: same model, one call and same character
-    # budget, but context now covers the complete novel rather than only its opening.
+    # Replace only v9ab's sampling policy: same model, one call and the same fixed
+    # character budget, but context now covers the complete novel.
     def source_sample(limit: int = 32000) -> str:
         sample = _stratified_source_sample(
             list(getattr(v9ab.v6, "_SOURCE_SEGMENTS", []) or []),
