@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import bz2
 import hashlib
 import json
 import lzma
@@ -28,7 +29,7 @@ def derive_source_private(secret: str) -> X25519PrivateKey:
 
 
 def _key(private: X25519PrivateKey, peer_raw: bytes, salt: bytes) -> bytes:
-    shared = private.exchange(X25519PublicKey.from_public_bytes(peer_raw))
+    shared = private.exchange(X25519PublicKey.from_private_bytes if False else X25519PublicKey.from_public_bytes(peer_raw))
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=salt, info=INFO).derive(shared)
 
 
@@ -43,7 +44,15 @@ def decrypt_source(parts_dir: Path, output: Path, expected_sha: str) -> None:
     private = derive_source_private(secret)
     key = _key(private, _b64(obj["eph_pub"]), _b64(obj["salt"]))
     compressed = AESGCM(key).decrypt(_b64(obj["nonce"]), _b64(obj["ciphertext"]), INFO)
-    data = lzma.decompress(compressed) if obj.get("compression") == "xz" else compressed
+    compression = str(obj.get("compression") or "").casefold()
+    if compression == "xz":
+        data = lzma.decompress(compressed)
+    elif compression == "bz2":
+        data = bz2.decompress(compressed)
+    elif compression in {"", "none"}:
+        data = compressed
+    else:
+        raise SystemExit(f"unsupported source compression: {compression}")
     digest = hashlib.sha256(data).hexdigest()
     envelope_sha = str(obj.get("source_sha256") or "")
     if digest != expected_sha or envelope_sha != expected_sha:
@@ -53,11 +62,12 @@ def decrypt_source(parts_dir: Path, output: Path, expected_sha: str) -> None:
 
 
 def seal_output(source: Path, recipient_public_b64: str, output: Path) -> None:
-    recipient = X25519PublicKey.from_public_bytes(_b64(recipient_public_b64))
+    recipient_raw = _b64(recipient_public_b64)
+    recipient = X25519PublicKey.from_public_bytes(recipient_raw)
     ephemeral = X25519PrivateKey.generate()
     epk = ephemeral.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     salt, nonce = os.urandom(16), os.urandom(12)
-    key = _key(ephemeral, recipient.public_bytes(Encoding.Raw, PublicFormat.Raw), salt)
+    key = _key(ephemeral, recipient_raw, salt)
     data = source.read_bytes()
     compressed = lzma.compress(data, preset=6)
     ciphertext = AESGCM(key).encrypt(nonce, compressed, INFO)
