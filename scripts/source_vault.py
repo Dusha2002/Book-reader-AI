@@ -29,7 +29,7 @@ def derive_source_private(secret: str) -> X25519PrivateKey:
 
 
 def _key(private: X25519PrivateKey, peer_raw: bytes, salt: bytes) -> bytes:
-    shared = private.exchange(X25519PublicKey.from_private_bytes if False else X25519PublicKey.from_public_bytes(peer_raw))
+    shared = private.exchange(X25519PublicKey.from_public_bytes(peer_raw))
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=salt, info=INFO).derive(shared)
 
 
@@ -63,7 +63,6 @@ def decrypt_source(parts_dir: Path, output: Path, expected_sha: str) -> None:
 
 def seal_output(source: Path, recipient_public_b64: str, output: Path) -> None:
     recipient_raw = _b64(recipient_public_b64)
-    recipient = X25519PublicKey.from_public_bytes(recipient_raw)
     ephemeral = X25519PrivateKey.generate()
     epk = ephemeral.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
     salt, nonce = os.urandom(16), os.urandom(12)
