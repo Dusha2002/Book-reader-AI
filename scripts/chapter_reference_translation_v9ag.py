@@ -7,6 +7,7 @@ from collections import Counter
 from typing import Any
 
 import chapter_reference_translation_v9af as v9af
+from bookai.release_guards import source_grounded_objective_issues
 
 v9ad = v9af.v9ad
 v9ab = v9af.v9ab
@@ -19,6 +20,23 @@ _LATIN = v9af._LATIN_WORD_RE
 def _objective_issues(targets, translated) -> list[dict[str, Any]]:
     rows = v9af._objective_issues(targets, translated)
     by_id = {row["id"]: row for row in rows}
+
+    # Stable production release guards contribute only narrow SOURCE-proven
+    # invariants. Merge them into the existing objective validator so the same
+    # Giga sanitizer and DeepSeek emergency fallback can repair/verify them.
+    for extra in source_grounded_objective_issues(list(targets), dict(translated)):
+        sid = str(extra["id"])
+        row = by_id.get(sid)
+        if row is None:
+            row = {"id": sid, "index": int(extra["index"]), "codes": [], "reason": ""}
+            rows.append(row)
+            by_id[sid] = row
+        for code in extra.get("codes") or []:
+            if code not in row["codes"]:
+                row["codes"].append(code)
+        if extra.get("codes"):
+            label = "source-grounded release invariant: " + ", ".join(extra["codes"])
+            row["reason"] = (str(row.get("reason") or "") + "; " + label).strip("; ")
 
     # High-confidence register extension: an English request/imperative embedded
     # between strongly formal Russian turns should not suddenly become informal,
@@ -86,6 +104,9 @@ Hard postconditions:
 8. time_marker:for_the_night => preserve overnight/for the night.
 9. legal_function => use an unmistakably prosecuting Russian role (normally обвинитель), never адвокат/защитник, when the supplied source is attacking the prisoner's defence.
 10. address_register => this turn must use formal Вы-register consistent with the supplied neighboring Russian turns; use formal imperative morphology where needed.
+11. armor_terminology => SOURCE 'brigandine' must stay that armour type: use бригантина/бригандин, never кольчуга or generic armour.
+12. needle_eye_idiom => SOURCE 'eye of a darning-needle' is the needle's eye: use natural Russian 'ушко штопальной иглы'.
+13. penultimate_idiom => SOURCE 'last lesson but one' means the penultimate lesson: explicitly use 'предпоследний/предпоследним'.
 
 Do not alter unrelated meaning, numbers, polarity or established Cyrillic names. No reference translation exists.
 ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]}; exactly one item per input id.
