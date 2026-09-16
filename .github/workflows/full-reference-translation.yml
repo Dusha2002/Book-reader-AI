@@ -136,7 +136,25 @@ jobs:
           print('[bookai-ultra-preflight] live request intentionally skipped; production runtime owns rate-limit retries')
           PY
           echo '[bookai] production_strategy=literary-production-v1 primary=gigachat-lightning specialist=gigachat-3-ultra fallback=deepseek source-only=yes gold-reference=no'
+      - name: Restore regression gate
+        id: benchmark-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .bookai-benchmark-gate.ok
+            chapter-v9-one*.txt
+            chapter-v9-one*.json
+            chapter-v9-two*.txt
+            chapter-v9-two*.json
+            chapter-v9-three*.txt
+            chapter-v9-three*.json
+            production-one.log
+            production-two.log
+            production-three.log
+            production-literary-regression.json
+          key: bookai-benchmark-${{ hashFiles('.github/workflows/full-reference-translation.yml', 'scripts/production_literary_translation.py', 'scripts/chapter_reference_translation_v9*.py', 'scripts/evaluate_translation_regression.py', 'src/bookai/**/*.py', 'eval/literary_regression_v2.json', 'Devices_and_Desires.fb2') }}
       - name: Translate release sample with stable production strategy
+        if: ${{ steps.benchmark-cache.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -149,6 +167,7 @@ jobs:
             echo "[bookai] ===== DONE Chapter ${word} ====="
           done
       - name: Enforce 150-case source-grounded literary regression
+        if: ${{ steps.benchmark-cache.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -158,6 +177,30 @@ jobs:
             --fail-on-hard \
             --fail-on-objective \
             chapter-v9-*-translation-map.json
+          touch .bookai-benchmark-gate.ok
+      - name: Save regression gate
+        if: ${{ success() && steps.benchmark-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .bookai-benchmark-gate.ok
+            chapter-v9-one*.txt
+            chapter-v9-one*.json
+            chapter-v9-two*.txt
+            chapter-v9-two*.json
+            chapter-v9-three*.txt
+            chapter-v9-three*.json
+            production-one.log
+            production-two.log
+            production-three.log
+            production-literary-regression.json
+          key: bookai-benchmark-${{ hashFiles('.github/workflows/full-reference-translation.yml', 'scripts/production_literary_translation.py', 'scripts/chapter_reference_translation_v9*.py', 'scripts/evaluate_translation_regression.py', 'src/bookai/**/*.py', 'eval/literary_regression_v2.json', 'Devices_and_Desires.fb2') }}
+      - name: Confirm regression gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f .bookai-benchmark-gate.ok || { echo 'regression gate marker missing' >&2; exit 1; }
+          test -f production-literary-regression.json || { echo 'regression report missing' >&2; exit 1; }
       - name: Restore reading-build checkpoint
         if: ${{ success() && github.event_name == 'push' && contains(github.event.head_commit.message, '[full-book]') }}
         uses: actions/cache/restore@v4
@@ -175,7 +218,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f production_source.fb2 || { echo 'production_source.fb2 is missing' >&2; exit 1; }
-          echo '[bookai] benchmark sample and regression gate passed; starting resumable source-isolated reading build'
+          echo '[bookai] benchmark gate passed; starting resumable source-isolated reading build'
           timeout --signal=TERM --kill-after=60s 300m \
             python scripts/production_book_full_translation.py 2>&1 | tee production-full-book.log
       - name: Save reading-build checkpoint
