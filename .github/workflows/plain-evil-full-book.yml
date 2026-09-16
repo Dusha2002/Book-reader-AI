@@ -1,0 +1,218 @@
+name: plain-evil-full-book
+
+on:
+  push:
+    branches: [plain-evil-for-evil]
+  workflow_dispatch:
+
+concurrency:
+  group: bookai-plain-evil-full-book
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_BASE_URL: https://api.deepseek.com
+      GIGACHAT_AUTH_KEY: ${{ secrets.GIGACHAT_AUTH_KEY }}
+      GIGACHAT_SCOPE: GIGACHAT_API_PERS
+      GIGACHAT_BASE_URL: https://api.giga.chat/v1
+      BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
+      BOOKAI_GIGACHAT_ULTRA_MODEL: GigaChat-3-Ultra
+      BOOKAI_GIGACHAT_ULTRA_TIMEOUT: '55'
+      BOOKAI_GIGACHAT_ULTRA_MAX_TOKENS: '5000'
+      BOOKAI_GIGACHAT_ULTRA_ATTEMPTS: '3'
+      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '12'
+      BOOKAI_GIGACHAT_BATCH_CHARS: '10000'
+      BOOKAI_GIGACHAT_SPLIT_DEPTH: '4'
+      BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
+      BOOKAI_GIGACHAT_RECOVERY_ROUNDS: '1'
+      BOOKAI_GIGACHAT_RATE_LIMIT_ATTEMPTS: '7'
+      BOOKAI_GIGACHAT_RATE_LIMIT_BACKOFF: '2.0'
+      BOOKAI_GIGACHAT_RATE_LIMIT_MAX_SLEEP: '12.0'
+      BOOKAI_GIGACHAT_TOKEN_CACHE: /tmp/bookai-gigachat-token.json
+      BOOKAI_GIGACHAT_TOKEN_CACHE_TTL: '1440'
+      BOOKAI_GIGACHAT_OAUTH_ATTEMPTS: '2'
+      BOOKAI_GIGACHAT_OAUTH_FAILURE_BACKOFF: '5'
+      BOOKAI_ANALYZER_MODEL: deepseek-flash
+      BOOKAI_TRANSLATOR_MODEL: deepseek-flash
+      BOOKAI_GATE_MODEL: deepseek-flash
+      BOOKAI_MEMORY_MODEL: deepseek-flash
+      BOOKAI_EDITOR_MODEL: deepseek-flash
+      BOOKAI_HARD_MODEL: deepseek-flash
+      BOOKAI_MAX_MODEL: deepseek-flash
+      BOOKAI_LLM_GATE: 'false'
+      BOOKAI_REASONING: none
+      BOOKAI_HYMT_HARD_THRESHOLD: '999'
+      BOOKAI_DEEPSEEK_SEGMENT_CAP: '0'
+      BOOKAI_DRAFT_RECOVERY_MAX: '0'
+      BOOKAI_SECOND_REPAIR_MAX: '0'
+      BOOKAI_FRESH_RETRANSLATE_MAX: '0'
+      BOOKAI_BOOK_INTELLIGENCE_WAIT: '30'
+      BOOKAI_TM_RETRIEVAL_K: '4'
+      BOOKAI_HYBRID_BATCH_CHARS: '10000'
+      BOOKAI_BULK_PROBE_SEGMENTS: '8'
+      BOOKAI_RETRY_ATTEMPTS: '3'
+      BOOKAI_REQUEST_TIMEOUT: '45'
+      BOOKAI_ANALYZER_REQUEST_TIMEOUT: '60'
+      BOOKAI_ANALYSIS_CHARS: '32000'
+      BOOKAI_SOURCE_SAMPLE_WINDOWS: '8'
+      BOOKAI_CONTEXT_WORKERS: '3'
+      BOOKAI_RELIABILITY_WORKERS: '2'
+      BOOKAI_V9F_CUE_WORDS: '5'
+      BOOKAI_V9_REPAIR_MAX: '42'
+      BOOKAI_V9_REPAIR_WORKERS: '3'
+      BOOKAI_V9S_VERIFY_BATCH_CHARS: '11500'
+      BOOKAI_V9S_TAIL_REPAIR_MAX: '20'
+      BOOKAI_V9T_VERIFY_WORKERS: '2'
+      BOOKAI_V9T_TAIL_WORKERS: '3'
+      BOOKAI_V9X_RETRANSLATE_MAX: '15'
+      BOOKAI_V9X_RETRANSLATE_WORKERS: '2'
+      BOOKAI_V9Z_NAME_MAX: '36'
+      BOOKAI_V9Z_VERIFY_MAX: '24'
+      BOOKAI_V9Z_SECOND_REPAIR_MAX: '8'
+      BOOKAI_V9AA_NAME_MAX: '64'
+      BOOKAI_V9AA_VERIFY_EXTRA: '8'
+      BOOKAI_V9AA_VERIFY_BATCH: '10'
+      BOOKAI_V9AB_DEEP_REPAIR_MAX: '48'
+      BOOKAI_V9AB_GIGA_EXTRA_MAX: '0'
+      BOOKAI_V9AB_DEEP_BATCH: '8'
+      BOOKAI_V9AB_FINAL_VERIFY_MAX: '48'
+      BOOKAI_V9AB_VERIFY_BATCH: '12'
+      BOOKAI_V9AD_NAME_MAX: '60'
+      BOOKAI_V9AD_NAME_BATCH: '20'
+      BOOKAI_V9AF_SANITIZER_MAX: '32'
+      BOOKAI_V9AF_SANITIZER_BATCH: '18'
+      BOOKAI_V9AG_RETRY_MAX: '16'
+      BOOKAI_V8_SHARED_CACHE: '.bookai-cache-production-literary-v1'
+      BOOKAI_FULL_CHAPTER_TIMEOUT_SECONDS: '1200'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install project and smoke-test runtime
+        env:
+          BOOKAI_HYMT_HARD_THRESHOLD: '4.8'
+        shell: bash
+        run: |
+          set -euo pipefail
+          pip install -e '.[dev]' gigachat cryptography
+          python -m compileall -q src scripts
+          pytest -q
+
+      - name: Verify API configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is not configured' >&2; exit 1; }
+          test -n "${DEEPSEEK_API_KEY:-}" || { echo 'DEEPSEEK_API_KEY is not configured' >&2; exit 1; }
+          python - <<'PY'
+          from bookai.gigachat_ultra_provider import GigaChatUltraProvider
+          p = GigaChatUltraProvider(role='preflight')
+          assert p.model == 'GigaChat-3-Ultra'
+          print('[bookai] APIs configured; starting full-book production run')
+          PY
+
+      - name: Materialize full Evil for Evil source
+        shell: bash
+        run: |
+          set -euo pipefail
+          url=$(cat .bookai-vault/evil-for-evil/source-url.txt)
+          test -n "$url" || { echo 'source URL is empty' >&2; exit 1; }
+          mkdir -p /tmp/bookai-source
+          curl --fail --location --retry 3 --retry-delay 2 "$url" -o /tmp/bookai-source/source.part00
+          test "$(wc -c < /tmp/bookai-source/source.part00)" -eq 475922 || { echo 'source envelope size mismatch' >&2; exit 1; }
+          echo '1eec8f86e9a0d8c30c9ed57aecaa6e7ac3f9a9fed5a2a7532c997d4f78f1872  /tmp/bookai-source/source.part00' | sha256sum -c -
+          python scripts/source_vault.py decrypt-source \
+            --parts-dir /tmp/bookai-source \
+            --output production_source.fb2 \
+            --sha256 98eee8037971ad496dd6d4fb362f4021a258acf3f6e57d53328430cc489569bf
+          rm -rf /tmp/bookai-source
+          test -s production_source.fb2
+          echo '[bookai] full source ready as ordinary production_source.fb2'
+
+      - name: Restore full-book checkpoint
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .bookai-full-*
+            .bookai-cache-production-literary-v1-*
+            .bookai-cache-production-chapter-*
+          key: bookai-plain-evil-98eee803-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            bookai-plain-evil-98eee803-
+
+      - name: Translate complete Evil for Evil
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '[bookai] ===== START FULL EVIL FOR EVIL ====='
+          timeout --signal=TERM --kill-after=60s 300m \
+            python scripts/production_book_full_translation.py 2>&1 | tee production-full-book.log
+          echo '[bookai] ===== DONE FULL EVIL FOR EVIL ====='
+
+      - name: Save full-book checkpoint
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .bookai-full-*
+            .bookai-cache-production-literary-v1-*
+            .bookai-cache-production-chapter-*
+          key: bookai-plain-evil-98eee803-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Validate complete reading build
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('production-full-book.json').read_text('utf-8'))
+          assert report.get('reading_build_complete'), report
+          output = Path(report['output'])
+          assert output.exists() and output.stat().st_size > 10000
+          assert report.get('segments_merged') == report.get('segments_total')
+          print('[bookai-full-release] complete=true chapters=', report.get('chapters_completed'),
+                'segments=', report.get('segments_total'), 'bytes=', output.stat().st_size,
+                'review_required=', len(report.get('review_required_chapters') or []))
+          PY
+
+      - name: Upload plaintext translated book
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Evil_for_Evil_RU_plaintext
+          path: |
+            production_translation_ru.fb2
+            production-full-book.json
+            production-full-provenance.json
+            production-full-book.log
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostics on failure
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Evil_for_Evil_translation_diagnostics
+          path: |
+            production-full-book.json
+            production-full-provenance.json
+            production-full-book.log
+            .bookai-full-*/**
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 3
