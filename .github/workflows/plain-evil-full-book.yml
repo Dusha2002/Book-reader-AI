@@ -91,7 +91,7 @@ jobs:
       BOOKAI_V9AF_SANITIZER_BATCH: '18'
       BOOKAI_V9AG_RETRY_MAX: '16'
       BOOKAI_V8_SHARED_CACHE: '.bookai-cache-production-literary-v1'
-      BOOKAI_FULL_CHAPTER_TIMEOUT_SECONDS: '1200'
+      BOOKAI_FULL_CHAPTER_TIMEOUT_SECONDS: '14400'
 
     steps:
       - uses: actions/checkout@v4
