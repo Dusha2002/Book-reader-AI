@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+from pathlib import Path
 
 import bookai.v10 as v10_core
 from bookai.pipeline import _chapter_groups, _should_translate
 from bookai.v10_production_release_guard import (
+    canonicalize_entity_family_spelling,
     clean_numeric_result,
     clean_quantity_result,
+    filter_release_false_positives,
     localized_gender_issues,
 )
 
@@ -17,6 +21,7 @@ import evil_v10_production_chapter as production
 _BASE_SELECT = production._select_numeric_or_named_chapter
 _BASE_NUMERIC_COMPARE = v10_core.compare_numeric_fidelity
 _BASE_CLEAN_QUANTITY = production._clean_quantity_with_compounds
+_BASE_PRODUCTION_FINAL_QA_SCAN = production._production_final_qa_scan
 _BARE_NUMBER = re.compile(r"^\d+$")
 
 
@@ -100,14 +105,82 @@ def _range_safe_quantity(cls, source: str, target: str):
     )
 
 
+def _full_book_final_qa_scan(self, segment, target: str, memory):
+    """Keep strict release QA, but require stronger evidence for three noisy HARD classes."""
+    issues = list(_BASE_PRODUCTION_FINAL_QA_SCAN(self, segment, target, memory))
+    return filter_release_false_positives(segment, target, memory, issues)
+
+
+def _canonicalize_checkpoint_entity_families() -> None:
+    """Rewrite accepted Е/Э transliteration variants to the cached book-wide canon.
+
+    The full-book merger consumes chapter map.json checkpoints, so normalizing the map
+    here guarantees one spelling in the final FB2 without weakening the standalone
+    chapter-one benchmark or regenerating a successfully translated chapter.
+    """
+    map_name = str(os.getenv("BOOKAI_V10_MAP") or "").strip()
+    bible_name = str(os.getenv("BOOKAI_V10_BIBLE_CACHE") or "").strip()
+    if not map_name or not bible_name:
+        return
+    map_path = Path(map_name)
+    family_path = Path(bible_name).with_name("entity-family-canon.json")
+    if not map_path.exists() or not family_path.exists():
+        return
+    try:
+        rows = json.loads(map_path.read_text("utf-8"))
+        family_payload = json.loads(family_path.read_text("utf-8"))
+    except Exception:
+        return
+    if not isinstance(rows, list) or not isinstance(family_payload, dict):
+        return
+    families = list(family_payload.get("families") or [])
+    if not families:
+        return
+
+    changed_ids: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        current = str(row.get("translation") or "")
+        normalized = canonicalize_entity_family_spelling(current, families)
+        if normalized != current:
+            row["translation"] = normalized
+            changed_ids.append(str(row.get("id") or ""))
+    if not changed_ids:
+        return
+
+    map_path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), "utf-8")
+    report_name = str(os.getenv("BOOKAI_V10_REPORT") or "").strip()
+    if report_name:
+        report_path = Path(report_name)
+        if report_path.exists():
+            try:
+                report = json.loads(report_path.read_text("utf-8"))
+                if isinstance(report, dict):
+                    report["post_checkpoint_entity_canon"] = {
+                        "normalized": len(changed_ids),
+                        "ids": changed_ids,
+                    }
+                    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
+            except Exception:
+                pass
+    print(
+        f"[v10-full-entity-canon] normalized={len(changed_ids)} ids={changed_ids[:12]}",
+        flush=True,
+    )
+
+
 # These patches are intentionally full-book-only. The standalone chapter benchmark
 # remains frozen, while production reading builds get false-positive suppression for
-# coordinated numeric ranges and speaker-local gender attribution.
+# coordinated numeric ranges, speaker-local gender, contextual direction checks,
+# duplicate confirmation and narrow Е/Э entity-family normalization.
 production._select_numeric_or_named_chapter = _select_with_optional_prelude
 production._safe_gender_issues = localized_gender_issues
 production._clean_quantity_with_compounds = _range_safe_quantity
+production._production_final_qa_scan = _full_book_final_qa_scan
 v10_core.compare_numeric_fidelity = _range_safe_numeric
 
 
 if __name__ == "__main__":
     production.main()
+    _canonicalize_checkpoint_entity_families()
