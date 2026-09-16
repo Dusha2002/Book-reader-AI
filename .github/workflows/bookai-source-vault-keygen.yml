@@ -9,6 +9,7 @@ on:
 permissions:
   contents: read
 
+# Refreshed for Evil for Evil secure full-book run.
 jobs:
   keygen:
     runs-on: ubuntu-latest
