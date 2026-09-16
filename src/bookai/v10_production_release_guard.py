@@ -69,6 +69,41 @@ _BETWEEN_RANGE_RE = re.compile(
     re.I,
 )
 
+# Direction relations are only HARD when the source contains explicit locomotion.
+# Bare spatial phrases such as "look up the hill" or "looking down" are visual
+# orientation, not movement, and must not be cross-matched across a long paragraph.
+_SOURCE_UP_MOTION_RE = re.compile(
+    r"\b(?:walk(?:ed|ing)?|went|go(?:ing)?|ran|run(?:ning)?|climb(?:ed|ing)?|came|come|"
+    r"rode|ride|riding|moved?|moving|headed?|heading|trudged?|rushed?|started?|set\s+off|"
+    r"made\s+(?:his|her|their)\s+way)\b[^.!?;:]{0,24}\bup\b",
+    re.I,
+)
+_SOURCE_DOWN_MOTION_RE = re.compile(
+    r"\b(?:walk(?:ed|ing)?|went|go(?:ing)?|ran|run(?:ning)?|climb(?:ed|ing)?|came|come|"
+    r"rode|ride|riding|moved?|moving|headed?|heading|trudged?|rushed?|started?|set\s+off|"
+    r"made\s+(?:his|her|their)\s+way)\b[^.!?;:]{0,24}\bdown\b",
+    re.I,
+)
+_RU_UP_MOTION_RE = re.compile(
+    r"\b(?:поднял(?:ся|ась|ись)?|поднимал(?:ся|ась|ись)?|поднима(?:лся|лась|лись|ется|ются)|"
+    r"взош[её]л|взошла|пош[её]л\s+вверх|пошла\s+вверх|двинул(?:ся|ась)\s+вверх|"
+    r"поехал\s+вверх|поехала\s+вверх|карабкал(?:ся|ась)|взбирал(?:ся|ась))\b",
+    re.I,
+)
+_RU_DOWN_MOTION_RE = re.compile(
+    r"\b(?:спустил(?:ся|ась|ись)?|спускал(?:ся|ась|ись)?|спуска(?:лся|лась|лись|ется|ются)|"
+    r"сош[её]л|сошла|пош[её]л\s+вниз|пошла\s+вниз|двинул(?:ся|ась)\s+вниз|"
+    r"поехал\s+вниз|поехала\s+вниз)\b",
+    re.I,
+)
+
+_RU_REPEAT_STOP = {
+    "и", "а", "но", "или", "он", "она", "они", "его", "ее", "её", "их", "ему", "ей", "им",
+    "это", "этот", "эта", "эти", "что", "как", "когда", "если", "бы", "же", "не", "ни", "на",
+    "в", "во", "с", "со", "к", "ко", "по", "за", "из", "от", "до", "у", "для", "о", "об", "про",
+    "был", "была", "были", "есть", "было", "все", "всё", "только", "уже", "ему", "себя", "свой",
+}
+
 
 def _simple_number_value(text: str) -> int | None:
     parts = re.split(r"[-\s]+", str(text or "").casefold().strip())
@@ -224,3 +259,138 @@ def localized_gender_issues(
                 )
             )
     return out
+
+
+def strict_direction_mismatch(source: str, target: str) -> bool:
+    """Confirm only explicit locomotion reversals, never gaze/orientation phrases."""
+    source_text = str(source or "")
+    target_text = str(target or "").casefold().replace("ё", "е")
+    source_up = bool(_SOURCE_UP_MOTION_RE.search(source_text))
+    source_down = bool(_SOURCE_DOWN_MOTION_RE.search(source_text))
+    target_up = bool(_RU_UP_MOTION_RE.search(target_text))
+    target_down = bool(_RU_DOWN_MOTION_RE.search(target_text))
+
+    # A long paragraph can legitimately contain both directions. In that case this
+    # coarse deterministic guard is not strong enough to issue a HARD verdict.
+    if source_up and source_down:
+        return False
+    if source_up:
+        return target_down and not target_up
+    if source_down:
+        return target_up and not target_down
+    return False
+
+
+def target_has_substantial_repeat(target: str) -> bool:
+    """Confirm exact repeated Russian phrase evidence before keeping duplicate_content HARD.
+
+    Repetition detectors on long literary paragraphs can overfire on repeated function
+    words or recurring nouns. A hard duplicate verdict requires an exact repeated 4–6
+    token span with enough lexical content and separation to plausibly be a duplicated
+    clause rather than normal prose recurrence.
+    """
+    words = [w.casefold().replace("ё", "е") for w in re.findall(r"[А-Яа-яЁё]+", str(target or ""))]
+    if len(words) < 12:
+        return False
+    for n in (6, 5, 4):
+        seen: dict[tuple[str, ...], int] = {}
+        for i in range(len(words) - n + 1):
+            gram = tuple(words[i:i + n])
+            content = [w for w in gram if w not in _RU_REPEAT_STOP and len(w) >= 4]
+            if len(content) < 3 or len(" ".join(gram)) < 20:
+                continue
+            previous = seen.get(gram)
+            if previous is not None and i - previous >= n + 2:
+                return True
+            seen.setdefault(gram, i)
+    return False
+
+
+def _entity_root_variants(root: str) -> set[str]:
+    normalized = re.sub(r"[^а-яё]", "", str(root or "").casefold()).replace("ё", "е")
+    if not normalized:
+        return set()
+    variants = {normalized}
+    # Source-derived fictional names can legitimately oscillate at word-initial E
+    # between Russian Е/Э transliteration. Treat that narrow pair as the same family
+    # for chapter QA; the final merge canonicalizer below rewrites it to one spelling.
+    if normalized.startswith("е") and len(normalized) >= 4:
+        variants.add("э" + normalized[1:])
+    elif normalized.startswith("э") and len(normalized) >= 4:
+        variants.add("е" + normalized[1:])
+    return variants
+
+
+def entity_family_equivalent_present(segment: Segment, target: str, memory: BookMemory) -> bool:
+    """Return True if every relevant family root is present, allowing only initial Е/Э variation."""
+    source = str(segment.text or "")
+    low = str(target or "").casefold().replace("ё", "е")
+    relevant = 0
+    for source_form, desc in memory.characters.items():
+        if "kind=demonym_family" not in str(desc):
+            continue
+        if not re.search(rf"(?<![A-Za-z]){re.escape(str(source_form))}(?![A-Za-z])", source, re.I):
+            continue
+        match = re.search(r"(?:^|;)ru_root=([^;]+)", str(desc), re.I)
+        variants = _entity_root_variants(match.group(1) if match else "")
+        if not variants:
+            continue
+        relevant += 1
+        if not any(re.search(rf"\b{re.escape(root)}[а-я]*\b", low) for root in variants):
+            return False
+    return relevant > 0
+
+
+def canonicalize_entity_family_spelling(target: str, families: list[dict[str, Any]]) -> str:
+    """Normalize accepted leading Е/Э family variants to the cached canonical root."""
+    value = str(target or "")
+    for row in families:
+        root = re.sub(r"[^а-яё]", "", str(row.get("ru_root") or "").casefold()).replace("ё", "е")
+        variants = _entity_root_variants(root) - {root}
+        if not root or not variants:
+            continue
+        for variant in variants:
+            pattern = re.compile(rf"\b{re.escape(variant)}(?P<tail>[А-Яа-яЁё]*)\b", re.I)
+
+            def repl(match: re.Match[str], *, canonical: str = root) -> str:
+                observed = match.group(0)
+                tail = match.group("tail") or ""
+                head = canonical
+                if observed[:1].isupper():
+                    head = canonical[:1].upper() + canonical[1:]
+                return head + tail
+
+            value = pattern.sub(repl, value)
+    return value
+
+
+def filter_release_false_positives(
+    segment: Segment,
+    target: str,
+    memory: BookMemory,
+    issues: list[V10Issue],
+) -> list[V10Issue]:
+    """Suppress only release-gate findings that fail a stricter deterministic confirmation."""
+    filtered: list[V10Issue] = []
+    for issue in issues:
+        if issue.code == "direction_relation" and not strict_direction_mismatch(segment.text, target):
+            continue
+        if issue.code == "duplicate_content" and not target_has_substantial_repeat(target):
+            continue
+        if issue.code == "entity_family_canon" and entity_family_equivalent_present(segment, target, memory):
+            continue
+        filtered.append(issue)
+    return filtered
+
+
+__all__ = [
+    "canonicalize_entity_family_spelling",
+    "clean_numeric_result",
+    "clean_quantity_result",
+    "entity_family_equivalent_present",
+    "filter_release_false_positives",
+    "localized_gender_issues",
+    "spurious_between_range_sums",
+    "strict_direction_mismatch",
+    "target_has_substantial_repeat",
+]
