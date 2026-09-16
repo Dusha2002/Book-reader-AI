@@ -3,12 +3,20 @@ from __future__ import annotations
 import os
 import re
 
+import bookai.v10 as v10_core
 from bookai.pipeline import _chapter_groups, _should_translate
+from bookai.v10_production_release_guard import (
+    clean_numeric_result,
+    clean_quantity_result,
+    localized_gender_issues,
+)
 
 import evil_v10_production_chapter as production
 
 
 _BASE_SELECT = production._select_numeric_or_named_chapter
+_BASE_NUMERIC_COMPARE = v10_core.compare_numeric_fidelity
+_BASE_CLEAN_QUANTITY = production._clean_quantity_with_compounds
 _BARE_NUMBER = re.compile(r"^\d+$")
 
 
@@ -81,7 +89,24 @@ def _select_with_optional_prelude(document, chapter_name: str):
     }
 
 
+def _range_safe_numeric(source: str, target: str):
+    return clean_numeric_result(source, _BASE_NUMERIC_COMPARE(source, target))
+
+
+def _range_safe_quantity(cls, source: str, target: str):
+    return clean_quantity_result(
+        source,
+        _BASE_CLEAN_QUANTITY(cls, source, target),
+    )
+
+
+# These patches are intentionally full-book-only. The standalone chapter benchmark
+# remains frozen, while production reading builds get false-positive suppression for
+# coordinated numeric ranges and speaker-local gender attribution.
 production._select_numeric_or_named_chapter = _select_with_optional_prelude
+production._safe_gender_issues = localized_gender_issues
+production._clean_quantity_with_compounds = _range_safe_quantity
+v10_core.compare_numeric_fidelity = _range_safe_numeric
 
 
 if __name__ == "__main__":

@@ -6,12 +6,15 @@ on:
     paths:
       - .github/workflows/evil-v10-full-book.yml
       - scripts/evil_v10_full_book.py
+      - scripts/evil_v10_full_book_resilient.py
       - scripts/evil_v10_production_chapter_full.py
+      - src/bookai/v10_production_release_guard.py
+      - tests/test_v10_production_release_guard.py
   workflow_dispatch:
 
 concurrency:
   group: bookai-evil-v10-full-book
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -50,6 +53,7 @@ jobs:
       BOOKAI_V10_EDITORIAL_MAX: '10'
       BOOKAI_V10_RECOVERY_BATCH: '4'
       BOOKAI_V10_JSON_RECOVERY_BATCH: '3'
+      BOOKAI_V10_FULL_ATTEMPTS: '3'
       BOOKAI_SOURCE: Evil for evil.fb2
       BOOKAI_MEMORY_SOURCE: Evil for evil.fb2
       BOOKAI_V10_FULL_OUTPUT: Evil_for_Evil_RU_V10_FULL.fb2
@@ -73,6 +77,7 @@ jobs:
             scripts/evil_v10_production_chapter.py \
             scripts/evil_v10_production_chapter_full.py \
             scripts/evil_v10_full_book.py \
+            scripts/evil_v10_full_book_resilient.py \
             scripts/chapter_translation_v10_release9.py
           pytest -q \
             tests/test_v10_architecture.py \
@@ -84,7 +89,8 @@ jobs:
             tests/test_v10_general_release.py \
             tests/test_v10_semantic_profile.py \
             tests/test_v10_technical_notation.py \
-            tests/test_v10_semantic_hardening.py
+            tests/test_v10_semantic_hardening.py \
+            tests/test_v10_production_release_guard.py
 
       - name: Verify source and APIs
         run: |
@@ -108,12 +114,12 @@ jobs:
           restore-keys: |
             bookai-evil-v10-h4-
 
-      - name: Translate complete Evil for Evil with hardened v10
+      - name: Translate complete Evil for Evil with self-healing hardened v10
         run: |
           set -euo pipefail
           echo '[v10-full] ===== START FULL EVIL FOR EVIL ====='
           timeout --signal=TERM --kill-after=60s 285m \
-            python scripts/evil_v10_full_book.py 2>&1 | tee v10-full-book.log
+            python scripts/evil_v10_full_book_resilient.py 2>&1 | tee v10-full-book.log
           echo '[v10-full] ===== DONE FULL EVIL FOR EVIL ====='
 
       - name: Save resumable v10 checkpoints
