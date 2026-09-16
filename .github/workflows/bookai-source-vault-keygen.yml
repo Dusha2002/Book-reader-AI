@@ -9,43 +9,37 @@ on:
 permissions:
   contents: read
 
-env:
-  BOOKAI_VAULT_CACHE_KEY: bookai-source-vault-rsa-v1
-
 jobs:
   keygen:
     runs-on: ubuntu-latest
+    env:
+      GIGACHAT_AUTH_KEY: ${{ secrets.GIGACHAT_AUTH_KEY }}
     steps:
-      - name: Restore existing private key
-        id: restore-key
-        uses: actions/cache/restore@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          path: .bookai-source-private.pem
-          key: ${{ env.BOOKAI_VAULT_CACHE_KEY }}
-      - name: Generate one-time RSA keypair
-        if: ${{ steps.restore-key.outputs.cache-hit != 'true' }}
+          python-version: '3.12'
+      - name: Derive source-vault public key from existing repository secret
         shell: bash
         run: |
           set -euo pipefail
-          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out .bookai-source-private.pem
-          chmod 600 .bookai-source-private.pem
-      - name: Save private key to repository-scoped Actions cache
-        if: ${{ steps.restore-key.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
-        with:
-          path: .bookai-source-private.pem
-          key: ${{ env.BOOKAI_VAULT_CACHE_KEY }}
-      - name: Export public key
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -s .bookai-source-private.pem
-          openssl pkey -in .bookai-source-private.pem -pubout -out bookai-source-public.pem
-          openssl pkey -pubin -in bookai-source-public.pem -text -noout >/dev/null
-          echo '[bookai-source-vault] public key ready; private key remains cache-only'
+          test -n "${GIGACHAT_AUTH_KEY:-}" || { echo 'GIGACHAT_AUTH_KEY is missing' >&2; exit 1; }
+          python -m pip install -q cryptography
+          python - <<'PY'
+          import base64, hashlib, os
+          from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+          from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+          secret = os.environ['GIGACHAT_AUTH_KEY'].encode('utf-8')
+          seed = hashlib.sha256(b'bookai-source-vault-x25519-v1\0' + secret).digest()
+          private = X25519PrivateKey.from_private_bytes(seed)
+          public = private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+          open('bookai-source-vault-public-key.txt', 'w', encoding='ascii').write(base64.b64encode(public).decode('ascii') + '\n')
+          print('[bookai-source-vault] secret-derived X25519 public key ready; no private key persisted')
+          PY
       - name: Upload public key
         uses: actions/upload-artifact@v4
         with:
-          name: bookai-source-vault-public-key
-          path: bookai-source-public.pem
+          name: bookai-source-vault-public-key-x25519
+          path: bookai-source-vault-public-key.txt
           retention-days: 1
