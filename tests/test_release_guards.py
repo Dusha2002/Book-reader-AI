@@ -1,5 +1,10 @@
 from bookai.models import Segment
-from bookai.release_guards import provenance_entry, source_fingerprint, specialist_guard_routes
+from bookai.release_guards import (
+    provenance_entry,
+    source_fingerprint,
+    source_grounded_objective_issues,
+    specialist_guard_routes,
+)
 
 
 def _segment(sid: str, text: str) -> Segment:
@@ -81,6 +86,26 @@ def test_last_lesson_but_one_is_routed_as_penultimate_idiom():
     assert "предпослед" in routes[0]["reason"]
 
 
+def test_source_grounded_objective_issues_capture_same_release_failures():
+    targets = [
+        _segment(
+            "s1",
+            "A brigandine would turn the point. The eye of a darning-needle, probably.",
+        ),
+        _segment("s2", "Fencing was last lesson but one on a Monday."),
+    ]
+    translated = {
+        "s1": "Кольчуга остановила бы укол. Глазок штопальной иглы, наверное.",
+        "s2": "Фехтование было последним уроком перед одним понедельником.",
+    }
+
+    issues = source_grounded_objective_issues(targets, translated)
+    by_id = {row["id"]: row for row in issues}
+
+    assert set(by_id["s1"]["codes"]) == {"armor_terminology", "needle_eye_idiom"}
+    assert by_id["s2"]["codes"] == ["penultimate_idiom"]
+
+
 def test_source_lexical_guards_do_not_fire_when_meaning_is_preserved():
     targets = [
         _segment("s1", "A brigandine would turn the point; the eye of a darning-needle was smaller."),
@@ -92,6 +117,7 @@ def test_source_lexical_guards_do_not_fire_when_meaning_is_preserved():
     }
 
     assert specialist_guard_routes(targets, translated) == []
+    assert source_grounded_objective_issues(targets, translated) == []
 
 
 def test_clean_compact_translation_is_not_routed_by_guard():
@@ -99,3 +125,4 @@ def test_clean_compact_translation_is_not_routed_by_guard():
     translated = {"s1": "Зиани кивнул. — Спасибо, — сказал он."}
 
     assert specialist_guard_routes(targets, translated) == []
+    assert source_grounded_objective_issues(targets, translated) == []
