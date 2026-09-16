@@ -42,10 +42,10 @@ jobs:
       BOOKAI_V10_NAME_MAX: '96'
       BOOKAI_V10_NAME_BATCH: '20'
       BOOKAI_V10_TERM_BATCH: '16'
-      BOOKAI_V10_DEEP_MAX: '10'
-      BOOKAI_V10_RELEASE_DEEP_MAX: '20'
-      BOOKAI_V10_RESIDUAL_DEEP_MAX: '16'
-      BOOKAI_V10_EDITORIAL_MAX: '8'
+      BOOKAI_V10_DEEP_MAX: '12'
+      BOOKAI_V10_RELEASE_DEEP_MAX: '24'
+      BOOKAI_V10_RESIDUAL_DEEP_MAX: '32'
+      BOOKAI_V10_EDITORIAL_MAX: '10'
       BOOKAI_V10_RECOVERY_BATCH: '4'
       BOOKAI_V10_JSON_RECOVERY_BATCH: '3'
       BOOKAI_SOURCE: Evil for evil.fb2
@@ -88,27 +88,41 @@ jobs:
           PY
 
       - name: Translate chapter 1 with hardened v10
+        id: translate
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          rm -rf audit-v10 .bookai-cache-v10-*
+          set -o pipefail
+          rm -rf audit-v10 .bookai-cache-v10-* .bookai-cache-v10-production-hardening-*
           mkdir -p audit-v10
           /usr/bin/time -f '%e' -o audit-v10/wall_seconds.txt \
             timeout --signal=TERM --kill-after=45s 35m \
             python scripts/evil_v10_production_chapter.py 2>&1 | tee audit-v10/run.log
-          cp -f v10-evil-chapter-1-report.json audit-v10/
-          cp -f v10-evil-chapter-1-map.json audit-v10/
-          cp -f v10-evil-chapter-1-source.txt audit-v10/
-          cp -f v10-evil-chapter-1-translated.txt audit-v10/
-          cp -f Evil_for_Evil_RU_V10_1.fb2 audit-v10/
+          status=${PIPESTATUS[0]}
+          echo "$status" > audit-v10/translator_exit_code.txt
+          for f in \
+            v10-evil-chapter-1-report.json \
+            v10-evil-chapter-1-map.json \
+            v10-evil-chapter-1-source.txt \
+            v10-evil-chapter-1-translated.txt \
+            Evil_for_Evil_RU_V10_1.fb2; do
+            if [ -f "$f" ]; then cp -f "$f" audit-v10/; fi
+          done
+          exit "$status"
 
       - name: Validate strict release gate
+        if: always()
         run: |
           python - <<'PY'
           import json
           from pathlib import Path
-          r=json.loads(Path('v10-evil-chapter-1-report.json').read_text('utf-8'))
+          report=Path('v10-evil-chapter-1-report.json')
+          assert report.exists(), 'v10 report missing'
+          r=json.loads(report.read_text('utf-8'))
           assert r['completed'] == r['segments'], (r['completed'], r['segments'])
           assert not r['missing_ids'], r['missing_ids'][:12]
+          assert r['chapter_selection']['segments'] == 135, r['chapter_selection']
+          assert r['chapter_selection']['included_groups'] == ['1'], r['chapter_selection']
+          assert r['chapter_selection']['next_numbered_chapter'] == '2', r['chapter_selection']
           assert r['final_integrity']['count'] == 0, r['final_integrity']
           assert r['final_hard']['count'] == 0, r['final_hard']
           assert Path(r['output']).stat().st_size > 10000
@@ -116,8 +130,10 @@ jobs:
           PY
 
       - name: Upload v10 chapter-one bakeoff artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Evil_for_Evil_v10_chapter_1
           path: audit-v10
+          if-no-files-found: warn
           retention-days: 7
