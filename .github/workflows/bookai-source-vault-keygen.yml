@@ -1,0 +1,51 @@
+name: bookai-source-vault-keygen
+
+on:
+  push:
+    branches: [full-literary-reference-v9]
+    paths:
+      - '.github/workflows/bookai-source-vault-keygen.yml'
+
+permissions:
+  contents: read
+
+env:
+  BOOKAI_VAULT_CACHE_KEY: bookai-source-vault-rsa-v1
+
+jobs:
+  keygen:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore existing private key
+        id: restore-key
+        uses: actions/cache/restore@v4
+        with:
+          path: .bookai-source-private.pem
+          key: ${{ env.BOOKAI_VAULT_CACHE_KEY }}
+      - name: Generate one-time RSA keypair
+        if: ${{ steps.restore-key.outputs.cache-hit != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out .bookai-source-private.pem
+          chmod 600 .bookai-source-private.pem
+      - name: Save private key to repository-scoped Actions cache
+        if: ${{ steps.restore-key.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .bookai-source-private.pem
+          key: ${{ env.BOOKAI_VAULT_CACHE_KEY }}
+      - name: Export public key
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s .bookai-source-private.pem
+          openssl pkey -in .bookai-source-private.pem -pubout -out bookai-source-public.pem
+          openssl pkey -pubin -in bookai-source-public.pem -text -noout >/dev/null
+          echo '[bookai-source-vault] public key ready; private key remains cache-only'
+      - name: Upload public key
+        uses: actions/upload-artifact@v4
+        with:
+          name: bookai-source-vault-public-key
+          path: bookai-source-public.pem
+          retention-days: 1
