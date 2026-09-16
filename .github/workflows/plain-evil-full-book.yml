@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: bookai-plain-evil-full-book
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -107,7 +107,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pip install -e '.[dev]' gigachat cryptography
+          pip install -e '.[dev]' gigachat
           python -m compileall -q src scripts
           pytest -q
 
@@ -124,23 +124,29 @@ jobs:
           print('[bookai] APIs configured; starting full-book production run')
           PY
 
-      - name: Materialize full Evil for Evil source
+      - name: Materialize plain full-book source from repository transport
         shell: bash
         run: |
           set -euo pipefail
-          url=$(cat .bookai-vault/evil-for-evil/source-url.txt)
-          test -n "$url" || { echo 'source URL is empty' >&2; exit 1; }
-          mkdir -p /tmp/bookai-source
-          curl --fail --location --retry 3 --retry-delay 2 "$url" -o /tmp/bookai-source/source.part00
-          test "$(wc -c < /tmp/bookai-source/source.part00)" -eq 475922 || { echo 'source envelope size mismatch' >&2; exit 1; }
-          echo '1eec8f86e9a0d8c30c9ed57aecaa6e7ac3f9a9fed5a2a7532c997d4f78f1872  /tmp/bookai-source/source.part00' | sha256sum -c -
-          python scripts/source_vault.py decrypt-source \
-            --parts-dir /tmp/bookai-source \
-            --output production_source.fb2 \
-            --sha256 98eee8037971ad496dd6d4fb362f4021a258acf3f6e57d53328430cc489569bf
-          rm -rf /tmp/bookai-source
+          mkdir -p /tmp/bookai-plain-source
+          cat transport/evil/source.bz2.b64.part0{0,1,2,3,4,5} > /tmp/bookai-plain-source/source.b64
+          need=$((476364 - 96000))
+          head -c "$need" transport/evil/source-tail-candidate.b64 >> /tmp/bookai-plain-source/source.b64
+          test "$(wc -c < /tmp/bookai-plain-source/source.b64)" -eq 476364
+          base64 -d /tmp/bookai-plain-source/source.b64 > /tmp/bookai-plain-source/source.fb2.bz2
+          python - <<'PY'
+          import bz2, hashlib
+          from pathlib import Path
+          src = Path('/tmp/bookai-plain-source/source.fb2.bz2')
+          out = Path('production_source.fb2')
+          data = bz2.decompress(src.read_bytes())
+          digest = hashlib.sha256(data).hexdigest()
+          print('[bookai-plain-source] bytes=', len(data), 'sha256=', digest)
+          if digest != '6a63f5dc4b5fbbf42050b74a8c22d8a63bebeebd2195598293f299ba337d9ede':
+              raise SystemExit('plain source reconstruction checksum mismatch')
+          out.write_bytes(data)
+          PY
           test -s production_source.fb2
-          echo '[bookai] full source ready as ordinary production_source.fb2'
 
       - name: Restore full-book checkpoint
         uses: actions/cache/restore@v4
@@ -149,9 +155,9 @@ jobs:
             .bookai-full-*
             .bookai-cache-production-literary-v1-*
             .bookai-cache-production-chapter-*
-          key: bookai-plain-evil-98eee803-${{ github.run_id }}-${{ github.run_attempt }}
+          key: bookai-plain-evil-6a63f5dc-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            bookai-plain-evil-98eee803-
+            bookai-plain-evil-6a63f5dc-
 
       - name: Translate complete Evil for Evil
         shell: bash
@@ -170,7 +176,7 @@ jobs:
             .bookai-full-*
             .bookai-cache-production-literary-v1-*
             .bookai-cache-production-chapter-*
-          key: bookai-plain-evil-98eee803-${{ github.run_id }}-${{ github.run_attempt }}
+          key: bookai-plain-evil-6a63f5dc-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Validate complete reading build
         if: success()
