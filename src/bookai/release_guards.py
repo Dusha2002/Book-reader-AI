@@ -12,6 +12,12 @@ _DONT_SEE_WHY_NOT_RE = re.compile(
     r"\b(?:there(?:'s| is)\s+)?no\s+reason\s+(?:why\s+)?not\b",
     re.I,
 )
+_BRIGANDINE_RE = re.compile(r"\bbrigandine\b", re.I)
+_DARNING_NEEDLE_EYE_RE = re.compile(r"\beye\s+of\s+(?:a|the)\s+darning[-\s]?needle\b", re.I)
+_LAST_LESSON_BUT_ONE_RE = re.compile(r"\blast\s+lesson\s+but\s+one\b", re.I)
+_BRIGANDINE_RU_RE = re.compile(r"\b(?:бригандин|бригантин)[а-яё]*\b", re.I)
+_NEEDLE_EYE_RU_RE = re.compile(r"\bушк[а-яё]*\b.{0,40}\bигл[а-яё]*\b", re.I | re.S)
+_PENULTIMATE_RU_RE = re.compile(r"\bпредпослед[а-яё]*\b", re.I)
 _WORD_RE = re.compile(r"[А-Яа-яЁё]{3,}")
 
 
@@ -85,6 +91,37 @@ def specialist_guard_routes(
                 )
             )
 
+        # Source-grounded lexical/idiomatic invariants. These are intentionally
+        # narrow: they fire only when the English source contains an unambiguous
+        # construction and the Russian target demonstrably lost that meaning.
+        if _BRIGANDINE_RE.search(source) and not _BRIGANDINE_RU_RE.search(current):
+            signals.append(
+                (
+                    "armor_terminology",
+                    30,
+                    "SOURCE says 'brigandine' (brigandine armour). Preserve that armour type explicitly as "
+                    "бригантина/бригандин; do NOT generalize it to кольчуга or generic armour.",
+                )
+            )
+        if _DARNING_NEEDLE_EYE_RE.search(source) and not _NEEDLE_EYE_RU_RE.search(current):
+            signals.append(
+                (
+                    "needle_eye_idiom",
+                    30,
+                    "SOURCE 'eye of a darning-needle' means the needle's eye: render naturally as "
+                    "'ушко штопальной иглы', not 'глазок/глаз иглы'.",
+                )
+            )
+        if _LAST_LESSON_BUT_ONE_RE.search(source) and not _PENULTIMATE_RU_RE.search(current):
+            signals.append(
+                (
+                    "penultimate_idiom",
+                    30,
+                    "SOURCE 'last lesson but one' means the penultimate lesson. Russian must preserve that ordinal sense "
+                    "with 'предпоследний/предпоследним', not a literal 'последний ... один'.",
+                )
+            )
+
         ratio = len(current) / max(1, len(source))
         suspicious_expansion = (
             (len(source) >= 160 and ratio >= 1.27)
@@ -108,14 +145,14 @@ def specialist_guard_routes(
 
         if not signals:
             continue
-        code, priority, reason = max(signals, key=lambda item: item[1])
+        code, priority, _ = max(signals, key=lambda item: item[1])
         rows.append(
             {
                 "id": segment.id,
                 "index": index,
                 "priority": priority,
                 "code": code,
-                "reason": reason,
+                "reason": " | ".join(item[2] for item in signals),
                 "guard_codes": [item[0] for item in signals],
                 "glossary_hits": [],
             }
