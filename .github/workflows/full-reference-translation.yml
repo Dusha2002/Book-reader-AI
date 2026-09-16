@@ -104,7 +104,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pip install -e '.[dev]' gigachat
+          pip install -e '.[dev]' gigachat cryptography
           python -m compileall -q src scripts
           pytest -q
           python - <<'PY'
@@ -136,6 +136,24 @@ jobs:
           print('[bookai-ultra-preflight] live request intentionally skipped; production runtime owns rate-limit retries')
           PY
           echo '[bookai] production_strategy=literary-production-v1 primary=gigachat-lightning specialist=gigachat-3-ultra fallback=deepseek source-only=yes gold-reference=no'
+      - name: Decrypt private full-book source
+        if: ${{ success() && github.event_name == 'push' && contains(github.event.head_commit.message, '[full-book]') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          url=$(cat .bookai-vault/evil-for-evil/source-url.txt)
+          test -n "$url" || { echo 'secure source URL is empty' >&2; exit 1; }
+          mkdir -p /tmp/bookai-private-source
+          curl --fail --location --retry 3 --retry-delay 2 "$url" -o /tmp/bookai-private-source/source.part00
+          test "$(wc -c < /tmp/bookai-private-source/source.part00)" -eq 475922 || { echo 'encrypted source size mismatch' >&2; exit 1; }
+          echo '1eec8f86e9a0d8c30c9ed57aecaa6e7ac3f9a9fed5a2a7532c997d4f78f1872  /tmp/bookai-private-source/source.part00' | sha256sum -c -
+          python scripts/source_vault.py decrypt-source \
+            --parts-dir /tmp/bookai-private-source \
+            --output production_source.fb2 \
+            --sha256 98eee8037971ad496dd6d4fb362f4021a258acf3f6e57d53328430cc489569bf
+          rm -rf /tmp/bookai-private-source
+          test -s production_source.fb2
+          echo '[bookai-vault] private Evil for Evil source decrypted only inside runner'
       - name: Restore regression gate
         id: benchmark-cache
         uses: actions/cache/restore@v4
@@ -252,6 +270,23 @@ jobs:
                 'review_required_chapters=', len(review),
                 'chapters_reused=', report.get('chapters_reused', 0))
           PY
+      - name: Seal private reading build
+        if: ${{ success() && github.event_name == 'push' && contains(github.event.head_commit.message, '[full-book]') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/source_vault.py seal-output \
+            --source production_translation_ru.fb2 \
+            --recipient-public 'f6kw2wphfD+/qoHOxeuwBJYuwrJJvtGUQutWGKvunkA=' \
+            --output production_translation_ru.encrypted.json
+          test -s production_translation_ru.encrypted.json
+          echo '[bookai-vault] Russian reading build sealed for local decryption'
+      - name: Remove private plaintext before artifact upload
+        if: ${{ always() && github.event_name == 'push' && contains(github.event.head_commit.message, '[full-book]') }}
+        shell: bash
+        run: |
+          rm -f production_source.fb2 production_translation_ru.fb2
+          rm -rf .bookai-full-*
       - name: Upload production evaluation
         if: always()
         uses: actions/upload-artifact@v4
@@ -259,11 +294,10 @@ jobs:
           name: production-literary-v1-source-only-evaluation
           path: |
             Devices_and_Desires_RU_*_EVAL_V9.fb2
-            production_translation_ru.*
+            production_translation_ru.encrypted.json
             chapter-v9-*.txt
             chapter-v9-*.json
             production-*.json
             production-*.log
-            .bookai-full-*/**
           if-no-files-found: ignore
           retention-days: 14
