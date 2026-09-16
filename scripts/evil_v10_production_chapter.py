@@ -10,6 +10,7 @@ from typing import Any
 from bookai.pipeline import _chapter_groups, _should_translate
 from bookai.v10 import DeterministicQA, V10Issue
 from bookai.v10_source_bible import _TITLE_WORDS
+from bookai.v10_production_runtime import install_v10_production_runtime_guard
 import bookai.v10_general_release as general_release
 import bookai.release_final as release_final
 import bookai.v10_release as v10_release
@@ -19,7 +20,7 @@ _BASE_SELECT = v10_release.select_numbered_chapter
 _BASE_CANDIDATES = release_final.FinalBookBibleBuilder._candidate_records
 _BASE_CLEAN_QUANTITY = general_release.FinalV10QualityQA._clean_quantity
 _BARE_NUMBER = re.compile(r"^\d+$")
-_PRODUCTION_HARDENING = "v10-production-hardening-2"
+_PRODUCTION_HARDENING = "v10-production-hardening-3"
 
 
 def _select_numeric_or_named_chapter(document, chapter_name: str):
@@ -70,20 +71,12 @@ def _select_numeric_or_named_chapter(document, chapter_name: str):
         "next_numbered_chapter": next_chapter or None,
         "boundary_complete": True,
         "segments": len(targets),
-        "selector": "production-bare-numeric-v2",
+        "selector": "production-bare-numeric-v3",
     }
 
 
 def _harden_source_only_candidates(segments) -> list[dict[str, Any]]:
-    """Reject common words masquerading as entities and normalize title+name candidates.
-
-    A single English token is unsafe as a hard name canon when the exact same token is
-    used lowercase anywhere in the source. This deterministically removes false names
-    such as sentence-initial `Come`, without weakening genuine names that remain
-    capitalized book-wide. Leading titles are stripped only when the remainder also
-    occurs independently, e.g. `Duke Valens` -> `Valens`; a unique proper phrase like
-    `King Fashion` remains untouched.
-    """
+    """Reject ordinary words/contraction prefixes and normalize title+name candidates."""
     rows = [dict(row) for row in _BASE_CANDIDATES(segments)]
     joined = "\n".join(str(segment.text or "") for segment in segments)
     lowercase_counts: Counter[str] = Counter(
@@ -93,6 +86,7 @@ def _harden_source_only_candidates(segments) -> list[dict[str, Any]]:
 
     merged: dict[tuple[str, str], dict[str, Any]] = {}
     rejected_common = 0
+    rejected_contraction_prefix = 0
     stripped_titles = 0
     for row in rows:
         kind = str(row.get("kind_hint") or "")
@@ -116,11 +110,19 @@ def _harden_source_only_candidates(segments) -> list[dict[str, Any]]:
                     row["title_evidence"] = max(1, int(row.get("title_evidence") or 0))
                     stripped_titles += 1
 
-            if " " not in candidate and lowercase_counts[candidate.casefold()] > 0:
-                # Even a model can misclassify a frequent sentence-initial verb as a
-                # person. Lowercase source evidence is decisive against HARD canon.
-                rejected_common += 1
-                continue
+            if " " not in candidate:
+                # Do not let the `Don` part of `Don't`, `Can` of `Can't`, etc. become
+                # a book-wide entity merely because a contraction starts a sentence.
+                standalone_count = len(re.findall(
+                    rf"(?<![A-Za-z]){re.escape(candidate)}(?![A-Za-z'])", joined,
+                    re.I,
+                ))
+                if standalone_count == 0:
+                    rejected_contraction_prefix += 1
+                    continue
+                if lowercase_counts[candidate.casefold()] > 0:
+                    rejected_common += 1
+                    continue
 
         key = (kind, candidate.casefold())
         row["candidate"] = candidate
@@ -138,7 +140,10 @@ def _harden_source_only_candidates(segments) -> list[dict[str, Any]]:
             int(current.get("title_evidence") or 0), int(row.get("title_evidence") or 0)
         )
         contexts = list(current.get("contexts") or [])
-        seen = {(str(x.get("chapter") or ""), str(x.get("text") or "")) for x in contexts if isinstance(x, dict)}
+        seen = {
+            (str(x.get("chapter") or ""), str(x.get("text") or ""))
+            for x in contexts if isinstance(x, dict)
+        }
         for ctx in row.get("contexts") or []:
             if not isinstance(ctx, dict):
                 continue
@@ -151,20 +156,15 @@ def _harden_source_only_candidates(segments) -> list[dict[str, Any]]:
     out = list(merged.values())
     print(
         f"[v10-production-entity-filter] input={len(rows)} output={len(out)} "
-        f"rejected_lowercase_common={rejected_common} stripped_titles={stripped_titles}",
+        f"rejected_lowercase_common={rejected_common} "
+        f"rejected_contraction_prefix={rejected_contraction_prefix} stripped_titles={stripped_titles}",
         flush=True,
     )
     return out
 
 
 def _safe_gender_issues(segment, target: str, memory) -> list[V10Issue]:
-    """Only hard-fail gender when the named character is explicitly the source actor.
-
-    The old detector flagged any masculine Russian verb in a paragraph merely because
-    a female character was mentioned elsewhere in that paragraph. Pronoun/speaker
-    continuity is handled by the dedicated speaker guard, so the deterministic gender
-    gate should require direct source attribution to avoid false publication failures.
-    """
+    """Hard-fail gender only when the named character is explicitly the source actor."""
     source = str(segment.text or "")
     low = str(target or "").casefold().replace("ё", "е")
     out: list[V10Issue] = []
@@ -201,7 +201,7 @@ def _clean_quantity_with_compounds(cls, source: str, target: str) -> dict[str, A
     quantity = dict(_BASE_CLEAN_QUANTITY(source, target))
     low = str(target or "").casefold().replace("ё", "е")
     dimensions = {
-        "two": (2, r"\bдвумерн\w*\b"),
+        "two": (2, r"\b(?:двумерн|двухмерн)\w*\b"),
         "three": (3, r"\bтрехмерн\w*\b"),
         "four": (4, r"\bчетырехмерн\w*\b"),
         "five": (5, r"\bпятимерн\w*\b"),
@@ -233,6 +233,7 @@ def _fingerprint(path: Path) -> str:
 
 
 def _install_production_hardening() -> None:
+    install_v10_production_runtime_guard()
     v10_release.select_numbered_chapter = _select_numeric_or_named_chapter
     release_final.FinalBookBibleBuilder._candidate_records = staticmethod(_harden_source_only_candidates)
     DeterministicQA._gender_issues = staticmethod(_safe_gender_issues)
@@ -241,8 +242,6 @@ def _install_production_hardening() -> None:
 
 def main() -> None:
     _install_production_hardening()
-    # Import only after production hardening is installed so release9 freezes the
-    # hardened book-memory and QA callsites rather than the experimental defaults.
     import chapter_translation_v10_release9 as release9
 
     source = Path(os.getenv("BOOKAI_SOURCE") or "Evil for evil.fb2")
