@@ -36,9 +36,10 @@ jobs:
       BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
       BOOKAI_GIGACHAT_TIMEOUT: '75'
       BOOKAI_GIGACHAT_RETRIES: '3'
-      BOOKAI_RATE_LIMIT_ATTEMPTS: '8'
-      BOOKAI_RATE_LIMIT_BACKOFF: '2'
-      BOOKAI_RATE_LIMIT_MAX_SLEEP: '15'
+      BOOKAI_V10_GIGA_RATE_ATTEMPTS: '7'
+      BOOKAI_V10_GIGA_RATE_BACKOFF: '1.8'
+      BOOKAI_V10_GIGA_RATE_MAX_SLEEP: '15'
+      BOOKAI_V10_GIGA_MIN_INTERVAL: '0.7'
       BOOKAI_V10_NAME_MAX: '96'
       BOOKAI_V10_NAME_BATCH: '20'
       BOOKAI_V10_TERM_BATCH: '16'
@@ -91,6 +92,7 @@ jobs:
         id: translate
         continue-on-error: true
         run: |
+          set +e
           set -o pipefail
           rm -rf audit-v10 .bookai-cache-v10-* .bookai-cache-v10-production-hardening-*
           mkdir -p audit-v10
