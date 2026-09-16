@@ -62,6 +62,7 @@ jobs:
       BOOKAI_REQUEST_TIMEOUT: '45'
       BOOKAI_ANALYZER_REQUEST_TIMEOUT: '60'
       BOOKAI_ANALYSIS_CHARS: '32000'
+      BOOKAI_SOURCE_SAMPLE_WINDOWS: '8'
       BOOKAI_CONTEXT_WORKERS: '3'
       BOOKAI_RELIABILITY_WORKERS: '2'
       BOOKAI_V9F_CUE_WORDS: '5'
@@ -108,9 +109,16 @@ jobs:
           pytest -q
           python - <<'PY'
           from bookai.gigachat_runtime_guard import is_rate_limit_error
+          from scripts.production_book_translation import _stratified_source_sample
+          from types import SimpleNamespace
           assert is_rate_limit_error(RuntimeError('HTTP 429 Too Many Requests'))
           assert not is_rate_limit_error(RuntimeError('HTTP 400 invalid response_format schema'))
-          print('[bookai] runtime guard classification ok')
+          rows = [SimpleNamespace(text=f'window-{i}-' + ('x' * 900)) for i in range(100)]
+          sample = _stratified_source_sample(rows, 8000)
+          assert 'window-0-' in sample
+          assert any(f'window-{i}-' in sample for i in range(90, 100))
+          assert len(sample) <= 8000
+          print('[bookai] runtime guard + stratified source sample ok')
           PY
       - name: Verify API configuration
         shell: bash
@@ -150,15 +158,35 @@ jobs:
             --fail-on-hard \
             --fail-on-objective \
             chapter-v9-*-translation-map.json
+      - name: Restore reading-build checkpoint
+        if: ${{ success() && github.event_name == 'push' && contains(github.event.head_commit.message, '[full-book]') }}
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .bookai-full-*
+            .bookai-cache-production-literary-v1-*
+            .bookai-cache-production-chapter-*
+          key: bookai-reading-${{ hashFiles('production_source.fb2') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            bookai-reading-${{ hashFiles('production_source.fb2') }}-
       - name: Translate complete reading book after green sample
         if: ${{ success() && github.event_name == 'push' && contains(github.event.head_commit.message, '[full-book]') }}
         shell: bash
         run: |
           set -euo pipefail
           test -f production_source.fb2 || { echo 'production_source.fb2 is missing' >&2; exit 1; }
-          echo '[bookai] benchmark sample and regression gate passed; starting source-isolated reading build'
+          echo '[bookai] benchmark sample and regression gate passed; starting resumable source-isolated reading build'
           timeout --signal=TERM --kill-after=60s 300m \
             python scripts/production_book_full_translation.py 2>&1 | tee production-full-book.log
+      - name: Save reading-build checkpoint
+        if: ${{ always() && github.event_name == 'push' && contains(github.event.head_commit.message, '[full-book]') }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .bookai-full-*
+            .bookai-cache-production-literary-v1-*
+            .bookai-cache-production-chapter-*
+          key: bookai-reading-${{ hashFiles('production_source.fb2') }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Validate complete reading build
         if: ${{ success() && github.event_name == 'push' && contains(github.event.head_commit.message, '[full-book]') }}
         shell: bash
@@ -178,7 +206,8 @@ jobs:
           review = report.get('review_required_chapters') or []
           print('[bookai-full-release] reading_build_complete=true status=', report.get('status'),
                 'segments=', report['segments_total'], 'bytes=', output.stat().st_size,
-                'review_required_chapters=', len(review))
+                'review_required_chapters=', len(review),
+                'chapters_reused=', report.get('chapters_reused', 0))
           PY
       - name: Upload production evaluation
         if: always()
@@ -192,5 +221,6 @@ jobs:
             chapter-v9-*.json
             production-*.json
             production-*.log
+            .bookai-full-*/**
           if-no-files-found: ignore
           retention-days: 14
