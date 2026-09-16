@@ -11,6 +11,13 @@ from bookai.pipeline import _chapter_groups, _should_translate
 from bookai.v10 import DeterministicQA, V10Issue
 from bookai.v10_source_bible import _TITLE_WORDS
 from bookai.v10_production_runtime import install_v10_production_runtime_guard
+from bookai.v10_semantic_hardening import (
+    build_entity_family_canon,
+    canon_inflection_present,
+    install_entity_family_memory,
+    semantic_hardening_issues,
+    source_has_cross_clause_repeat,
+)
 import bookai.v10_general_release as general_release
 import bookai.release_final as release_final
 import bookai.v10_release as v10_release
@@ -19,8 +26,10 @@ import bookai.v10_release as v10_release
 _BASE_SELECT = v10_release.select_numbered_chapter
 _BASE_CANDIDATES = release_final.FinalBookBibleBuilder._candidate_records
 _BASE_CLEAN_QUANTITY = general_release.FinalV10QualityQA._clean_quantity
+_BASE_BIBLE_BUILD = release_final.FinalBookBibleBuilder.build
+_BASE_FINAL_QA_SCAN = release_final.FinalV10QualityQA.scan_segment
 _BARE_NUMBER = re.compile(r"^\d+$")
-_PRODUCTION_HARDENING = "v10-production-hardening-3"
+_PRODUCTION_HARDENING = "v10-production-hardening-4"
 
 
 def _select_numeric_or_named_chapter(document, chapter_name: str):
@@ -71,7 +80,7 @@ def _select_numeric_or_named_chapter(document, chapter_name: str):
         "next_numbered_chapter": next_chapter or None,
         "boundary_complete": True,
         "segments": len(targets),
-        "selector": "production-bare-numeric-v3",
+        "selector": "production-bare-numeric-v4",
     }
 
 
@@ -224,6 +233,38 @@ def _clean_quantity_with_compounds(cls, source: str, target: str) -> dict[str, A
     return quantity
 
 
+def _production_bible_build(self, segments):
+    memory, stats = _BASE_BIBLE_BUILD(self, segments)
+    family_cache = Path(self.cache_path).with_name("entity-family-canon.json")
+    families, family_stats = build_entity_family_canon(self.backend, segments, family_cache)
+    install_entity_family_memory(memory, families)
+    merged = dict(stats)
+    merged["entity_family_canon"] = family_stats
+    merged["entity_family_count"] = len(families)
+    return memory, merged
+
+
+def _production_final_qa_scan(self, segment, target: str, memory):
+    base_issues = list(_BASE_FINAL_QA_SCAN(self, segment, target, memory))
+    filtered: list[V10Issue] = []
+    for issue in base_issues:
+        if issue.code == "name_canon":
+            match = re.search(r"book-wide Russian canon '([^']+)'", str(issue.reason or ""))
+            if match and canon_inflection_present(match.group(1), target):
+                continue
+        if issue.code == "duplicate_content" and source_has_cross_clause_repeat(str(segment.text or "")):
+            continue
+        filtered.append(issue)
+
+    seen = {(issue.code, issue.reason) for issue in filtered}
+    for issue in semantic_hardening_issues(segment, target, memory):
+        key = (issue.code, issue.reason)
+        if key not in seen:
+            filtered.append(issue)
+            seen.add(key)
+    return filtered
+
+
 def _fingerprint(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as fh:
@@ -236,6 +277,8 @@ def _install_production_hardening() -> None:
     install_v10_production_runtime_guard()
     v10_release.select_numbered_chapter = _select_numeric_or_named_chapter
     release_final.FinalBookBibleBuilder._candidate_records = staticmethod(_harden_source_only_candidates)
+    release_final.FinalBookBibleBuilder.build = _production_bible_build
+    release_final.FinalV10QualityQA.scan_segment = _production_final_qa_scan
     DeterministicQA._gender_issues = staticmethod(_safe_gender_issues)
     general_release.FinalV10QualityQA._clean_quantity = classmethod(_clean_quantity_with_compounds)
 
