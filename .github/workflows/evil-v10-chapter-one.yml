@@ -9,6 +9,7 @@ on:
       - scripts/chapter_translation_v10_release9.py
       - src/bookai/v10*.py
       - src/bookai/release_final.py
+      - tests/test_v10*.py
       - Evil for evil.fb2
   workflow_dispatch:
 
@@ -73,7 +74,8 @@ jobs:
             tests/test_v10_release_hardening.py \
             tests/test_v10_general_release.py \
             tests/test_v10_semantic_profile.py \
-            tests/test_v10_technical_notation.py
+            tests/test_v10_technical_notation.py \
+            tests/test_v10_semantic_hardening.py
 
       - name: Verify source and API configuration
         run: |
