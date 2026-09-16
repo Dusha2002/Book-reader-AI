@@ -1,0 +1,123 @@
+name: evil-v10-chapter-one
+
+on:
+  push:
+    branches: [v10-production-candidate]
+    paths:
+      - .github/workflows/evil-v10-chapter-one.yml
+      - scripts/evil_v10_production_chapter.py
+      - scripts/chapter_translation_v10_release9.py
+      - src/bookai/v10*.py
+      - src/bookai/release_final.py
+      - Evil for evil.fb2
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_BASE_URL: https://api.deepseek.com
+      BOOKAI_GATE_MODEL: deepseek-flash
+      BOOKAI_REASONING: none
+      BOOKAI_RETRY_ATTEMPTS: '5'
+      BOOKAI_REQUEST_TIMEOUT: '90'
+      GIGACHAT_AUTH_KEY: ${{ secrets.GIGACHAT_AUTH_KEY }}
+      GIGACHAT_SCOPE: GIGACHAT_API_PERS
+      GIGACHAT_BASE_URL: https://api.giga.chat/v1
+      BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
+      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '8'
+      BOOKAI_GIGACHAT_BATCH_CHARS: '6500'
+      BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
+      BOOKAI_GIGACHAT_TIMEOUT: '75'
+      BOOKAI_GIGACHAT_RETRIES: '3'
+      BOOKAI_RATE_LIMIT_ATTEMPTS: '8'
+      BOOKAI_RATE_LIMIT_BACKOFF: '2'
+      BOOKAI_RATE_LIMIT_MAX_SLEEP: '15'
+      BOOKAI_V10_NAME_MAX: '96'
+      BOOKAI_V10_NAME_BATCH: '20'
+      BOOKAI_V10_TERM_BATCH: '16'
+      BOOKAI_V10_DEEP_MAX: '10'
+      BOOKAI_V10_RELEASE_DEEP_MAX: '20'
+      BOOKAI_V10_RESIDUAL_DEEP_MAX: '16'
+      BOOKAI_V10_EDITORIAL_MAX: '8'
+      BOOKAI_V10_RECOVERY_BATCH: '4'
+      BOOKAI_V10_JSON_RECOVERY_BATCH: '3'
+      BOOKAI_SOURCE: Evil for evil.fb2
+      BOOKAI_MEMORY_SOURCE: Evil for evil.fb2
+      BOOKAI_CHAPTER_NAME: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install and run hardened v10 regression suite
+        run: |
+          set -euo pipefail
+          pip install -e '.[dev]' gigachat
+          python -m compileall -q src/bookai scripts/evil_v10_production_chapter.py scripts/chapter_translation_v10_release9.py
+          pytest -q \
+            tests/test_v10_architecture.py \
+            tests/test_v10_source_only.py \
+            tests/test_v10_integrity_quantity.py \
+            tests/test_v10_clause_fidelity.py \
+            tests/test_v10_deepseek_routing.py \
+            tests/test_v10_release_hardening.py \
+            tests/test_v10_general_release.py \
+            tests/test_v10_semantic_profile.py \
+            tests/test_v10_technical_notation.py
+
+      - name: Verify source and API configuration
+        run: |
+          set -euo pipefail
+          test -s "Evil for evil.fb2"
+          test -n "${GIGACHAT_AUTH_KEY:-}"
+          test -n "${DEEPSEEK_API_KEY:-}"
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          p=Path('Evil for evil.fb2')
+          print('[evil-v10-source]', p.stat().st_size, hashlib.sha256(p.read_bytes()).hexdigest())
+          PY
+
+      - name: Translate chapter 1 with hardened v10
+        run: |
+          set -euo pipefail
+          rm -rf audit-v10 .bookai-cache-v10-*
+          mkdir -p audit-v10
+          /usr/bin/time -f '%e' -o audit-v10/wall_seconds.txt \
+            timeout --signal=TERM --kill-after=45s 35m \
+            python scripts/evil_v10_production_chapter.py 2>&1 | tee audit-v10/run.log
+          cp -f v10-evil-chapter-1-report.json audit-v10/
+          cp -f v10-evil-chapter-1-map.json audit-v10/
+          cp -f v10-evil-chapter-1-source.txt audit-v10/
+          cp -f v10-evil-chapter-1-translated.txt audit-v10/
+          cp -f Evil_for_Evil_RU_V10_1.fb2 audit-v10/
+
+      - name: Validate strict release gate
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          r=json.loads(Path('v10-evil-chapter-1-report.json').read_text('utf-8'))
+          assert r['completed'] == r['segments'], (r['completed'], r['segments'])
+          assert not r['missing_ids'], r['missing_ids'][:12]
+          assert r['final_integrity']['count'] == 0, r['final_integrity']
+          assert r['final_hard']['count'] == 0, r['final_hard']
+          assert Path(r['output']).stat().st_size > 10000
+          print('[v10-release-ok]', {k:r.get(k) for k in ('version','chapter','segments','source_chars','timing')})
+          PY
+
+      - name: Upload v10 chapter-one bakeoff artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Evil_for_Evil_v10_chapter_1
+          path: audit-v10
+          retention-days: 7
