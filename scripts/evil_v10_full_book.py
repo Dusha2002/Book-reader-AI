@@ -93,7 +93,14 @@ def _validate_checkpoint(chapter: str, targets, paths: dict[str, Path]) -> tuple
     return translations, report
 
 
-def _run_chapter(chapter: str, targets, root: Path, bible: Path) -> tuple[dict[str, str], dict[str, Any], bool]:
+def _run_chapter(
+    chapter: str,
+    targets,
+    root: Path,
+    bible: Path,
+    *,
+    include_prelude: bool = False,
+) -> tuple[dict[str, str], dict[str, Any], bool]:
     paths = _chapter_paths(root, chapter)
     restored = _validate_checkpoint(chapter, targets, paths)
     if restored is not None:
@@ -121,15 +128,17 @@ def _run_chapter(chapter: str, targets, root: Path, bible: Path) -> tuple[dict[s
         "BOOKAI_V10_MAP": str(paths["map"]),
         "BOOKAI_V10_SOURCE_TXT": str(paths["source_txt"]),
         "BOOKAI_V10_TRANSLATED_TXT": str(paths["translated_txt"]),
+        "BOOKAI_V10_INCLUDE_PRELUDE": "1" if include_prelude else "0",
     })
 
     print(
-        f"[v10-full-chapter-start] chapter={chapter} segments={len(targets)} chars={sum(len(s.text) for s in targets)}",
+        f"[v10-full-chapter-start] chapter={chapter} segments={len(targets)} "
+        f"chars={sum(len(s.text) for s in targets)} prelude={include_prelude}",
         flush=True,
     )
     started = time.perf_counter()
     result = subprocess.run(
-        [sys.executable, "scripts/evil_v10_production_chapter.py"],
+        [sys.executable, "scripts/evil_v10_production_chapter_full.py"],
         env=env,
         check=False,
     )
@@ -167,7 +176,9 @@ def main() -> None:
     bible = root / "memory" / "book-bible.json"
     bible.parent.mkdir(parents=True, exist_ok=True)
 
-    # Use the exact same selector/hardening as the successful chapter-one bakeoff.
+    # Use the exact same hardening as the successful chapter-one bakeoff. The only
+    # full-book addition is that leading translatable front matter is attached to the
+    # first numbered chapter so every source segment is covered exactly once.
     production._install_production_hardening()
     document = load_book(SOURCE)
     all_targets = [segment for segment in document.segments if _should_translate(segment.text)]
@@ -183,34 +194,49 @@ def main() -> None:
     if not chapter_labels:
         raise RuntimeError(f"no numeric chapters found; groups={[name for name, _ in groups][:50]}")
 
+    # First compute the normal literary chapter windows. The final numbered chapter
+    # already absorbs any trailing non-numbered groups by selector design.
     chapter_targets: dict[str, list] = {}
-    coverage: list[str] = []
-    coverage_seen: set[str] = set()
     for label in chapter_labels:
         _all, matched, targets, selection = production._select_numeric_or_named_chapter(document, label)
         if str(matched).strip() != label or not selection.get("boundary_complete"):
             raise RuntimeError(f"chapter selector failed for {label}: {selection}")
-        ids = [segment.id for segment in targets]
+        chapter_targets[label] = list(targets)
+
+    # The FB2 contains two translatable front-matter segments before chapter 1. More
+    # generally, attach *any* leading residual window to the first chapter, but fail
+    # closed if an uncovered segment occurs anywhere else in the book.
+    all_ids = [segment.id for segment in all_targets]
+    position = {sid: i for i, sid in enumerate(all_ids)}
+    first_label = chapter_labels[0]
+    first_rows = chapter_targets[first_label]
+    first_position = position[first_rows[0].id]
+    prelude = all_targets[:first_position]
+    if prelude:
+        chapter_targets[first_label] = list(prelude) + first_rows
+
+    coverage: list[str] = []
+    coverage_seen: set[str] = set()
+    for label in chapter_labels:
+        ids = [segment.id for segment in chapter_targets[label]]
         duplicated = [sid for sid in ids if sid in coverage_seen]
         if duplicated:
             raise RuntimeError(f"chapter overlap at {label}: {duplicated[:10]}")
         coverage.extend(ids)
         coverage_seen.update(ids)
-        chapter_targets[label] = targets
 
-    all_ids = [segment.id for segment in all_targets]
     if coverage != all_ids:
         covered = set(coverage)
         missing = [sid for sid in all_ids if sid not in covered]
         extra = [sid for sid in coverage if sid not in set(all_ids)]
         raise RuntimeError(
-            f"numeric chapter coverage is not exact: chapters={len(chapter_labels)} "
+            f"chapter coverage is not exact after prelude attachment: chapters={len(chapter_labels)} "
             f"covered={len(coverage)}/{len(all_ids)} missing={missing[:20]} extra={extra[:20]}"
         )
 
     print(
         f"[v10-full-plan] chapters={len(chapter_labels)} segments={len(all_targets)} "
-        f"source_sha256={source_sha} labels={chapter_labels}",
+        f"prelude_segments={len(prelude)} source_sha256={source_sha} labels={chapter_labels}",
         flush=True,
     )
 
@@ -220,7 +246,13 @@ def main() -> None:
     completed_labels: list[str] = []
 
     for index, label in enumerate(chapter_labels, 1):
-        chapter_map, chapter_report, reused = _run_chapter(label, chapter_targets[label], root, bible)
+        chapter_map, chapter_report, reused = _run_chapter(
+            label,
+            chapter_targets[label],
+            root,
+            bible,
+            include_prelude=bool(prelude) and label == first_label,
+        )
         for sid, target in chapter_map.items():
             previous = translations.get(sid)
             if previous is not None and previous != target:
@@ -237,6 +269,7 @@ def main() -> None:
             "final_integrity": (chapter_report.get("final_integrity") or {}).get("count"),
             "timing": chapter_report.get("timing") or {},
             "reused": reused,
+            "includes_prelude": bool(prelude) and label == first_label,
         })
         _atomic_json(PROGRESS, {
             "source_sha256": source_sha,
@@ -245,6 +278,7 @@ def main() -> None:
             "chapters_completed": len(completed_labels),
             "completed_labels": completed_labels,
             "reused_chapters": reused_chapters,
+            "prelude_segments": len(prelude),
             "segments_total": len(all_targets),
             "segments_completed": len(translations),
             "current_chapter": label,
@@ -275,6 +309,7 @@ def main() -> None:
         "chapters_total": len(chapter_labels),
         "chapters_completed": len(completed_labels),
         "chapter_labels": chapter_labels,
+        "prelude_segments": len(prelude),
         "reused_chapters": reused_chapters,
         "segments_total": len(all_targets),
         "segments_merged": len(translations),
@@ -291,7 +326,8 @@ def main() -> None:
     _atomic_json(PROVENANCE, {
         "source_sha256": source_sha,
         "pipeline": "v10-production-hardening-4",
-        "selector": "production-bare-numeric-v4",
+        "selector": "production-bare-numeric-v4+full-book-prelude",
+        "prelude_segments": len(prelude),
         "chapters": chapter_reports,
         "segment_ids": all_ids,
         "book_bible": str(bible),
@@ -303,6 +339,7 @@ def main() -> None:
         "chapters_completed": len(completed_labels),
         "completed_labels": completed_labels,
         "reused_chapters": reused_chapters,
+        "prelude_segments": len(prelude),
         "segments_total": len(all_targets),
         "segments_completed": len(translations),
         "reading_build_complete": True,
