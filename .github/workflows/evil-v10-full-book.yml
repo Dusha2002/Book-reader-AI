@@ -6,11 +6,12 @@ on:
     paths:
       - .github/workflows/evil-v10-full-book.yml
       - scripts/evil_v10_full_book.py
+      - scripts/evil_v10_production_chapter_full.py
   workflow_dispatch:
 
 concurrency:
   group: bookai-evil-v10-full-book
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -67,7 +68,12 @@ jobs:
         run: |
           set -euo pipefail
           pip install -e '.[dev]' gigachat
-          python -m compileall -q src/bookai scripts/evil_v10_production_chapter.py scripts/evil_v10_full_book.py scripts/chapter_translation_v10_release9.py
+          python -m compileall -q \
+            src/bookai \
+            scripts/evil_v10_production_chapter.py \
+            scripts/evil_v10_production_chapter_full.py \
+            scripts/evil_v10_full_book.py \
+            scripts/chapter_translation_v10_release9.py
           pytest -q \
             tests/test_v10_architecture.py \
             tests/test_v10_source_only.py \
@@ -127,13 +133,15 @@ jobs:
           from pathlib import Path
           r=json.loads(Path('v10-evil-full-book-report.json').read_text('utf-8'))
           assert r['reading_build_complete'] is True, r
-          assert r['chapters_completed'] == r['chapters_total'] == 31, (r['chapters_completed'], r['chapters_total'])
+          assert r['chapters_completed'] == r['chapters_total'], (r['chapters_completed'], r['chapters_total'])
+          assert r['chapters_total'] == 28, r['chapters_total']
+          assert r['prelude_segments'] == 2, r['prelude_segments']
           assert r['segments_merged'] == r['segments_total'] == 4767, (r['segments_merged'], r['segments_total'])
           assert r['final_hard_total'] == 0, r['final_hard_total']
           assert r['final_integrity_total'] == 0, r['final_integrity_total']
           out=Path(r['output'])
           assert out.exists() and out.stat().st_size > 10000
-          print('[v10-full-release-ok]', {'chapters':r['chapters_total'], 'segments':r['segments_total'], 'bytes':out.stat().st_size, 'elapsed':r['elapsed_seconds']})
+          print('[v10-full-release-ok]', {'chapters':r['chapters_total'], 'prelude':r['prelude_segments'], 'segments':r['segments_total'], 'bytes':out.stat().st_size, 'elapsed':r['elapsed_seconds']})
           PY
 
       - name: Upload complete hardened-v10 book
