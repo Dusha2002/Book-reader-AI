@@ -47,22 +47,7 @@ def _read_envelope(path: Path) -> dict:
     return obj
 
 
-def decrypt_source(inp: Path, out: Path) -> None:
-    env = _read_envelope(inp)
-    private = _derive_source_private()
-    peer = X25519PublicKey.from_public_bytes(_b64d(env["ephemeral_public_key"]))
-    shared = private.exchange(peer)
-    key = _hkdf(shared, salt=_b64d(env["salt"]), info=_SOURCE_INFO)
-    compressed = AESGCM(key).decrypt(_b64d(env["nonce"]), _b64d(env["ciphertext"]), _b64d(env["aad"]))
-    plain = bz2.decompress(compressed)
-    digest = hashlib.sha256(plain).hexdigest()
-    if digest != env.get("plaintext_sha256"):
-        raise SystemExit(f"source sha256 mismatch: expected={env.get('plaintext_sha256')} actual={digest}")
-    out.write_bytes(plain)
-    print(f"[bookai-source-vault] decrypted bytes={len(plain)} sha256={digest}", flush=True)
-
-
-def encrypt_output(inp: Path, out: Path, recipient_public_key_b64: str) -> None:
+def _encrypt(inp: Path, out: Path, recipient_public_key_b64: str, *, info: bytes, aad: bytes) -> None:
     plain = inp.read_bytes()
     recipient = X25519PublicKey.from_public_bytes(_b64d(recipient_public_key_b64.strip()))
     ephemeral = X25519PrivateKey.generate()
@@ -70,15 +55,14 @@ def encrypt_output(inp: Path, out: Path, recipient_public_key_b64: str) -> None:
     salt = os.urandom(16)
     nonce = os.urandom(12)
     shared = ephemeral.exchange(recipient)
-    key = _hkdf(shared, salt=salt, info=_OUTPUT_INFO)
-    aad = b"bookai:evil-for-evil:translation-ru:v1"
+    key = _hkdf(shared, salt=salt, info=info)
     compressed = bz2.compress(plain, compresslevel=9)
     ciphertext = AESGCM(key).encrypt(nonce, compressed, aad)
     env = {
         "version": 1,
         "cipher": "X25519+HKDF-SHA256+AES-256-GCM",
         "compression": "bz2",
-        "info": _OUTPUT_INFO.decode("ascii"),
+        "info": info.decode("ascii"),
         "aad": _b64e(aad),
         "ephemeral_public_key": _b64e(ephemeral_public),
         "salt": _b64e(salt),
@@ -91,9 +75,48 @@ def encrypt_output(inp: Path, out: Path, recipient_public_key_b64: str) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(env, separators=(",", ":")), "utf-8")
     print(
-        f"[bookai-output-vault] encrypted bytes={len(plain)} envelope_bytes={out.stat().st_size} "
-        f"sha256={env['plaintext_sha256']}",
+        f"[bookai-vault] encrypted bytes={len(plain)} envelope_bytes={out.stat().st_size} "
+        f"info={env['info']} sha256={env['plaintext_sha256']}",
         flush=True,
+    )
+
+
+def decrypt_source(inp: Path, out: Path) -> None:
+    env = _read_envelope(inp)
+    info = str(env.get("info") or "").encode("ascii")
+    if info != _SOURCE_INFO:
+        raise SystemExit(f"source/checkpoint envelope has wrong info: {info!r}")
+    private = _derive_source_private()
+    peer = X25519PublicKey.from_public_bytes(_b64d(env["ephemeral_public_key"]))
+    shared = private.exchange(peer)
+    key = _hkdf(shared, salt=_b64d(env["salt"]), info=_SOURCE_INFO)
+    compressed = AESGCM(key).decrypt(_b64d(env["nonce"]), _b64d(env["ciphertext"]), _b64d(env["aad"]))
+    plain = bz2.decompress(compressed)
+    digest = hashlib.sha256(plain).hexdigest()
+    if digest != env.get("plaintext_sha256"):
+        raise SystemExit(f"source sha256 mismatch: expected={env.get('plaintext_sha256')} actual={digest}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(plain)
+    print(f"[bookai-source-vault] decrypted bytes={len(plain)} sha256={digest}", flush=True)
+
+
+def encrypt_for_source(inp: Path, out: Path, recipient_public_key_b64: str) -> None:
+    _encrypt(
+        inp,
+        out,
+        recipient_public_key_b64,
+        info=_SOURCE_INFO,
+        aad=b"bookai:evil-for-evil:checkpoint:v1",
+    )
+
+
+def encrypt_output(inp: Path, out: Path, recipient_public_key_b64: str) -> None:
+    _encrypt(
+        inp,
+        out,
+        recipient_public_key_b64,
+        info=_OUTPUT_INFO,
+        aad=b"bookai:evil-for-evil:translation-ru:v1",
     )
 
 
@@ -105,6 +128,11 @@ def main() -> int:
     dec.add_argument("--input", required=True, type=Path)
     dec.add_argument("--output", required=True, type=Path)
 
+    src = sub.add_parser("encrypt-for-source")
+    src.add_argument("--input", required=True, type=Path)
+    src.add_argument("--output", required=True, type=Path)
+    src.add_argument("--recipient-public-key", required=True)
+
     enc = sub.add_parser("encrypt-output")
     enc.add_argument("--input", required=True, type=Path)
     enc.add_argument("--output", required=True, type=Path)
@@ -113,6 +141,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.command == "decrypt-source":
         decrypt_source(args.input, args.output)
+    elif args.command == "encrypt-for-source":
+        encrypt_for_source(args.input, args.output, args.recipient_public_key)
     else:
         encrypt_output(args.input, args.output, args.recipient_public_key)
     return 0
