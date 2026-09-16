@@ -15,6 +15,8 @@ v9s, v9t, v9 = v9af.v9s, v9af.v9t, v9af.v9
 
 _BASE_QUALITY = v9af._BASE_QUALITY
 _LATIN = v9af._LATIN_WORD_RE
+_RU_TOKEN_RE = re.compile(r"[А-Яа-яЁё]+")
+_REGISTER_PARTICLES = {"не", "ну", "пожалуйста", "просто", "так", "ладно"}
 
 
 def _objective_issues(targets, translated) -> list[dict[str, Any]]:
@@ -71,6 +73,80 @@ def _issue_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _candidate_clears_objective_issues(targets, translated, sid: str, candidate: str) -> bool:
+    if not candidate:
+        return False
+    probe = dict(translated)
+    probe[sid] = candidate
+    return not any(str(row.get("id") or "") == sid for row in _objective_issues(targets, probe))
+
+
+def _formalize_imperative_token(word: str) -> str:
+    """Conservative 2sg -> polite/plural imperative rewrite.
+
+    Russian productive imperative morphology normally forms the polite/plural form
+    by adding -те. Reflexive imperatives need a small deterministic spelling
+    adjustment. This helper is used only after the objective register detector has
+    already proved that the turn is a request in strongly formal context.
+    """
+    lower = word.casefold()
+    if lower.endswith("тесь") or lower.endswith("йте") or lower.endswith("ите"):
+        return word
+    if lower.endswith("ись"):
+        replacement = word[:-3] + "итесь"
+    elif lower.endswith("ься"):
+        replacement = word[:-3] + "ьтесь"
+    elif lower.endswith("йся"):
+        replacement = word[:-3] + "йтесь"
+    elif lower.endswith("ся"):
+        replacement = word[:-2] + "тесь"
+    else:
+        replacement = word + "те"
+    return replacement
+
+
+def _deterministic_register_fallback(targets, translated, issues) -> list[str]:
+    """Close only proven formal-register residuals without inventing content.
+
+    We do not guess whether a turn should be formal here: `_objective_issues` has
+    already established that from the English request plus neighboring dialogue.
+    The rewrite changes only the first imperative-like Russian token and is accepted
+    only if the same objective validator becomes clean for that segment.
+    """
+    changed: list[str] = []
+    for row in issues:
+        if "address_register" not in (row.get("codes") or []):
+            continue
+        i = int(row["index"])
+        seg = targets[i]
+        sid = str(seg.id)
+        if not v9af._REQUEST_SOURCE_RE.search(str(seg.text or "")):
+            continue
+        current = str(translated.get(sid) or "")
+        matches = list(_RU_TOKEN_RE.finditer(current))
+        target_match = None
+        for match in matches:
+            if match.group(0).casefold() in _REGISTER_PARTICLES:
+                continue
+            target_match = match
+            break
+        if target_match is None:
+            continue
+        original = target_match.group(0)
+        formal = _formalize_imperative_token(original)
+        if formal == original:
+            continue
+        candidate = current[: target_match.start()] + formal + current[target_match.end() :]
+        if _candidate_clears_objective_issues(targets, translated, sid, candidate):
+            translated[sid] = candidate
+            changed.append(sid)
+            print(
+                f"[v9ag-register-fallback] id={sid} {original!r}->{formal!r}",
+                flush=True,
+            )
+    return changed
+
+
 def _strict_retry_batch(targets, translated, issues) -> tuple[list[str], int]:
     if not issues:
         return [], 0
@@ -122,7 +198,7 @@ ONLY JSON {"items":[{"id":"...","corrected_ru":"..."}]}; exactly one item per in
         sid = str(row["id"])
         item = parsed.get(sid)
         candidate = v9._norm_text((item or {}).get("corrected_ru") or "")
-        if candidate:
+        if candidate and _candidate_clears_objective_issues(targets, translated, sid, candidate):
             translated[sid] = candidate
             changed.append(sid)
     return changed, 1
@@ -143,6 +219,7 @@ def _quality_v9ag(harness, targets, translated, memory):
     residual2 = _objective_issues(targets, translated)
     changed3, calls3 = _strict_retry_batch(targets, translated, residual2)
     legal3 = v9af._deterministic_legal_fallback(targets, translated, _objective_issues(targets, translated))
+    register3 = _deterministic_register_fallback(targets, translated, _objective_issues(targets, translated))
 
     name_postfixes = v9ab._apply_name_canon(targets, translated, memory)
     for segment in targets:
@@ -155,7 +232,7 @@ def _quality_v9ag(harness, targets, translated, memory):
     critical, major = v9s._publish_final_state(targets, final_map, final_scores)
     counts = Counter(row.get("severity") for rows in final_map.values() for row in rows)
 
-    changed_all = sorted(set(changed1 + changed2 + changed3 + legal1 + legal2 + legal3))
+    changed_all = sorted(set(changed1 + changed2 + changed3 + legal1 + legal2 + legal3 + register3))
     stats.update({
         "quality_mode": "v9ad-sparse-deepseek+v9ag-validated-source-sanitizer",
         "source_grounded_sanitizer": True,
@@ -167,6 +244,7 @@ def _quality_v9ag(harness, targets, translated, memory):
         "sanitizer_changed_ids": changed_all,
         "sanitizer_gigachat_calls": calls1 + calls2 + calls3,
         "sanitizer_legal_fallback_ids": sorted(set(legal1 + legal2 + legal3)),
+        "sanitizer_register_fallback_ids": sorted(set(register3)),
         "sanitizer_name_postfixes": name_postfixes,
         "giga_analyst_usage": dict(v9ab._GIGA_ANALYST_USAGE),
         "final_deterministic": det_final,
