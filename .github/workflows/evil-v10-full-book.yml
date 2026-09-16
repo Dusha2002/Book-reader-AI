@@ -1,0 +1,167 @@
+name: evil-v10-full-book
+
+on:
+  push:
+    branches: [v10-production-candidate]
+    paths:
+      - .github/workflows/evil-v10-full-book.yml
+      - scripts/evil_v10_full_book.py
+  workflow_dispatch:
+
+concurrency:
+  group: bookai-evil-v10-full-book
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      BOOKAI_BASE_URL: https://api.deepseek.com
+      BOOKAI_GATE_MODEL: deepseek-flash
+      BOOKAI_REASONING: none
+      BOOKAI_RETRY_ATTEMPTS: '5'
+      BOOKAI_REQUEST_TIMEOUT: '90'
+      GIGACHAT_AUTH_KEY: ${{ secrets.GIGACHAT_AUTH_KEY }}
+      GIGACHAT_SCOPE: GIGACHAT_API_PERS
+      GIGACHAT_BASE_URL: https://api.giga.chat/v1
+      BOOKAI_GIGACHAT_MODEL: GigaChat-3-Lightning
+      BOOKAI_GIGACHAT_BATCH_SEGMENTS: '8'
+      BOOKAI_GIGACHAT_BATCH_CHARS: '6500'
+      BOOKAI_GIGACHAT_MAX_TOKENS: '6000'
+      BOOKAI_GIGACHAT_TIMEOUT: '75'
+      BOOKAI_GIGACHAT_RETRIES: '3'
+      BOOKAI_V10_GIGA_RATE_ATTEMPTS: '7'
+      BOOKAI_V10_GIGA_RATE_BACKOFF: '1.8'
+      BOOKAI_V10_GIGA_RATE_MAX_SLEEP: '15'
+      BOOKAI_V10_GIGA_MIN_INTERVAL: '0.7'
+      BOOKAI_V10_NAME_MAX: '96'
+      BOOKAI_V10_NAME_BATCH: '20'
+      BOOKAI_V10_TERM_BATCH: '16'
+      BOOKAI_V10_DEEP_MAX: '12'
+      BOOKAI_V10_RELEASE_DEEP_MAX: '24'
+      BOOKAI_V10_RESIDUAL_DEEP_MAX: '32'
+      BOOKAI_V10_EDITORIAL_MAX: '10'
+      BOOKAI_V10_RECOVERY_BATCH: '4'
+      BOOKAI_V10_JSON_RECOVERY_BATCH: '3'
+      BOOKAI_SOURCE: Evil for evil.fb2
+      BOOKAI_MEMORY_SOURCE: Evil for evil.fb2
+      BOOKAI_V10_FULL_OUTPUT: Evil_for_Evil_RU_V10_FULL.fb2
+      BOOKAI_V10_FULL_REPORT: v10-evil-full-book-report.json
+      BOOKAI_V10_FULL_PROVENANCE: v10-evil-full-book-provenance.json
+      BOOKAI_V10_FULL_PROGRESS: v10-evil-full-book-progress.json
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install and verify hardened v10
+        run: |
+          set -euo pipefail
+          pip install -e '.[dev]' gigachat
+          python -m compileall -q src/bookai scripts/evil_v10_production_chapter.py scripts/evil_v10_full_book.py scripts/chapter_translation_v10_release9.py
+          pytest -q \
+            tests/test_v10_architecture.py \
+            tests/test_v10_source_only.py \
+            tests/test_v10_integrity_quantity.py \
+            tests/test_v10_clause_fidelity.py \
+            tests/test_v10_deepseek_routing.py \
+            tests/test_v10_release_hardening.py \
+            tests/test_v10_general_release.py \
+            tests/test_v10_semantic_profile.py \
+            tests/test_v10_technical_notation.py \
+            tests/test_v10_semantic_hardening.py
+
+      - name: Verify source and APIs
+        run: |
+          set -euo pipefail
+          test -s "Evil for evil.fb2"
+          test -n "${GIGACHAT_AUTH_KEY:-}"
+          test -n "${DEEPSEEK_API_KEY:-}"
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          p=Path('Evil for evil.fb2')
+          print('[v10-full-source] bytes=', p.stat().st_size, 'sha256=', hashlib.sha256(p.read_bytes()).hexdigest())
+          PY
+
+      - name: Restore resumable v10 checkpoints
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .bookai-v10-full-*
+          key: bookai-evil-v10-h4-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            bookai-evil-v10-h4-
+
+      - name: Translate complete Evil for Evil with hardened v10
+        run: |
+          set -euo pipefail
+          echo '[v10-full] ===== START FULL EVIL FOR EVIL ====='
+          timeout --signal=TERM --kill-after=60s 285m \
+            python scripts/evil_v10_full_book.py 2>&1 | tee v10-full-book.log
+          echo '[v10-full] ===== DONE FULL EVIL FOR EVIL ====='
+
+      - name: Save resumable v10 checkpoints
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .bookai-v10-full-*
+          key: bookai-evil-v10-h4-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Validate complete v10 reading build
+        if: success()
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          r=json.loads(Path('v10-evil-full-book-report.json').read_text('utf-8'))
+          assert r['reading_build_complete'] is True, r
+          assert r['chapters_completed'] == r['chapters_total'] == 31, (r['chapters_completed'], r['chapters_total'])
+          assert r['segments_merged'] == r['segments_total'] == 4767, (r['segments_merged'], r['segments_total'])
+          assert r['final_hard_total'] == 0, r['final_hard_total']
+          assert r['final_integrity_total'] == 0, r['final_integrity_total']
+          out=Path(r['output'])
+          assert out.exists() and out.stat().st_size > 10000
+          print('[v10-full-release-ok]', {'chapters':r['chapters_total'], 'segments':r['segments_total'], 'bytes':out.stat().st_size, 'elapsed':r['elapsed_seconds']})
+          PY
+
+      - name: Upload complete hardened-v10 book
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Evil_for_Evil_RU_V10_FULL
+          path: |
+            Evil_for_Evil_RU_V10_FULL.fb2
+            v10-evil-full-book-report.json
+            v10-evil-full-book-provenance.json
+            v10-evil-full-book-progress.json
+            v10-full-book.log
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload v10 full-book diagnostics
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Evil_for_Evil_v10_full_diagnostics
+          path: |
+            v10-evil-full-book-report.json
+            v10-evil-full-book-provenance.json
+            v10-evil-full-book-progress.json
+            v10-full-book.log
+            .bookai-v10-full-*/chapters/*/report.json
+            .bookai-v10-full-*/chapters/*/map.json
+          if-no-files-found: ignore
+          include-hidden-files: true
+          retention-days: 3
