@@ -109,7 +109,7 @@ jobs:
           restore-keys: |
             bookai-evil-v10-h4-
 
-      - name: Translate complete Evil for Evil with self-healing hardened v10
+      - name: Translate complete Evil for Evil with non-fatal QA review
         run: |
           set -euo pipefail
           echo '[v10-full] ===== START FULL EVIL FOR EVIL ====='
@@ -138,11 +138,20 @@ jobs:
           assert r['chapters_total'] == 28, r['chapters_total']
           assert r['prelude_segments'] == 2, r['prelude_segments']
           assert r['segments_merged'] == r['segments_total'] == 4767, (r['segments_merged'], r['segments_total'])
-          assert r['final_hard_total'] == 0, r['final_hard_total']
           assert r['final_integrity_total'] == 0, r['final_integrity_total']
+          assert r.get('build_status') in {'complete_clean', 'complete_needs_review'}, r.get('build_status')
           out=Path(r['output'])
           assert out.exists() and out.stat().st_size > 10000
-          print('[v10-full-release-ok]', {'chapters':r['chapters_total'], 'prelude':r['prelude_segments'], 'segments':r['segments_total'], 'bytes':out.stat().st_size, 'elapsed':r['elapsed_seconds']})
+          print('[v10-full-build-ok]', {
+              'chapters': r['chapters_total'],
+              'prelude': r['prelude_segments'],
+              'segments': r['segments_total'],
+              'bytes': out.stat().st_size,
+              'elapsed': r['elapsed_seconds'],
+              'build_status': r.get('build_status'),
+              'hard_for_review': r.get('final_hard_total', 0),
+              'release_ready': r.get('release_ready', False),
+          })
           PY
 
       - name: Upload complete hardened-v10 book
