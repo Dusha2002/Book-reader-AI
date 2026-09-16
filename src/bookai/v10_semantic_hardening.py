@@ -89,7 +89,9 @@ def source_has_cross_clause_repeat(source: str) -> bool:
 
     v10 previously exempted only repetitions inside one sentence, so a legitimate
     repeated phrase such as `pitched battle` in two neighbouring clauses was falsely
-    classified as target hallucination.
+    classified as target hallucination. A repeated three-token predicate may contain
+    one pronoun/determiner (for example `lifted its head`), so require two content
+    words for trigrams while keeping bigrams strict.
     """
     words = [w.casefold() for w in re.findall(r"[A-Za-z][A-Za-z'-]*", str(source or ""))]
     if len(words) < 8:
@@ -99,7 +101,8 @@ def source_has_cross_clause_repeat(source: str) -> bool:
         for i in range(len(words) - n + 1):
             gram = tuple(words[i:i + n])
             content = [w for w in gram if w not in _EN_STOP and len(w) >= 4]
-            if len(content) < n:
+            required_content = 2 if n == 3 else n
+            if len(content) < required_content:
                 continue
             if len(" ".join(gram)) < 10:
                 continue
@@ -147,7 +150,6 @@ def actor_polarity_issues(segment: Segment, target: str) -> list[V10Issue]:
     neg_actor_hits = list(re.finditer(neg_actor_re, low, re.I))
     pos_actor_hits = list(re.finditer(pos_actor_re, low, re.I))
 
-    # A faithful contrast normally keeps the explicitly contrasted actors visible.
     if not neg_actor_hits or not pos_actor_hits:
         return [V10Issue(
             segment.id,
