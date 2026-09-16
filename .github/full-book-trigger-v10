@@ -1,6 +1,8 @@
-trigger=v10-full-book-2026-09-16-release-guard-hardened
+trigger=v10-full-book-2026-09-16-duplicate-predicate-guard
 source_sha256=1b9b0dcc93835d328ab934bdcd7d7a84bae05d40788fc33cf94f6c1242a816bf
 expected_segments=4767
 expected_numeric_chapters=28
 prelude_segments=2
-reason=explicit full-book production run after chapter-4 QA false-positive regressions passed
+qa_fix_commit=78dfe2e9ba907bbfadc67e1bcfa5dfda37495cb3
+regression_commit=d32282e260ae14d96c684c6a2e4779366f7bad13
+reason=explicit full-book production restart after s000598 source-grounded repeated predicate regression passed
